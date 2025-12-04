@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp 
+    xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+    xsi:type="MailApp">
+
+  <!-- Unique Add-in ID (do not change once deployed) -->
+  <Id>f0a9e2f9-1234-4c81-8e76-123456789000</Id>
+
+  <!-- Increment when publishing updates -->
+  <Version>1.0.0.0</Version>
+
+  <!-- Company -->
+  <ProviderName>Cardbyte</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+
+  <!-- UI name -->
+  <DisplayName DefaultValue="Cardbyte Signature Manager"/>
+  <Description DefaultValue="Centralized Outlook email signature management by Cardbyte"/>
+
+  <Hosts>
+    <Host Name="Mailbox"/>
+  </Hosts>
+
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="Mailbox"/>
+    </Sets>
+  </Requirements>
+
+  <FormSettings>
+    <Form xsi:type="ItemRead">
+      <DesktopSettings>
+        <!-- Production URL -->
+        <SourceLocation DefaultValue="https://enterprise.cardbyt.ai/taskpane.html"/>
+      </DesktopSettings>
+    </Form>
+  </FormSettings>
+
+  <!-- Permissions needed to update email body -->
+  <Permissions>ReadWriteItem</Permissions>
+
+</OfficeApp>

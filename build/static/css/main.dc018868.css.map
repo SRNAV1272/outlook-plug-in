@@ -1,0 +1,1 @@
+{"version":3,"file":"static/css/main.dc018868.css","mappings":"AAAA,KAAK,iBAAkB,CAAE,MAAqC,eAAc,CAAhC,iBAAiB,CAA9B,YAA8C,CAAE,OAAO,UAAU","sources":["styles.css"],"sourcesContent":["body{font-family:Arial;} .card{padding:15px;border-radius:8px;background:#fff} button{margin:6px}"],"names":[],"ignoreList":[],"sourceRoot":""}

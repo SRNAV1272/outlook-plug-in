@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:type="MailApp">
+
+  <Id>f0a9e2f9-1234-4c81-8e76-123456789000</Id>
+  <Version>1.0.0.1</Version>
+
+  <ProviderName>Cardbyte</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+
+  <DisplayName DefaultValue="Cardbyte Signature Manager"/>
+  <Description DefaultValue="Email signature manager"/>
+
+  <Hosts>
+    <Host Name="Mailbox"/>
+  </Hosts>
+
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="Mailbox"/>
+    </Sets>
+  </Requirements>
+
+  <!-- ✅ REQUIRED ICONS (VALID IMAGES) -->
+  <IconUrl DefaultValue="https://wallpapercave.com/dwp2x/wp2465923.jpg"/>
+  <HighResolutionIconUrl DefaultValue="https://wallpapercave.com/dwp2x/wp2465923.jpg"/>
+  <SupportUrl DefaultValue="https://wallpapercave.com"/>
+
+  <FormSettings>
+    <Form xsi:type="ItemRead">
+      <DesktopSettings>
+        <SourceLocation DefaultValue="https://localhost:3001/taskpane.html"/>
+      </DesktopSettings>
+    </Form>
+  </FormSettings>
+
+  <Permissions>ReadWriteItem</Permissions>
+
+</OfficeApp>
