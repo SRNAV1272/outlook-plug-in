@@ -11,7 +11,8 @@
 # production
 # /build
 /utils
-
+/add-in-manifest
+/build
 # misc
 .DS_Store
 .env.local

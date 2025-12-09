@@ -76,7 +76,7 @@ export default function App() {
       await loadSignature();
     } catch (e) {
       console.warn("SSO failed, switching to login", e);
-      setMode("login");
+      setMode("ready");
       setLoading(false);
     }
   }

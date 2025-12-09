@@ -3,35 +3,47 @@
   xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xsi:type="MailApp">
-
   <Id>f0a9e2f9-1234-4c81-8e76-123456789000</Id>
-  <Version>1.0.0.1</Version>
-
+  <Version>1.0.0.3</Version>
   <ProviderName>Cardbyte</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
-
-  <DisplayName DefaultValue="Cardbyte Signature Manager"/>
-  <Description DefaultValue="Email signature manager"/>
+  <DisplayName DefaultValue="Cardbyte Signature Manager" />
+  <Description DefaultValue="Email signature manager" />
+  <IconUrl DefaultValue="https://navajna.com/assets/logo-CF_pjoxr.png" />
+  <HighResolutionIconUrl DefaultValue="https://navajna.com/assets/logo-CF_pjoxr.png" />
+  <SupportUrl DefaultValue="https://cardbyte.ai" />
+  <PrivacyUrl DefaultValue="https://cardbyte.ai/privacy" />
 
   <Hosts>
-    <Host Name="Mailbox"/>
+    <Host Name="Mailbox" />
   </Hosts>
 
   <Requirements>
     <Sets DefaultMinVersion="1.1">
-      <Set Name="Mailbox"/>
+      <Set Name="Mailbox" />
     </Sets>
   </Requirements>
 
-  <!-- ✅ REQUIRED ICONS (VALID IMAGES) -->
-  <IconUrl DefaultValue="https://wallpapercave.com/dwp2x/wp2465923.jpg"/>
-  <HighResolutionIconUrl DefaultValue="https://wallpapercave.com/dwp2x/wp2465923.jpg"/>
-  <SupportUrl DefaultValue="https://wallpapercave.com"/>
+  <AppDomains>
+    <AppDomain>srnav1272.github.io</AppDomain>
+  </AppDomains>
+
+  <!-- 🔥 Required Rule block -->
+  <Rule xsi:type="RuleCollection" Mode="Or">
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read" />
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Edit" />
+  </Rule>
 
   <FormSettings>
     <Form xsi:type="ItemRead">
       <DesktopSettings>
-        <SourceLocation DefaultValue="https://localhost:3001/taskpane.html"/>
+        <SourceLocation DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html" />
+      </DesktopSettings>
+    </Form>
+
+    <Form xsi:type="ItemEdit">
+      <DesktopSettings>
+        <SourceLocation DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html" />
       </DesktopSettings>
     </Form>
   </FormSettings>
