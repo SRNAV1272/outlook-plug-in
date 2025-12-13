@@ -1,47 +1,3 @@
-// import React, { useEffect, useState } from "react";
-// import { getOfficeToken, login, setToken, getToken } from "./services/authService";
-// import { fetchSignature } from "./services/apiClient";
-// import LoginForm from "./components/LoginForm";
-// import SignatureView from "./components/SignatureView";
-
-// export default function App() {
-//   const [mode, setMode] = useState("init");
-
-//   useEffect(() => { init(); }, []);
-
-//   async function init() {
-//     const token = getToken();
-//     if (token) return load();
-
-//     try {
-//       const office = await getOfficeToken();
-//       const exp = JSON.parse(atob(office.split('.')[1])).exp;
-//       setToken(office, exp, "aad");
-//       load();
-//     } catch {
-//       // setMode("ready");
-//       load()
-//     }
-//   }
-
-//   async function load() {
-//     setMode("ready");
-//   }
-
-//   function apply(html) {
-//     console.log("APPLY SIGNATURE:", html);
-//     Office.context.mailbox.item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html });
-//   }
-
-//   async function handleLogin(f) {
-//     await login(f.username, f.password);
-//     load();
-//   }
-//   console.log("MODE:", mode);
-//   if (mode === "login") return <LoginForm onLogin={handleLogin} />;
-//   if (mode === "ready") return <SignatureView apply={apply} refresh={load} />;
-//   return <div>Loading...</div>;
-// }
 import React, { useEffect, useState } from "react";
 import { getOfficeToken, login, setToken, getToken } from "./services/authService";
 import { fetchSignature } from "./services/apiClient";
@@ -49,9 +5,8 @@ import LoginForm from "./components/LoginForm";
 import SignatureView from "./components/SignatureView";
 
 export default function App() {
-
-  const [mode, setMode] = useState("init");   // init | login | ready
-  const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState("init"); // init | login | ready
+  const [loading, setLoading] = useState(false);
   const [signature, setSignature] = useState("");
   const [error, setError] = useState("");
 
@@ -63,20 +18,22 @@ export default function App() {
     setLoading(true);
     setError("");
 
+    // 1️⃣ Check cached token
     const cached = getToken();
     if (cached) {
       await loadSignature();
       return;
     }
 
+    // 2️⃣ Try Office SSO (ONLY if available)
     try {
       const token = await getOfficeToken();
       const payload = decodeJwt(token);
       setToken(token, payload.exp, "aad");
       await loadSignature();
     } catch (e) {
-      console.warn("SSO failed, switching to login", e);
-      setMode("ready");
+      console.warn("SSO unavailable or failed → login fallback", e);
+      setMode("login");
       setLoading(false);
     }
   }
@@ -84,13 +41,13 @@ export default function App() {
   async function loadSignature() {
     try {
       setLoading(true);
-      // const data = await fetchSignature();
-      // setSignature(data.html);
+      const data = await fetchSignature(); // MUST return { html }
+      setSignature(data.html);
       setMode("ready");
     } catch (e) {
-      console.error("Failed to load signature", e);
-      setError(e.message || "Failed to load signature");
-      setMode("ready");
+      console.error("Signature load failed", e);
+      setError("Unable to load signature");
+      setMode("login");
     } finally {
       setLoading(false);
     }
@@ -101,15 +58,15 @@ export default function App() {
       setLoading(true);
       await login(form.username, form.password);
       await loadSignature();
-    } catch (e) {
+    } catch {
       setError("Invalid username or password");
-      setMode("ready");
+      setMode("login");
     } finally {
       setLoading(false);
     }
   }
 
-  function applySignature(signature) {
+  function applySignature() {
     if (!signature) return;
 
     Office.context.mailbox.item.body.setSignatureAsync(
@@ -117,8 +74,8 @@ export default function App() {
       { coercionType: Office.CoercionType.Html },
       (result) => {
         if (result.status === Office.AsyncResultStatus.Failed) {
-          console.error("Failed to apply signature:", result.error);
-          alert("Failed to apply signature: " + result.error.message);
+          console.error(result.error);
+          alert(result.error.message);
         }
       }
     );
@@ -140,10 +97,9 @@ export default function App() {
     );
   }
 
-  return <div>Initializing add-in...</div>;
+  return <div>Initializing add-in…</div>;
 }
 
-// ✅ JWT decode helper
 function decodeJwt(token) {
   const base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
   return JSON.parse(atob(base64));
