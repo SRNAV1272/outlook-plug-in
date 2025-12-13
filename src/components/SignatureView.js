@@ -15,7 +15,7 @@ import EmailSVG from "./SignatureComponents/Assets/SvgComponents/EmailSVG";
 import PhoneSVG from "./SignatureComponents/Assets/SvgComponents/PhoneSVG";
 import MobileSVG from "./SignatureComponents/Assets/SvgComponents/MobileSVG";
 import LocationSVG from "./SignatureComponents/Assets/SvgComponents/LocationSVG";
-import { IconAvatar } from "./SignatureComponents/IconAvatar";
+import { generateEmailSignatureHTML, IconAvatar } from "./SignatureComponents/IconAvatar";
 import { card, form } from "../data";
 
 const ImagesUsedPreview = ({ data, handleImageClick, noQRCodeLogo = null, DefaultQrCodeLogo = null, shortLink }) => {
@@ -308,7 +308,7 @@ export const PreviewText = ({
     );
 };
 
-export default function SignatureView({ showPreview, setShowPreview, showSocialMediaIcons = true, showScheduler = true, showStack = false, Card = null, shortLink = "" }) {
+export default function SignatureView({ showPreview, apply, showSocialMediaIcons = true, shortLink = "" }) {
     const containerRef = useRef(null);
     const stageRef = useRef(null);
     // const card = card;
@@ -605,6 +605,47 @@ export default function SignatureView({ showPreview, setShowPreview, showSocialM
     };
 
     const { w, h, x, y } = getScaledSize();
+
+
+    const applyHTML = async () => {
+        if (!stageRef.current) return;
+
+        const data = updateFieldsFromCard(card)(allFields);
+
+        // ------ 6️⃣ COPY HTML AS EMAIL SIGNATURE (MIME CLIPBOARD) ------
+
+        try {
+            const freshLink = `${"https://cardbyteqasg.blob.core.windows.net/cardbyte-email-signature/5badb545-d26c-4c83-aee2-a49070be7792.png"}?v=${Date.now()}`
+
+            const freshLinkForBanner = `https://cardbyteqasg.blob.core.windows.net/cardbyte-email-signature/Banner-CB-ORG-1106202526817349-93132?v=${Date.now()}`
+
+            const html = generateEmailSignatureHTML(
+                freshLink,
+                data,
+                freshLinkForBanner
+            );
+            // const type = "text/html";
+            // const blob = new Blob([html], { type });
+            // // eslint-disable-next-line no-undef
+            // const clipboardItem = new ClipboardItem({
+            //     [type]: blob,
+            //     "text/plain": new Blob([html], { type: "text/plain" })
+            // });
+            // await navigator.clipboard.write([clipboardItem]);
+            apply(html)
+            console.log("sdjasdkjahsdkjhsa", html)
+            toast?.success("Signature copied! Now paste directly into Gmail/Outlook.");
+
+        } catch (error) {
+            toast.error(error?.response?.data?.message || error.message || "Failed to save email signature, please try again later.")
+            console.error("Error while saving email signature:", error);
+        } finally {
+            // setShow(false)
+        }
+
+        // ------ 6️⃣ DOWNLOAD ------
+        // downloadHTMLFile(html);
+    }
 
     return (
         <Grid container>
@@ -923,7 +964,7 @@ export default function SignatureView({ showPreview, setShowPreview, showSocialM
                         direction="row" spacing={1} justifyContent={'end'} width={'100%'}
                     >
                         <Button
-                            onClick={() => setShowPreview(false)}
+                            onClick={() => applyHTML()}
                             variant="outlined"
                             size="small"
                             sx={{
@@ -945,7 +986,7 @@ export default function SignatureView({ showPreview, setShowPreview, showSocialM
                                 },
                             }}
                         >
-                            Close
+                            Apply
                         </Button>
                     </Stack>
                 </Paper>

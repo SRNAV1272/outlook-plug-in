@@ -1,5 +1,4 @@
 import React from "react";
-// import { getHeight, getWidth } from "./validations";
 
 export const getWidth = (size, w, h) => w > h ? size : size * w / h;
 export const getHeight = (size, w, h) => h > w ? size : size * h / w;
@@ -52,4 +51,197 @@ export function IconAvatar(
             }
         </>
     )
+}
+
+export function generateEmailSignatureHTML(dataURL, allFields = {}, freshLinkForBanner) {
+    if (!dataURL) return "";
+
+    // -------- 1️⃣ Extract useful fields -------- //
+    const disclaimerField = allFields.find(f => f.key === "disclaimer" && f.show);
+    const bannerField = freshLinkForBanner;
+    const normalLinks = allFields
+        ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
+        ?.filter(i => !["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
+        ?.filter(i => i?.show)
+
+    const buttonLinks = allFields
+        ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
+        ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
+        ?.filter(i => i?.show)
+    // -------- 2️⃣ Collect Social Icons -------- //
+
+    const socialIconsHTML = normalLinks.length
+        ? `
+        <tr>
+            <td colspan="2" style="padding-top: 8px;">
+                ${normalLinks
+            .map(
+                s => `
+                        <a href="${s?.link}" target="_blank" style="margin-right: 6px; text-decoration: none;">
+                            <img src="${s.value}" width="30" height="30" style="display:inline-block; border:0;" />
+                        </a>
+                    `
+            )
+            .join("")}
+            </td>
+        </tr>`
+        : "";
+
+    // -------- 3️⃣ Optional Banner -------- //
+    // const bannerHTML = !!bannerField
+    //     ? `
+    //         <tr>
+    //             <td colspan="2" width="100%" style="padding-top:12px; text-align:center;">
+    //                 <div style="
+    //                     width:100%;
+    //                     max-width:400px;
+    //                     height:140px;        /* ✅ controls aspect ratio */
+    //                     margin:auto;
+    //                     overflow:hidden;
+    //                 ">
+    //                     <img 
+    //                         src="${bannerField}"
+    //                         alt=""
+    //                         style="
+    //                             width:100%;
+    //                             height:100%;
+    //                             object-fit:contain;
+    //                             display:block;
+    //                             margin:auto;
+    //                         "
+    //                     />
+    //                 </div>
+    //             </td>
+    //         </tr>
+    //     `
+    //     : "";
+    const bannerHTML =
+        typeof bannerField === "string" && bannerField.trim()
+            ? `
+            <tr>
+                <td colspan="2" width="100%" style="padding-top:12px; text-align:center;">
+                    <div style="
+                        width:100%;
+                        max-width:400px;
+                        height:140px;        /* ✅ controls aspect ratio */
+                        margin:auto;
+                        overflow:hidden;
+                    ">
+                        <img 
+                            src="${bannerField}"
+                            alt=""
+                            style="
+                                width:100%;
+                                height:100%;
+                                object-fit:contain;
+                                display:block;
+                                margin:auto;
+                            "
+                        />
+                    </div>
+                </td>
+            </tr>
+        `
+            : "";
+
+
+    // -------- 3️⃣ Optional emailSchduler -------- //
+
+    const chunked = [];
+    for (let i = 0; i < buttonLinks.length; i += 2) {
+        chunked.push(buttonLinks.slice(i, i + 2));
+    }
+
+    const emailSchedulerC = chunked
+        .map(
+            row => `
+      <tr>
+        <td colspan="2" style="padding-top: 12px; white-space:nowrap;">
+          ${row
+                    .map(
+                        link => `
+                <a 
+                  href="${link?.link}" 
+                  target="_blank"
+                  style="
+                    background:#fff;
+                    padding:10px 20px;
+                    border-radius:20px;
+                    border:1px solid #000;
+                    color:#000;
+                    font-family:Arial, sans-serif;
+                    font-size:14px;
+                    font-weight:500;
+                    text-decoration:none;
+                    display:inline-flex;
+                    align-items:center;
+                    justify-content:center;
+                    column-gap:6px;
+                    margin-right:10px;
+                  "
+                >
+                  ${link?.value
+                                ? `<img src="${link?.value}" width="16" style="vertical-align:middle; margin-right:6px;" />`
+                                : ""
+                            }
+                  ${link?.label || link?.name || "Click"}
+                </a>
+              `
+                    )
+                    .join("")}
+        </td>
+      </tr>
+    `
+        )
+        .join("");
+
+
+    // -------- 4️⃣ Optional Disclaimer -------- //
+    const disclaimerHTML = disclaimerField
+        ? `
+        <tr>
+        <td colspan="3" style="padding-top:12px;">
+            <div
+            style="
+                font-size:11px;
+                color:#666;
+                line-height:1.45;
+                font-family:'Plus Jakarta Display', Arial, sans-serif;
+                white-space:normal;
+                word-break:break-word;
+                max-width: 100%;
+                display:block;
+            "
+            >
+            ${disclaimerField.value.replace(/\n/g, "<br/>")}
+            </div>
+        </td>
+        </tr>`
+        : "";
+
+
+    // -------- 5️⃣ Build Final Signature HTML -------- //
+    const html = `
+<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial, sans-serif; max-width:600px;">
+    
+    <!-- Signature Image -->
+    <tr>
+        <td colspan="2">
+            <img src="${dataURL}" alt="Signature" style="display:block; max-width:400px; height:auto; border:1px solid #ccc;border-radius:10px" />
+        </td>
+    </tr>
+
+    <!-- Social Icons -->
+    ${socialIconsHTML}
+    
+    ${emailSchedulerC}
+    ${bannerHTML}
+    <!-- Disclaimer -->
+    ${disclaimerHTML}
+
+    <!-- Disclaimer -->
+</table>
+`.trim();
+
+    return html;
 }

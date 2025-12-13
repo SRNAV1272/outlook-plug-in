@@ -107,7 +107,6 @@ export default function App() {
   if (mode === "ready") {
     return (
       <SignatureView
-        // html={signature}
         apply={applySignature}
         refresh={loadSignature}
         loading={loading}
