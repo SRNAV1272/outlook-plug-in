@@ -33,7 +33,7 @@ export default function App() {
       await loadSignature();
     } catch (e) {
       console.warn("SSO unavailable or failed → login fallback", e);
-      setMode("login");
+      setMode("ready");
       setLoading(false);
     }
   }
@@ -47,7 +47,7 @@ export default function App() {
     } catch (e) {
       console.error("Signature load failed", e);
       setError("Unable to load signature");
-      setMode("login");
+      setMode("ready");
     } finally {
       setLoading(false);
     }
@@ -60,7 +60,7 @@ export default function App() {
       await loadSignature();
     } catch {
       setError("Invalid username or password");
-      setMode("login");
+      setMode("ready");
     } finally {
       setLoading(false);
     }
