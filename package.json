@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "homepage": "https://srnav1272.github.io/outlook-plug-in",
+
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
@@ -17,14 +18,16 @@
     "react-toastify": "^11.0.5",
     "use-image": "^1.1.4"
   },
+
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject",
     "predeploy": "npm run build",
-    "deploy": "gh-pages -d build"
+    "deploy": "gh-pages -d build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
   },
+
   "browserslist": {
     "production": [
       ">0.2%",
@@ -37,6 +40,7 @@
       "last 1 edge version"
     ]
   },
+
   "devDependencies": {
     "gh-pages": "^6.3.0"
   }
