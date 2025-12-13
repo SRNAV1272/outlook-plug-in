@@ -7,7 +7,6 @@ import SignatureView from "./components/SignatureView";
 export default function App() {
   const [mode, setMode] = useState("init"); // init | login | ready
   const [loading, setLoading] = useState(false);
-  const [signature, setSignature] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -41,8 +40,8 @@ export default function App() {
   async function loadSignature() {
     try {
       setLoading(true);
-      const data = await fetchSignature(); // MUST return { html }
-      setSignature(data.html);
+      // const data = await fetchSignature(); // MUST return { html }
+      // setSignature(data.html);
       setMode("ready");
     } catch (e) {
       console.error("Signature load failed", e);
@@ -66,7 +65,7 @@ export default function App() {
     }
   }
 
-  function applySignature() {
+  function applySignature(signature) {
     if (!signature) return;
 
     Office.context.mailbox.item.body.setSignatureAsync(
@@ -88,7 +87,7 @@ export default function App() {
   if (mode === "ready") {
     return (
       <SignatureView
-        html={signature}
+        // html={signature}
         apply={applySignature}
         refresh={loadSignature}
         loading={loading}
