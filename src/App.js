@@ -31,6 +31,7 @@ export default function App() {
       const token = await getOfficeToken();
       const payload = decodeJwt(token);
       setToken(token, payload.exp, "aad");
+      console.log("sdkjahdskjashdkjasd", token, payload)
       await loadSignature();
     } catch (e) {
       console.warn("SSO unavailable or failed → login fallback", e);
