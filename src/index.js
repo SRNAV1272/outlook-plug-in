@@ -9,12 +9,11 @@ const render = () => {
   root.render(<App />);
 };
 
-// 🔹 If running inside Outlook
+// Outlook Add-in
 if (typeof Office !== "undefined") {
   Office.onReady(() => {
     render();
   });
 } else {
-  // 🔹 Normal browser (localhost, preview, dev)
   render();
 }
