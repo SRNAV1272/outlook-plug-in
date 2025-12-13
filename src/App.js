@@ -68,16 +68,34 @@ export default function App() {
   function applySignature(signature) {
     if (!signature) return;
 
-    Office.context.mailbox.item.body.setSignatureAsync(
-      signature,
-      { coercionType: Office.CoercionType.Html },
-      (result) => {
-        if (result.status === Office.AsyncResultStatus.Failed) {
-          console.error(result.error);
-          alert(result.error.message);
-        }
+    // ✅ Ensure Office.js is available
+    if (typeof Office === "undefined") {
+      console.error("Office.js not available");
+      return;
+    }
+
+    Office.onReady(() => {
+      const item = Office.context?.mailbox?.item;
+
+      // ✅ Must be in compose mode
+      if (!item || !item.body) {
+        console.error("Not in compose mode");
+        return;
       }
-    );
+
+      item.body.setSignatureAsync(
+        signature,
+        { coercionType: Office.CoercionType.Html },
+        (result) => {
+          if (result.status === Office.AsyncResultStatus.Failed) {
+            console.error("Apply signature failed:", result.error);
+            alert(result.error.message);
+          } else {
+            console.log("Signature applied successfully");
+          }
+        }
+      );
+    });
   }
 
   if (mode === "login") {
