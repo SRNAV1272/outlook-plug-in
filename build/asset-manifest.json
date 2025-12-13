@@ -1,13 +1,13 @@
 {
   "files": {
     "main.css": "/outlook-plug-in/static/css/main.dc018868.css",
-    "main.js": "/outlook-plug-in/static/js/main.d0aee46c.js",
+    "main.js": "/outlook-plug-in/static/js/main.b4ce5fc3.js",
     "index.html": "/outlook-plug-in/index.html",
     "main.dc018868.css.map": "/outlook-plug-in/static/css/main.dc018868.css.map",
-    "main.d0aee46c.js.map": "/outlook-plug-in/static/js/main.d0aee46c.js.map"
+    "main.b4ce5fc3.js.map": "/outlook-plug-in/static/js/main.b4ce5fc3.js.map"
   },
   "entrypoints": [
     "static/css/main.dc018868.css",
-    "static/js/main.d0aee46c.js"
+    "static/js/main.b4ce5fc3.js"
   ]
 }

@@ -1,3 +1,3 @@
 export default function App() {
-  return <div>Outlook Add-in taskpane update Loaded ✅</div>;
+  return <div>Outlook Add-in taskpane cra updated Loaded ✅</div>;
 }
