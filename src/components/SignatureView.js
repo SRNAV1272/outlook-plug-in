@@ -12,77 +12,77 @@ export default function SignatureView({ apply }) {
 
   // ✅ MUST be a STRING
   const signatureHTML = `
-<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial, sans-serif; max-width:600px;">
+      <table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial, sans-serif; max-width:600px;">
 
-  <tr>
-    <td colspan="2">
-      <img 
-        src="https://cardbyteqasg.blob.core.windows.net/cardbyte-email-signature/5badb545-d26c-4c83-aee2-a49070be7792.png?v=1765629834839"
-        alt="Signature"
-        width="400"
-        style="display:block;border:1px solid #ccc;border-radius:10px;"
-      />
-    </td>
-  </tr>
+        <tr>
+          <td colspan="2">
+            <img 
+              src="https://cardbyteqasg.blob.core.windows.net/cardbyte-email-signature/5badb545-d26c-4c83-aee2-a49070be7792.png?v=1765629834839"
+              alt="Signature"
+              width="400"
+              style="display:block;border:1px solid #ccc;border-radius:10px;"
+            />
+          </td>
+        </tr>
 
-  <tr>
-    <td colspan="2" style="padding-top:8px;">
-      <a href="https://www.instagram.com/___vive_k/" target="_blank">
-        <img src="https://cardbyteqasg.blob.core.windows.net/cardbyte-social-media-assets/instagram.png" width="30" style="border:0;margin-right:6px;" />
-      </a>
-      <a href="https://www.youtube.com/@cardbyte317" target="_blank">
-        <img src="https://cardbyteqasg.blob.core.windows.net/cardbyte-social-media-assets/youtube.png" width="30" style="border:0;" />
-      </a>
-    </td>
-  </tr>
+        <tr>
+          <td colspan="2" style="padding-top:8px;">
+            <a href="https://www.instagram.com/___vive_k/" target="_blank">
+              <img src="https://cardbyteqasg.blob.core.windows.net/cardbyte-social-media-assets/instagram.png" width="30" style="border:0;margin-right:6px;" />
+            </a>
+            <a href="https://www.youtube.com/@cardbyte317" target="_blank">
+              <img src="https://cardbyteqasg.blob.core.windows.net/cardbyte-social-media-assets/youtube.png" width="30" style="border:0;" />
+            </a>
+          </td>
+        </tr>
 
-  <tr>
-    <td colspan="2" style="padding-top: 12px; white-space:nowrap;">
-      <a 
-        href="https://calendly.com/johndoe/30min" 
-        target="_blank"
-        style="
-          background:#fff;
-          padding:10px 20px;
-          border-radius:20px;
-          border:1px solid #000;
-          color:#000;
-          font-family:Arial, sans-serif;
-          font-size:14px;
-          font-weight:500;
-          text-decoration:none;
-          display:inline-flex;
-          align-items:center;
-          justify-content:center;
-          column-gap:6px;
-          margin-right:10px;
-        "
-      >
-        <img src="https://cardbyteqasg.blob.core.windows.net/cardbyte-social-media-assets/calendly.png" width="16" style="vertical-align:middle; margin-right:6px;" />
-        Book A Meeting
-      </a> 
-      </td>
-  </tr>
+        <tr>
+          <td colspan="2" style="padding-top: 12px; white-space:nowrap;">
+            <a 
+              href="https://calendly.com/johndoe/30min" 
+              target="_blank"
+              style="
+                background:#fff;
+                padding:10px 20px;
+                border-radius:20px;
+                border:1px solid #000;
+                color:#000;
+                font-family:Arial, sans-serif;
+                font-size:14px;
+                font-weight:500;
+                text-decoration:none;
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                column-gap:6px;
+                margin-right:10px;
+              "
+            >
+              <img src="https://cardbyteqasg.blob.core.windows.net/cardbyte-social-media-assets/calendly.png" width="16" style="vertical-align:middle; margin-right:6px;" />
+              Book A Meeting
+            </a> 
+            </td>
+        </tr>
 
-  <tr>
-    <td colspan="2" style="padding-top:12px;">
-      <img
-        src="https://cardbyteqasg.blob.core.windows.net/cardbyte-email-signature/Banner-CB-ORG-1106202526817349-93132"
-        width="400"
-        style="display:block;border:0;"
-      />
-    </td>
-  </tr>
+        <tr>
+          <td colspan="2" style="padding-top:12px;">
+            <img
+              src="https://cardbyteqasg.blob.core.windows.net/cardbyte-email-signature/Banner-CB-ORG-1106202526817349-93132"
+              width="400"
+              style="display:block;border:0;"
+            />
+          </td>
+        </tr>
 
-  <tr>
-    <td colspan="2" style="padding-top:12px;font-size:11px;color:#666;line-height:1.4;">
-      This e-mail and any attachments https://enterprise.cardbyte.ai<br/>
-      are confidential. If you are not the intended recipient, please delete it immediately.
-    </td>
-  </tr>
+        <tr>
+          <td colspan="2" style="padding-top:12px;font-size:11px;color:#666;line-height:1.4;">
+            This e-mail and any attachments https://enterprise.cardbyte.ai<br/>
+            are confidential. If you are not the intended recipient, please delete it immediately.
+          </td>
+        </tr>
 
-</table>
-`;
+      </table>
+    `;
 
   return (
     <Grid
