@@ -2,6 +2,8 @@
   "files": {
     "main.css": "/outlook-plug-in/static/css/main.css",
     "main.js": "/outlook-plug-in/static/js/main.js",
+    "static/media/uploadbanner.png": "/outlook-plug-in/static/media/uploadbanner.png",
+    "static/media/qr_code_default_logo.png": "/outlook-plug-in/static/media/qr_code_default_logo.png",
     "index.html": "/outlook-plug-in/index.html",
     "main.css.map": "/outlook-plug-in/static/css/main.css.map",
     "main.js.map": "/outlook-plug-in/static/js/main.js.map"
