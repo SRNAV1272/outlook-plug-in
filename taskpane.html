@@ -7,45 +7,22 @@
   <!-- Office JS -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
-  <!-- MUI Font (REQUIRED) -->
+  <!-- MUI Font -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
     href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap"
     rel="stylesheet"
   />
+
+  <!-- CRA output -->
+  <link rel="stylesheet" href="./static/css/main.css" />
 </head>
 
 <body>
   <div id="root"></div>
 
-  <script>
-    Office.onReady(() => {
-      // Load CRA manifest to discover hashed JS/CSS files dynamically
-      fetch("/asset-manifest.json")
-        .then(res => res.json())
-        .then(files => {
-
-          // 1. Load CSS first (if present)
-          if (files.files["main.css"]) {
-            const css = document.createElement("link");
-            css.rel = "stylesheet";
-            css.href = files.files["main.css"];
-            document.head.appendChild(css);
-          }
-
-          // 2. Load compiled React bundle
-          const script = document.createElement("script");
-          script.src = files.files["main.js"];
-          script.defer = true;
-          document.body.appendChild(script);
-        })
-        .catch(err => {
-          document.body.innerHTML = "<h3>Failed to load React app</h3>";
-          console.error("Asset loading failed", err);
-        });
-    });
-  </script>
-
+  <!-- React bundle -->
+  <script src="./static/js/main.js"></script>
 </body>
 </html>
