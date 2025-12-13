@@ -656,10 +656,11 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                 }}
             >
                 <Paper
-                    elevation={0}
+                    // elevation={12}
+                    elevation={5}
                     sx={{
                         p: 1,
-                        borderRadius: "15px",
+                        borderRadius: 8,
                         width: "100%",
                         maxWidth: "800px",
                         margin: "0 auto",
@@ -670,7 +671,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                         // 🧠 Dynamically adapt Paper height to stage + extra padding
                         // minHeight: `${stageSize.height * scale.y + (show ? 80 : 40) + disclaimerHeight + bannerHeight}px`, // +40 for breathing room
                         justifyContent: "space-between",
-                        boxShadow: "0 2px 8px rgba(0,0,0,0.05)", // subtle shadow for card feel
+                        // boxShadow: "0 2px 8px rgba(0,0,0,0.05)", // subtle shadow for card feel
                         // backgroundColor: "#fafafa"
                     }}
                 >
@@ -682,7 +683,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                             sx={{
                                 width: "100%",
                                 maxWidth: 800,
-                                borderRadius: 2,
+                                borderRadius: 5,
                                 margin: "auto",
 
                                 // 🚫 no scrollbars, just clip anything extra
