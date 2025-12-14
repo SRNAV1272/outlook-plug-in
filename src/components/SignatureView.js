@@ -639,8 +639,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
         <Grid container>
             <Grid
                 size={{
-                    xs: 12,
-                    sm: 12,
+                    xs: 10
                 }}
             >
                 <Paper
@@ -672,8 +671,8 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                 width: "100%",
                                 maxWidth: 800,
                                 borderRadius: 5,
-                                margin: 0,
-                                p: 0,
+                                margin: "auto",
+
                                 // 🚫 no scrollbars, just clip anything extra
                                 overflow: "hidden",
                                 backgroundColor:
