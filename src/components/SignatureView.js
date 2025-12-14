@@ -308,7 +308,7 @@ export const PreviewText = ({
     );
 };
 
-export default function SignatureView({ showPreview, apply, showSocialMediaIcons = true, shortLink = "" }) {
+export default function SignatureView({ user, showPreview, apply, showSocialMediaIcons = true, shortLink = "" }) {
     const containerRef = useRef(null);
     const stageRef = useRef(null);
     // const card = card;
@@ -341,13 +341,11 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
     const bannerField = form?.elements?.find((f) => f.key === "banner" && f.show);
     const [bannerImage] = useImage(!!bannerField?.link ? bannerField?.link : bannerField?.value || "", "anonymous");
     const [bannerHeight, setBannerHeight] = useState(0);
-    const disclaimerField = form?.elements?.find(f => f.key === "disclaimer" && f.show);
     // Responsive scaling
     const [stageSize, setStageSize] = useState({ width: baseWidth, height: baseHeight });
     const [scale, setScale] = useState({ x: 1, y: 1 });
     const [allFields, setAllFields] = useState([...form?.elements]);
     const [show, setShow] = useState(true)
-    const [disclaimerHeight, setDisclaimerHeight] = useState(0)
     // Adjust stage height dynamically based on banner size
 
     const updateFieldsFromCard = (card) => (prevFields) => {
@@ -594,7 +592,6 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
 
     const { w, h, x, y } = getScaledSize();
 
-
     const applyHTML = async () => {
         if (!stageRef.current) return;
 
@@ -621,7 +618,6 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
             // });
             // await navigator.clipboard.write([clipboardItem]);
             apply(html)
-            console.log("sdjasdkjahsdkjhsa", html)
             toast?.success("Signature copied! Now paste directly into Gmail/Outlook.");
 
         } catch (error) {
@@ -634,9 +630,39 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
         // ------ 6️⃣ DOWNLOAD ------
         // downloadHTMLFile(html);
     }
-
+    console.log("sdajshdkashdkashdkas", user)
     return (
         <Grid container justifyContent={'center'} rowGap={2}>
+            <Grid
+                size={{
+                    xs: 11
+                }}
+            >
+                <Typography fontFamily="Plus Jakarta Sans">
+                    Welcome{" "}
+                    <span
+                        style={{
+                            color: "#0070C0",
+                            fontWeight: "bold",
+                            textDecoration: "underline",
+                        }}
+                    >
+                        {user?.displayName}
+                    </span>
+
+                    <br />
+
+                    <span
+                        style={{
+                            color: "#5f5858ff",
+                            // fontWeight: "bold",
+                            textDecoration: "underline",
+                        }}
+                    >
+                        {user?.emailAddress}
+                    </span>
+                </Typography>
+            </Grid>
             <Grid
                 size={{
                     xs: 11
@@ -926,7 +952,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                             <Box display={'flex'} width={stageSize.width} pt={1}>
                                 <Typography
                                     variant="body2"
-                                    fontFamily="Plus Jakarta Display"
+                                    fontFamily="Plus Jakarta Sans"
                                     fontSize={10}
                                     textAlign="start"
                                     textJustify="inter-word"
@@ -959,7 +985,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                 border: "1px solid #eeeeee",
                                 borderRadius: "13px",
                                 fontSize: "13px",
-                                fontFamily: "Plus Jakarta Display",
+                                fontFamily: "Plus Jakarta Sans",
                                 textTransform: "capitalize",
                                 // color: "#000",
                                 color: "#4A5056",
@@ -1264,7 +1290,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                             <Box display={'flex'} width={stageSize.width} pt={1}>
                                 <Typography
                                     variant="body2"
-                                    fontFamily="Plus Jakarta Display"
+                                    fontFamily="Plus Jakarta Sans"
                                     fontSize={10}
                                     textAlign="start"
                                     textJustify="inter-word"
@@ -1297,7 +1323,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                 border: "1px solid #eeeeee",
                                 borderRadius: "13px",
                                 fontSize: "13px",
-                                fontFamily: "Plus Jakarta Display",
+                                fontFamily: "Plus Jakarta Sans",
                                 textTransform: "capitalize",
                                 // color: "#000",
                                 color: "#4A5056",

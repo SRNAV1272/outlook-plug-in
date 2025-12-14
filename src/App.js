@@ -12,7 +12,7 @@ export default function App({ user }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    console.log("sdkjahdskjashdkjasd", user)
+    // console.log("sdkjahdskjashdkjasd", )
     init();
   }, []);
 
@@ -104,10 +104,11 @@ export default function App({ user }) {
   if (mode === "login") {
     return <LoginForm onLogin={handleLogin} loading={loading} error={error} />;
   }
-  console.log("sadjsahdkjsahd", mode)
+
   if (mode === "ready") {
     return (
       <SignatureView
+        user={user}
         apply={applySignature}
         refresh={loadSignature}
         loading={loading}
