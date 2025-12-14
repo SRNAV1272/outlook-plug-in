@@ -6,12 +6,13 @@ import LoginForm from "./components/LoginForm";
 import SignatureView from "./components/SignatureView";
 // import SignatureView from "./";
 
-export default function App() {
+export default function App({ user }) {
   const [mode, setMode] = useState("init"); // init | login | ready
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    console.log("sdkjahdskjashdkjasd", user)
     init();
   }, []);
 
@@ -31,7 +32,6 @@ export default function App() {
       const token = await getOfficeToken();
       const payload = decodeJwt(token);
       setToken(token, payload.exp, "aad");
-      console.log("sdkjahdskjashdkjasd", token, payload)
       await loadSignature();
     } catch (e) {
       console.warn("SSO unavailable or failed → login fallback", e);
