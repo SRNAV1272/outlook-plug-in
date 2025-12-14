@@ -499,37 +499,25 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
 
         const resizeObserver = new ResizeObserver(entries => {
             const width = entries[0].contentRect.width;
-
             if (!width) return;
 
             const stageWidth = Math.min(width, 800);
             const scaleRatio = stageWidth / baseWidth;
-
-            let bannerH = 0;
-
-            if (bannerImage) {
-                const ratio = bannerImage.height / bannerImage.width;
-                const bannerHeight = stageWidth * ratio;
-                const maxH = (300 / 780) * stageWidth;
-                bannerH = Math.min(bannerHeight, maxH);
-            }
-
-            setBannerHeight(show ? bannerH : 0);
-            setDisclaimerHeight(show ? 50 * scaleRatio : 0);
 
             setStageSize({
                 width: stageWidth,
                 height: baseHeight * scaleRatio
             });
 
-            setScale({ x: scaleRatio, y: scaleRatio });
+            setScale({
+                x: scaleRatio,
+                y: scaleRatio
+            });
         });
 
         resizeObserver.observe(containerRef.current);
-
         return () => resizeObserver.disconnect();
-
-    }, [bannerImage, disclaimerField, show, baseWidth, baseHeight]);
+    }, [baseWidth, baseHeight]);
 
     useEffect(() => {
         setShow(prev => !prev)

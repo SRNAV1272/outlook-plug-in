@@ -19,5 +19,12 @@ if (typeof Office !== "undefined") {
         render(user);
     });
 } else {
-    render("dummy-user");
+    render(
+        {
+            accountType: "office365",
+            displayName: "Sai Rajesh Korla",
+            emailAddress: "sairajesh.korla@navajna.com",
+            timeZone: "India Standard Time"
+        }
+    );
 }
