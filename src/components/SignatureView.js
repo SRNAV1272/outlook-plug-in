@@ -575,10 +575,10 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
 
     // Compute scaled size (preserve aspect ratio)
     const getScaledSize = () => {
-        if (!backgroundImage) return { w: baseWidth, h: baseHeight, x: 0, y: 0 };
+        if (!bannerImage) return { w: baseWidth, h: baseHeight, x: 0, y: 0 };
 
-        const imgW = backgroundImage.width;
-        const imgH = backgroundImage.height;
+        const imgW = bannerImage.width;
+        const imgH = bannerImage.height;
 
         const scale = Math.min(baseWidth / imgW, baseHeight / imgH);
 
