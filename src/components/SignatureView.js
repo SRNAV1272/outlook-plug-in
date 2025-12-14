@@ -630,7 +630,6 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
         // ------ 6️⃣ DOWNLOAD ------
         // downloadHTMLFile(html);
     }
-    console.log("sdajshdkashdkashdkas", user)
     return (
         <Grid container justifyContent={'center'} rowGap={2}>
             <Grid
@@ -883,54 +882,51 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                                         ))}
                                 </Stack>
 
-                                <IconButton onClick={() => setShow(prev => !prev)}>
+                                {/* <IconButton onClick={() => setShow(prev => !prev)}>
                                     <KeyboardArrowDownOutlined
                                         sx={{
                                             transform: show ? "rotate(180deg)" : "rotate(0deg)",
                                             transition: "transform 0.3s ease"
                                         }}
                                     />
-                                </IconButton>
+                                </IconButton> */}
                             </Box>
-                            {
-                                show &&
-                                <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
-                                    <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
-                                        {allFields
-                                            ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                            ?.filter(i => show ? ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name) : ["teams"]?.includes(i?.name))
-                                            ?.filter(i => i?.show)
-                                            ?.map(field => (
-                                                <a href={`${field?.link}`}
-                                                    target="_blank"
-                                                    style={{
-                                                        background: "#fff",
-                                                        padding: "5px 20px",
-                                                        borderRadius: "20px",
-                                                        border: "1px solid #000",
-                                                        color: "#000",
-                                                        fontFamily: "Arial, sans-serif",
-                                                        fontSize: "14px",
-                                                        fontWeight: 500,
-                                                        textDecoration: "none",
-                                                        display: "flex",
-                                                        alignItems: 'center',
-                                                        columnGap: 5
-                                                    }}
-                                                >
-                                                    <img
-                                                        src={field?.value}
-                                                        width="16"
-                                                    />
-                                                    {field?.label}
-                                                </a>
-                                            ))}
-                                    </Stack>
-                                </Box>
-                            }
+                            <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
+                                <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
+                                    {allFields
+                                        ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
+                                        ?.filter(i => show ? ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name) : ["teams"]?.includes(i?.name))
+                                        ?.filter(i => i?.show)
+                                        ?.map(field => (
+                                            <a href={`${field?.link}`}
+                                                target="_blank"
+                                                style={{
+                                                    background: "#fff",
+                                                    padding: "5px 20px",
+                                                    borderRadius: "20px",
+                                                    border: "1px solid #000",
+                                                    color: "#000",
+                                                    fontFamily: "Arial, sans-serif",
+                                                    fontSize: "14px",
+                                                    fontWeight: 500,
+                                                    textDecoration: "none",
+                                                    display: "flex",
+                                                    alignItems: 'center',
+                                                    columnGap: 5
+                                                }}
+                                            >
+                                                <img
+                                                    src={field?.value}
+                                                    width="16"
+                                                />
+                                                {field?.label}
+                                            </a>
+                                        ))}
+                                </Stack>
+                            </Box>
                         </Box>
                         {
-                            show &&
+                            !!bannerField?.value &&
                             <Box
                                 width={stageSize.width}
                                 height={stageSize?.width * 0.30}
@@ -948,7 +944,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                             </Box>
                         }
                         {
-                            show &&
+                            !!allFields.find(f => f.key === "disclaimer")?.value &&
                             <Box display={'flex'} width={stageSize.width} pt={1}>
                                 <Typography
                                     variant="body2"
@@ -970,6 +966,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                         }
                     </Box>
                     <Stack
+                        mt={1}
                         display={"flex"}
                         direction="row" justifyContent={'end'} width={'100%'}
                     >
@@ -1221,54 +1218,51 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                                         ))}
                                 </Stack>
 
-                                <IconButton onClick={() => setShow(prev => !prev)}>
+                                {/* <IconButton onClick={() => setShow(prev => !prev)}>
                                     <KeyboardArrowDownOutlined
                                         sx={{
                                             transform: show ? "rotate(180deg)" : "rotate(0deg)",
                                             transition: "transform 0.3s ease"
                                         }}
                                     />
-                                </IconButton>
+                                </IconButton> */}
                             </Box>
-                            {
-                                show &&
-                                <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
-                                    <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
-                                        {allFields
-                                            ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                            ?.filter(i => show ? ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name) : ["teams"]?.includes(i?.name))
-                                            ?.filter(i => i?.show)
-                                            ?.map(field => (
-                                                <a href={`${field?.link}`}
-                                                    target="_blank"
-                                                    style={{
-                                                        background: "#fff",
-                                                        padding: "5px 20px",
-                                                        borderRadius: "20px",
-                                                        border: "1px solid #000",
-                                                        color: "#000",
-                                                        fontFamily: "Arial, sans-serif",
-                                                        fontSize: "14px",
-                                                        fontWeight: 500,
-                                                        textDecoration: "none",
-                                                        display: "flex",
-                                                        alignItems: 'center',
-                                                        columnGap: 5
-                                                    }}
-                                                >
-                                                    <img
-                                                        src={field?.value}
-                                                        width="16"
-                                                    />
-                                                    {field?.label}
-                                                </a>
-                                            ))}
-                                    </Stack>
-                                </Box>
-                            }
+                            <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
+                                <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
+                                    {allFields
+                                        ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
+                                        ?.filter(i => show ? ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name) : ["teams"]?.includes(i?.name))
+                                        ?.filter(i => i?.show)
+                                        ?.map(field => (
+                                            <a href={`${field?.link}`}
+                                                target="_blank"
+                                                style={{
+                                                    background: "#fff",
+                                                    padding: "5px 20px",
+                                                    borderRadius: "20px",
+                                                    border: "1px solid #000",
+                                                    color: "#000",
+                                                    fontFamily: "Arial, sans-serif",
+                                                    fontSize: "14px",
+                                                    fontWeight: 500,
+                                                    textDecoration: "none",
+                                                    display: "flex",
+                                                    alignItems: 'center',
+                                                    columnGap: 5
+                                                }}
+                                            >
+                                                <img
+                                                    src={field?.value}
+                                                    width="16"
+                                                />
+                                                {field?.label}
+                                            </a>
+                                        ))}
+                                </Stack>
+                            </Box>
                         </Box>
                         {
-                            show &&
+                            !!bannerField?.value &&
                             <Box
                                 width={stageSize.width}
                                 height={stageSize?.width * 0.30}
@@ -1286,7 +1280,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                             </Box>
                         }
                         {
-                            show &&
+                            !!allFields.find(f => f.key === "disclaimer")?.value &&
                             <Box display={'flex'} width={stageSize.width} pt={1}>
                                 <Typography
                                     variant="body2"
@@ -1309,6 +1303,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                     </Box>
                     <Stack
                         display={"flex"}
+                        mt={1}
                         direction="row" justifyContent={'end'} width={'100%'}
                     >
                         <Button
