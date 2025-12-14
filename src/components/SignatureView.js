@@ -494,31 +494,6 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
         setAllFields(updated);
     }, [card, form?.elements]);
 
-    // useEffect(() => {
-    //     if (!containerRef.current) return;
-
-    //     const resizeObserver = new ResizeObserver(entries => {
-    //         const width = entries[0].contentRect.width;
-    //         if (!width) return;
-
-    //         const stageWidth = Math.min(width, 800);
-    //         const scaleRatio = stageWidth / baseWidth;
-
-    //         setStageSize({
-    //             width: stageWidth,
-    //             height: baseHeight * scaleRatio
-    //         });
-
-    //         setScale({
-    //             x: scaleRatio,
-    //             y: scaleRatio
-    //         });
-    //     });
-
-    //     resizeObserver.observe(containerRef.current);
-    //     return () => resizeObserver.disconnect();
-    // }, [baseWidth, baseHeight]);
-
     useEffect(() => {
         if (!containerRef.current) return;
 
@@ -531,7 +506,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
 
             setStageSize({
                 width: stageWidth,
-                height: baseHeight // 🔑 DO NOT SCALE HEIGHT
+                height: baseHeight * scaleRatio
             });
 
             setScale({
@@ -717,9 +692,9 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                 scale={scale}
                             >
                                 <Layer>
-                                    {backgroundImage ? (
+                                    {bannerImage ? (
                                         <KonvaImage
-                                            image={backgroundImage}
+                                            image={bannerImage}
                                             x={x}
                                             y={y}
                                             width={w}
@@ -729,8 +704,8 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                     )
                                         :
                                         <Rect
-                                            x={0}
-                                            y={0}
+                                            x={x}
+                                            y={y}
                                             width={baseWidth}
                                             height={stageSize.height}
                                             fill={allFields.find(f => f.key === "backgroundColor")?.value || "#ffffff"}
