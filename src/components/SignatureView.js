@@ -636,10 +636,10 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
     }
 
     return (
-        <Grid container>
+        <Grid container justifyContent={'center'}>
             <Grid
                 size={{
-                    xs: 10
+                    xs: 11
                 }}
             >
                 <Paper
