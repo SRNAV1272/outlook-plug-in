@@ -895,7 +895,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                                 <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
                                     {allFields
                                         ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                        ?.filter(i => show ? ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name) : ["teams"]?.includes(i?.name))
+                                        ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
                                         ?.filter(i => i?.show)
                                         ?.map(field => (
                                             <a href={`${field?.link}`}
@@ -1231,7 +1231,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                                 <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
                                     {allFields
                                         ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                        ?.filter(i => show ? ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name) : ["teams"]?.includes(i?.name))
+                                        ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
                                         ?.filter(i => i?.show)
                                         ?.map(field => (
                                             <a href={`${field?.link}`}
