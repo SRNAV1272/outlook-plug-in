@@ -654,11 +654,11 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                         margin: "0 auto",
                         display: "flex",
                         flexDirection: "column",
-                        rowGap: 2,
+                        // rowGap: 2,
                         alignItems: "center",
                         // 🧠 Dynamically adapt Paper height to stage + extra padding
                         // minHeight: `${stageSize.height * scale.y + (show ? 80 : 40) + disclaimerHeight + bannerHeight}px`, // +40 for breathing room
-                        justifyContent: "space-between",
+                        // justifyContent: "space-between",
                         // boxShadow: "0 2px 8px rgba(0,0,0,0.05)", // subtle shadow for card feel
                         // backgroundColor: "#fafafa"
                     }}
@@ -943,7 +943,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                     </Box>
                     <Stack
                         display={"flex"}
-                        direction="row" spacing={1} justifyContent={'end'} width={'100%'}
+                        direction="row" justifyContent={'end'} width={'100%'}
                     >
                         <Button
                             onClick={() => applyHTML()}
