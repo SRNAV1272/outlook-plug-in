@@ -494,6 +494,31 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
         setAllFields(updated);
     }, [card, form?.elements]);
 
+    // useEffect(() => {
+    //     if (!containerRef.current) return;
+
+    //     const resizeObserver = new ResizeObserver(entries => {
+    //         const width = entries[0].contentRect.width;
+    //         if (!width) return;
+
+    //         const stageWidth = Math.min(width, 800);
+    //         const scaleRatio = stageWidth / baseWidth;
+
+    //         setStageSize({
+    //             width: stageWidth,
+    //             height: baseHeight * scaleRatio
+    //         });
+
+    //         setScale({
+    //             x: scaleRatio,
+    //             y: scaleRatio
+    //         });
+    //     });
+
+    //     resizeObserver.observe(containerRef.current);
+    //     return () => resizeObserver.disconnect();
+    // }, [baseWidth, baseHeight]);
+
     useEffect(() => {
         if (!containerRef.current) return;
 
@@ -506,7 +531,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
 
             setStageSize({
                 width: stageWidth,
-                height: baseHeight * scaleRatio
+                height: baseHeight // 🔑 DO NOT SCALE HEIGHT
             });
 
             setScale({
