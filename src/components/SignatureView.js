@@ -672,8 +672,8 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                 width: "100%",
                                 maxWidth: 800,
                                 borderRadius: 5,
-                                margin: "auto",
-
+                                margin: 0,
+                                p: 0,
                                 // 🚫 no scrollbars, just clip anything extra
                                 overflow: "hidden",
                                 backgroundColor:
