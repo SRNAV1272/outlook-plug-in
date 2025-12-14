@@ -676,7 +676,10 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
 
                                 // 🚫 no scrollbars, just clip anything extra
                                 overflow: "hidden",
-
+                                backgroundColor:
+                                    backgroundImage ? "tansparent" :
+                                        allFields.find(f => f.key === "backgroundColor")?.value || "#ffffff"
+                                ,
                                 // (optional extra safety – hide scrollbars in browsers that still show them)
                                 "&::-webkit-scrollbar": {
                                     display: "none",
@@ -692,7 +695,7 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                 scale={scale}
                             >
                                 <Layer>
-                                    {backgroundImage ? (
+                                    {backgroundImage && (
                                         <KonvaImage
                                             image={backgroundImage}
                                             x={x}
@@ -702,16 +705,6 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                             listening={false}
                                         />
                                     )
-                                        :
-                                        <Rect
-                                            x={0}
-                                            y={0}
-                                            width={baseWidth}
-                                            height={stageSize.height}
-                                            fill={allFields.find(f => f.key === "backgroundColor")?.value || "#ffffff"}
-                                            listening={false}
-                                            cornerRadius={[8, 8, 8, 8]} // only bottom corners rounded
-                                        />
                                     }
                                     {/* ✅ SHAPES (BOTTOM LAYER) */}
                                     {allFields?.filter(item =>
