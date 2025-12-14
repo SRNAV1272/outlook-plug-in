@@ -575,10 +575,10 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
 
     // Compute scaled size (preserve aspect ratio)
     const getScaledSize = () => {
-        if (!bannerImage) return { w: baseWidth, h: baseHeight, x: 0, y: 0 };
+        if (!backgroundImage) return { w: baseWidth, h: baseHeight, x: 0, y: 0 };
 
-        const imgW = bannerImage.width;
-        const imgH = bannerImage.height;
+        const imgW = backgroundImage.width;
+        const imgH = backgroundImage.height;
 
         const scale = Math.min(baseWidth / imgW, baseHeight / imgH);
 
@@ -692,9 +692,9 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                 scale={scale}
                             >
                                 <Layer>
-                                    {bannerImage ? (
+                                    {backgroundImage ? (
                                         <KonvaImage
-                                            image={bannerImage}
+                                            image={backgroundImage}
                                             x={x}
                                             y={y}
                                             width={w}
@@ -704,8 +704,8 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                     )
                                         :
                                         <Rect
-                                            x={x}
-                                            y={y}
+                                            x={0}
+                                            y={0}
                                             width={baseWidth}
                                             height={stageSize.height}
                                             fill={allFields.find(f => f.key === "backgroundColor")?.value || "#ffffff"}
