@@ -867,39 +867,42 @@ export default function SignatureView({ showPreview, apply, showSocialMediaIcons
                                     />
                                 </IconButton>
                             </Box>
-                            <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
-                                <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
-                                    {allFields
-                                        ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                        ?.filter(i => show ? ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name) : ["teams"]?.includes(i?.name))
-                                        ?.filter(i => i?.show)
-                                        ?.map(field => (
-                                            <a href={`${field?.link}`}
-                                                target="_blank"
-                                                style={{
-                                                    background: "#fff",
-                                                    padding: "5px 20px",
-                                                    borderRadius: "20px",
-                                                    border: "1px solid #000",
-                                                    color: "#000",
-                                                    fontFamily: "Arial, sans-serif",
-                                                    fontSize: "14px",
-                                                    fontWeight: 500,
-                                                    textDecoration: "none",
-                                                    display: "flex",
-                                                    alignItems: 'center',
-                                                    columnGap: 5
-                                                }}
-                                            >
-                                                <img
-                                                    src={field?.value}
-                                                    width="16"
-                                                />
-                                                {field?.label}
-                                            </a>
-                                        ))}
-                                </Stack>
-                            </Box>
+                            {
+                                show &&
+                                <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
+                                    <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
+                                        {allFields
+                                            ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
+                                            ?.filter(i => show ? ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name) : ["teams"]?.includes(i?.name))
+                                            ?.filter(i => i?.show)
+                                            ?.map(field => (
+                                                <a href={`${field?.link}`}
+                                                    target="_blank"
+                                                    style={{
+                                                        background: "#fff",
+                                                        padding: "5px 20px",
+                                                        borderRadius: "20px",
+                                                        border: "1px solid #000",
+                                                        color: "#000",
+                                                        fontFamily: "Arial, sans-serif",
+                                                        fontSize: "14px",
+                                                        fontWeight: 500,
+                                                        textDecoration: "none",
+                                                        display: "flex",
+                                                        alignItems: 'center',
+                                                        columnGap: 5
+                                                    }}
+                                                >
+                                                    <img
+                                                        src={field?.value}
+                                                        width="16"
+                                                    />
+                                                    {field?.label}
+                                                </a>
+                                            ))}
+                                    </Stack>
+                                </Box>
+                            }
                         </Box>
                         {
                             show &&
