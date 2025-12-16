@@ -1,11 +1,23 @@
 import axios from "axios";
 
+// export const API = axios.create({
+//   baseURL: "/",          // ✅ REQUIRED
+//   headers: {
+//     Accept: "application/json", // ✅ VERY IMPORTANT
+//   },
+// });
+const API_BASE_URL =
+  process.env.NODE_ENV === "development"
+    ? "" // proxy handles it
+    : "https://enterprise.cardbyt.ai"; // PROD backend
+
 export const API = axios.create({
-  baseURL: "/",          // ✅ REQUIRED
+  baseURL: API_BASE_URL,
   headers: {
-    Accept: "application/json", // ✅ VERY IMPORTANT
+    Accept: "application/json",
   },
 });
+
 
 API.interceptors.request.use(
   async (req) => {
