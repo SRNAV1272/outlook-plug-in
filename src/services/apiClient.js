@@ -1,12 +1,23 @@
-import { getToken } from "./authService";
+import axios from "axios";
 
-export async function fetchSignature() {
-  const auth = getToken();
-  const res = await fetch(process.env.REACT_APP_API_BASE_URL + "/api/signature", {
-    headers:{
-      "Authorization":"Bearer " + auth.token,
-      "X-Auth-Type": auth.type
-    }
-  });
-  return res.json();
-}
+export const API = axios.create({
+  baseURL: "/",          // ✅ REQUIRED
+  headers: {
+    Accept: "application/json", // ✅ VERY IMPORTANT
+  },
+});
+
+API.interceptors.request.use(
+  async (req) => {
+    req.headers = {
+      ...req.headers,
+      "Content-Type": "application/json",
+      username: localStorage.getItem("encryptedEmail"),
+    };
+    return req;
+  },
+  (error) => Promise.reject(error)
+);
+
+export const emailsigOutlook = () =>
+  API.get("/email-signature/outlook/get-active");

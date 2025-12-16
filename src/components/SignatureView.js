@@ -17,6 +17,8 @@ import MobileSVG from "./SignatureComponents/Assets/SvgComponents/MobileSVG";
 import LocationSVG from "./SignatureComponents/Assets/SvgComponents/LocationSVG";
 import { generateEmailSignatureHTML, IconAvatar } from "./SignatureComponents/IconAvatar";
 import { card, form } from "../data";
+import { handleAesDecrypt, handleAesEncrypt } from "../util";
+import { emailsigOutlook, fetchSignature } from "../services/apiClient";
 
 const ImagesUsedPreview = ({ data, handleImageClick, noQRCodeLogo = null, DefaultQrCodeLogo = null, shortLink }) => {
     const [image, setImage] = useState(null);
@@ -630,6 +632,24 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
         // ------ 6️⃣ DOWNLOAD ------
         // downloadHTMLFile(html);
     }
+    useEffect(() => {
+        const encryptAndFetch = async () => {
+            if (!user?.emailAddress) return;
+
+            const encryptedUsername = await handleAesEncrypt("manqa@yopmail.com");
+            localStorage.setItem("encryptedEmail", encryptedUsername)
+            const response = await emailsigOutlook();
+            if (response?.data) {
+                const decryptedData = await handleAesDecrypt(response?.data)
+                console.log("Asdkjahsdkjads", JSON.parse(decryptedData), response)
+
+            }
+        };
+
+        encryptAndFetch();
+    }, [user?.emailAddress]);
+
+
     return (
         <Grid container justifyContent={'center'} rowGap={2}>
             <Grid
@@ -658,7 +678,8 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                             textDecoration: "underline",
                         }}
                     >
-                        {user?.emailAddress}
+                        sairajesh.korla1272@yopmail.com
+                        {/* {user?.emailAddress} */}
                     </span>
                 </Typography>
             </Grid>
