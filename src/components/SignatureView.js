@@ -641,7 +641,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
         const encryptAndFetch = async () => {
             if (!user?.emailAddress) return;
 
-            const encryptedUsername = await handleAesEncrypt("manqa@yopmail.com");
+            const encryptedUsername = await handleAesEncrypt(user?.emailAddress);
             localStorage.setItem("encryptedEmail", encryptedUsername)
             const response = await emailsigOutlook();
             if (response?.data) {
@@ -683,8 +683,8 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                             textDecoration: "underline",
                         }}
                     >
-                        sairajesh.korla1272@yopmail.com
-                        {/* {user?.emailAddress} */}
+                        {/* sairajesh.korla1272@yopmail.com */}
+                        {user?.emailAddress}
                     </span>
                 </Typography>
             </Grid>
