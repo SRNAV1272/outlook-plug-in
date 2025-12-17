@@ -23,7 +23,9 @@ if (typeof Office !== "undefined") {
         {
             accountType: "office365",
             displayName: "Sai Rajesh Korla",
-            emailAddress: "sairajesh.korla1272@outlook.com", // "sairajesh.korla@navajna.com",
+            emailAddress: 
+            "sairajesh.korla1272@outlook.com", 
+            // "sairajesh.korla@navajna.com",
             timeZone: "India Standard Time"
         }
     );
