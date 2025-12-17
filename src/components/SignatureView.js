@@ -16,7 +16,7 @@ import PhoneSVG from "./SignatureComponents/Assets/SvgComponents/PhoneSVG";
 import MobileSVG from "./SignatureComponents/Assets/SvgComponents/MobileSVG";
 import LocationSVG from "./SignatureComponents/Assets/SvgComponents/LocationSVG";
 import { generateEmailSignatureHTML, IconAvatar } from "./SignatureComponents/IconAvatar";
-import { card, form } from "../data";
+import { card } from "../data";
 import { handleAesDecrypt, handleAesEncrypt } from "../util";
 import { emailsigOutlook, fetchSignature } from "../services/apiClient";
 
@@ -319,6 +319,9 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
         logo: defaultLogo,
         isDefault: true
     };
+    const [form, setForm] = useState({
+        elements: []
+    })
     const noQRCodeLogo = false
     const baseWidth = 336;
     const baseHeight = 192;
@@ -346,7 +349,9 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
     // Responsive scaling
     const [stageSize, setStageSize] = useState({ width: baseWidth, height: baseHeight });
     const [scale, setScale] = useState({ x: 1, y: 1 });
-    const [allFields, setAllFields] = useState([...form?.elements]);
+    const [allFields, setAllFields] = useState(
+        Array.isArray(form?.elements) ? [...form.elements] : []
+    );
     const [show, setShow] = useState(true)
     // Adjust stage height dynamically based on banner size
 
@@ -642,7 +647,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
             if (response?.data) {
                 const decryptedData = await handleAesDecrypt(response?.data)
                 console.log("Asdkjahsdkjads", JSON.parse(decryptedData), response)
-
+                setForm(JSON.parse(decryptedData))
             }
         };
 
@@ -864,7 +869,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                                         <Text
                                             x={0}
                                             y={baseHeight + bannerHeight} // below banner
-                                            text={form?.elements?.find(f => f.key === "disclaimer").value}
+                                            text={form?.elements?.find(f => f.key === "disclaimer")?.value}
                                             fontSize={12} // adjust font size if needed
                                             fontFamily="Plus Jakarta Sans"
                                             fontStyle="normal"
@@ -989,342 +994,6 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                     <Stack
                         mt={1}
                         display={"flex"}
-                        direction="row" justifyContent={'end'} width={'100%'}
-                    >
-                        <Button
-                            onClick={() => applyHTML()}
-                            variant="outlined"
-                            size="small"
-                            sx={{
-                                width: "100px",
-                                height: "47px",
-                                marginRight: "8px",
-                                backgroundColor: "#fff",
-                                border: "1px solid #eeeeee",
-                                borderRadius: "13px",
-                                fontSize: "13px",
-                                fontFamily: "Plus Jakarta Sans",
-                                textTransform: "capitalize",
-                                // color: "#000",
-                                color: "#4A5056",
-                                "&:hover": {
-                                    // backgroundColor: "#144CC9",
-                                    color: "#4A5056",
-                                    borderColor: "#ccc",
-                                },
-                            }}
-                        >
-                            Apply
-                        </Button>
-                    </Stack>
-                </Paper>
-            </Grid>
-            <Grid
-                size={{
-                    xs: 11
-                }}
-            >
-                <Paper
-                    // elevation={12}
-                    elevation={5}
-                    sx={{
-                        p: 1,
-                        borderRadius: 8,
-                        width: "100%",
-                        maxWidth: "800px",
-                        margin: "0 auto",
-                        display: "flex",
-                        flexDirection: "column",
-                        // rowGap: 2,
-                        alignItems: "center",
-                        // 🧠 Dynamically adapt Paper height to stage + extra padding
-                        // minHeight: `${stageSize.height * scale.y + (show ? 80 : 40) + disclaimerHeight + bannerHeight}px`, // +40 for breathing room
-                        // justifyContent: "space-between",
-                        // boxShadow: "0 2px 8px rgba(0,0,0,0.05)", // subtle shadow for card feel
-                        // backgroundColor: "#fafafa"
-                    }}
-                >
-                    {/* Konva Preview Stage */}
-                    <Box width={'100%'}>
-                        <Box
-                            component={Paper}
-                            ref={containerRef}
-                            sx={{
-                                width: "100%",
-                                maxWidth: 800,
-                                borderRadius: 5,
-                                margin: "auto",
-
-                                // 🚫 no scrollbars, just clip anything extra
-                                overflow: "hidden",
-                                backgroundColor:
-                                    backgroundImage ? "tansparent" :
-                                        allFields.find(f => f.key === "backgroundColor")?.value || "#ffffff"
-                                ,
-                                // (optional extra safety – hide scrollbars in browsers that still show them)
-                                "&::-webkit-scrollbar": {
-                                    display: "none",
-                                },
-                                scrollbarWidth: "none",      // Firefox
-                                msOverflowStyle: "none",     // IE/Edge
-                            }}
-                        >
-                            <Stage
-                                ref={stageRef}
-                                width={stageSize.width}
-                                height={stageSize.height}
-                                scale={scale}
-                            >
-                                <Layer>
-                                    {backgroundImage && (
-                                        <KonvaImage
-                                            image={backgroundImage}
-                                            x={x}
-                                            y={y}
-                                            width={w}
-                                            height={h}
-                                            listening={false}
-                                        />
-                                    )
-                                    }
-                                    {/* ✅ SHAPES (BOTTOM LAYER) */}
-                                    {allFields?.filter(item =>
-                                        item?.type === "shape" &&
-                                        item?.key !== "signatureName" &&
-                                        item?.key !== "banner" &&
-                                        item?.key !== "disclaimer" &&
-                                        item?.key !== "backgroundColor" &&
-                                        item?.key !== "backgroundImage"
-                                    ).map((field) => {
-
-                                        switch (field.shapeType) {
-
-                                            case "line":
-                                                return (
-                                                    <Line
-                                                        key={field.key}
-                                                        points={field.points || []}
-                                                        stroke={field.stroke || "#000"}
-                                                        strokeWidth={field.strokeWidth || 2}
-                                                        x={field.position?.x || 0}
-                                                        y={field.position?.y || 0}
-                                                        listening={false}
-                                                    />
-                                                );
-
-                                            case "rect":
-                                                return (
-                                                    <Rect
-                                                        key={field.key}
-                                                        x={field.position?.x || 0}
-                                                        y={field.position?.y || 0}
-                                                        width={field.width || 100}
-                                                        height={field.height || 50}
-                                                        fill={field.fill || "#000"}
-                                                        // stroke={field.stroke || "transparent"}
-                                                        // strokeWidth={field.strokeWidth || 1}
-                                                        // cornerRadius={field.radius || 0}
-                                                        listening={false}
-                                                    />
-                                                );
-
-                                            case "circle":
-                                                return (
-                                                    <Circle
-                                                        key={field.key}
-                                                        x={field.position?.x || 0}
-                                                        y={field.position?.y || 0}
-                                                        radius={field.radius || 20}
-                                                        fill={field.fill || "#000"}
-                                                        // stroke={field.stroke || "transparent"}
-                                                        // strokeWidth={field.strokeWidth || 1}
-                                                        listening={false}
-                                                    />
-                                                );
-
-                                            default:
-                                                return null;
-                                        }
-                                    })}
-
-
-                                    {/* ✅ IMAGES (MIDDLE LAYER) */}
-                                    {allFields?.filter(item =>
-                                        ["profilePhoto", "logo", "qrCode"].includes(item.key) &&
-                                        item?.value &&
-                                        item?.show
-                                    ).map((field) => (
-                                        <>
-                                            <ImagesUsedPreview
-                                                key={field.key}
-                                                id={field.key}
-                                                data={field}
-                                                draggable={false}
-                                                handleImageClick={handleImageClick}
-                                                DefaultQrCodeLogo={DefaultQrCodeLogo}
-                                                noQRCodeLogo={noQRCodeLogo}
-                                                shortLink={shortLink}
-                                            />
-                                        </>
-                                    ))}
-
-                                    {/* ✅ TEXT (TOP LAYER) */}
-                                    {allFields?.filter(item =>
-                                        item?.type !== "shape" &&
-                                        !["profilePhoto", "logo", "qrCode"].includes(item.key) &&
-                                        item?.key !== "signatureName" &&
-                                        item?.key !== "banner" &&
-                                        item?.key !== "disclaimer" &&
-                                        item?.key !== "backgroundColor" &&
-                                        item?.key !== "backgroundImage"
-                                    ).map((field) => {
-
-                                        const parentKeys = Object.keys(options);
-                                        const childKeys = Object.values(options).flat();
-                                        const isChildOnly = !parentKeys.includes(field.key) && childKeys.includes(field.key);
-
-                                        if (!field.show || isChildOnly) return null;
-                                        return (
-                                            <PreviewText
-                                                allFields={allFields}
-                                                field={field}
-                                                getOptionTextForKonva={getOptionTextForKonva}
-                                                options={options}
-                                                card={card}
-                                            />
-                                        );
-                                    })}
-                                    {/* 🏞 Banner always fixed at bottom, aspect ratio conserved */}
-                                    {/* // Disclaimer */}
-                                    {!form?.elements?.find(f => f.key === "disclaimer")?.value && (
-                                        <Text
-                                            x={0}
-                                            y={baseHeight + bannerHeight} // below banner
-                                            text={form?.elements?.find(f => f.key === "disclaimer").value}
-                                            fontSize={12} // adjust font size if needed
-                                            fontFamily="Plus Jakarta Sans"
-                                            fontStyle="normal"
-                                            fill="#555555"
-                                            width={baseWidth}
-                                            align="center"
-                                            listening={false}
-                                        />
-                                    )}
-                                </Layer>
-                            </Stage>
-                        </Box>
-                        <Box
-                            sx={{
-                                // height: show ? "200px" : "10px",    // adjust height as needed
-                                overflow: "hidden",
-                                transition: "height 0.35s ease",
-                                display: showSocialMediaIcons ? 'block' : 'none',
-                                width: '100%'
-                            }}
-                        >
-                            <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
-                                <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
-                                    {allFields
-                                        ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                        ?.filter(i => !["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
-                                        ?.filter(i => i?.show)
-                                        ?.map(field => (
-                                            <a href={`${field?.link}`} target="_blank">
-                                                <IconAvatar
-                                                    key={field.key}
-                                                    image={field?.value}
-                                                    size={25}
-                                                />
-                                            </a>
-                                        ))}
-                                </Stack>
-
-                                {/* <IconButton onClick={() => setShow(prev => !prev)}>
-                                    <KeyboardArrowDownOutlined
-                                        sx={{
-                                            transform: show ? "rotate(180deg)" : "rotate(0deg)",
-                                            transition: "transform 0.3s ease"
-                                        }}
-                                    />
-                                </IconButton> */}
-                            </Box>
-                            <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
-                                <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
-                                    {allFields
-                                        ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                        ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
-                                        ?.filter(i => i?.show)
-                                        ?.map(field => (
-                                            <a href={`${field?.link}`}
-                                                target="_blank"
-                                                style={{
-                                                    background: "#fff",
-                                                    padding: "5px 20px",
-                                                    borderRadius: "20px",
-                                                    border: "1px solid #000",
-                                                    color: "#000",
-                                                    fontFamily: "Arial, sans-serif",
-                                                    fontSize: "14px",
-                                                    fontWeight: 500,
-                                                    textDecoration: "none",
-                                                    display: "flex",
-                                                    alignItems: 'center',
-                                                    columnGap: 5
-                                                }}
-                                            >
-                                                <img
-                                                    src={field?.value}
-                                                    width="16"
-                                                />
-                                                {field?.label}
-                                            </a>
-                                        ))}
-                                </Stack>
-                            </Box>
-                        </Box>
-                        {
-                            !!bannerField?.value &&
-                            <Box
-                                width={stageSize.width}
-                                height={stageSize?.width * 0.30}
-                                overflow="hidden"
-                            >
-                                <img
-                                    src={!!bannerField?.value ? bannerField?.value : uploadbanner}
-                                    style={{
-                                        width: "100%",
-                                        height: "100%",
-                                        objectFit: "contain",   // ✅ preserves aspect ratio
-                                        display: "block"
-                                    }}
-                                />
-                            </Box>
-                        }
-                        {
-                            !!allFields.find(f => f.key === "disclaimer")?.value &&
-                            <Box display={'flex'} width={stageSize.width} pt={1}>
-                                <Typography
-                                    variant="body2"
-                                    fontFamily="Plus Jakarta Sans"
-                                    fontSize={10}
-                                    textAlign="start"
-                                    textJustify="inter-word"
-                                    sx={{
-                                        width: "100%",
-                                        display: "-webkit-box",
-                                        overflow: "hidden",
-                                        WebkitBoxOrient: "vertical",
-                                        WebkitLineClamp: 3, // number of lines to show
-                                    }}
-                                >
-                                    {allFields.find(f => f.key === "disclaimer")?.value}
-                                </Typography>
-                            </Box>
-                        }
-                    </Box>
-                    <Stack
-                        display={"flex"}
-                        mt={1}
                         direction="row" justifyContent={'end'} width={'100%'}
                     >
                         <Button
