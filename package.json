@@ -2,8 +2,6 @@
   "name": "outlook-signature-addin",
   "version": "1.0.0",
   "private": true,
-  "homepage": "https://srnav1272.github.io/outlook-plug-in",
-  "proxy": "https://newqa-enterprise.cardbyte.ai",
   "dependencies": {
     "@babel/core": "^7.16.0",
     "@emotion/react": "^11.14.0",
