@@ -819,7 +819,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                                                 animation="wave"
                                             />
                                         </Box> */}
-                                        <img src={DefaultTemplate} alt="new" />
+                                        <img src={DefaultTemplate} alt="new" width={'100%'} />
                                         <Box mt={4} textAlign="center">
                                             <Typography fontFamily={"Plus Jakarta Sans"} variant="h6" gutterBottom>
                                                 No Signature Available !
