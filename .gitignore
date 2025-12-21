@@ -12,7 +12,7 @@
 # /build
 /utils
 /add-in-manifest
-/build
+# /build
 # misc
 .DS_Store
 .env.local
