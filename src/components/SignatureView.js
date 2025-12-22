@@ -669,7 +669,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                 }}
             >
                 <Typography fontFamily="Plus Jakarta Sans">
-                    Welcome{" "}
+                    Welcome to Cardbyte Signatures {" "}
                     <span
                         style={{
                             color: "#0070C0",
