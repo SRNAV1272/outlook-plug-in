@@ -661,7 +661,6 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
         encryptAndFetch();
     }, [user?.emailAddress]);
 
-    console.log("asdlhsadkhsdkj", allFields)
     return (
         <Grid container justifyContent={'center'} rowGap={2}>
             <Grid
@@ -731,7 +730,7 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                                     animation="wave"
                                     sx={{ borderRadius: 2 }}
                                 /> */}
-                                <img src={DefaultTemplate} alt="new" />
+                                <img src={DefaultTemplate} alt="new" width={'100%'} />
                                 {/* Title Skeleton */}
                                 <Box mt={3} width="80%">
                                     <Skeleton
