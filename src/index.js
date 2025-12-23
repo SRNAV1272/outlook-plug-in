@@ -5,61 +5,54 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";
 
-const render = (user) => {
-    const container = document.getElementById("root");
+/**
+ * --------------------------------------------------
+ * Create root ONCE (CRITICAL)
+ * --------------------------------------------------
+ */
+const container = document.getElementById("root");
+const root = ReactDOM.createRoot(container);
 
-    if (!container) return;
+/**
+ * --------------------------------------------------
+ * Single render guard (Fast Refresh safe)
+ * --------------------------------------------------
+ */
+let rendered = false;
 
-    const root = ReactDOM.createRoot(container);
-    root.render(<App user={user} />);
+const renderApp = (user) => {
+  if (rendered) return;
+  rendered = true;
+
+  root.render(<App user={user} />);
 };
 
-const getUserFromOffice = () => {
-    try {
-        if (
-            Office?.context &&
-            Office.context.mailbox &&
-            Office.context.mailbox.userProfile
-        ) {
-            return Office.context.mailbox.userProfile;
-        }
-    } catch (e) {
-        console.warn("Office context not ready:", e);
-    }
-
-    return null;
+/**
+ * --------------------------------------------------
+ * Fallback user
+ * --------------------------------------------------
+ */
+const fallbackUser = {
+  accountType: "office365",
+  displayName: "Sai Rajesh Korla",
+  emailAddress: "sairajesh.korla1272@outlook.com",
+  timeZone: "India Standard Time",
 };
 
-// Outlook Add-in
+/**
+ * --------------------------------------------------
+ * Bootstrap
+ * --------------------------------------------------
+ */
 if (typeof Office !== "undefined") {
-    Office.onReady((info) => {
-        if (info.host === Office.HostType.Outlook) {
-            const user = getUserFromOffice();
-
-            render(
-                user ?? {
-                    accountType: "office365",
-                    displayName: "Test User",
-                    emailAddress: "test@outlook.com",
-                    timeZone: "India Standard Time",
-                }
-            );
-        } else {
-            // Office loaded but NOT Outlook
-            render({
-                accountType: "office365",
-                displayName: "Sai Rajesh Korla",
-                emailAddress: "abhishekchoubey@cardbyte.ai",
-                timeZone: "India Standard Time",
-            });
-        }
-    });
+  Office.onReady((info) => {
+    if (info.host === Office.HostType.Outlook) {
+      const user = Office?.context?.mailbox?.userProfile;
+      renderApp(user ?? fallbackUser);
+    } else {
+      renderApp(fallbackUser);
+    }
+  });
 } else {
-    // Browser / local testing
-    render({
-        accountType: "office365",
-        displayName: "Sai Rajesh Korla",
-        emailAddress: "abhishekchoubey@cardbyte.ai",
-        timeZone: "India Standard Time",
-    });
+  renderApp(fallbackUser);
 }

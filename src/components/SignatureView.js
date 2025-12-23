@@ -244,6 +244,7 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
             if (!user?.emailAddress) return;
             setLoad(true)
             const encryptedUsername = await handleAesEncrypt(user?.emailAddress);
+            localStorage.setItem("encryptedEmail", encryptedUsername)
             try {
                 const response = await emailsigOutlook();
                 if (response?.data) {
@@ -496,7 +497,7 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
                                                         style={{
                                                             width: "100%",
                                                             height: "100%",
-                                                            objectFit: "contain",   // ✅ preserves aspect ratio
+                                                            // objectFit: "contain",   // ✅ preserves aspect ratio
                                                             display: "block"
                                                         }}
                                                     />
