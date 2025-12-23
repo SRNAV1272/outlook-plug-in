@@ -9,6 +9,7 @@ import { generateEmailSignatureHTML, IconAvatar } from "./SignatureComponents/Ic
 import { card } from "../data";
 import { handleAesDecrypt, handleAesEncrypt } from "../util";
 import { emailsigOutlook } from "../services/apiClient";
+import CardByte from "./SignatureComponents/Assets/Images/CardbyteLogo.png"
 
 export default function SignatureView({ user, apply, showSocialMediaIcons = true }) {
     const containerRef = useRef(null);
@@ -268,30 +269,17 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
                     xs: 11
                 }}
             >
-                <Typography fontFamily="Plus Jakarta Sans">
-                    Welcome to Cardbyte Signatures {" "}
-                    <span
-                        style={{
-                            color: "#0070C0",
-                            fontWeight: "bold",
-                            textDecoration: "underline",
-                        }}
-                    >
-                        {user?.displayName}
-                    </span>
-
-                    <br />
-
-                    <span
-                        style={{
-                            color: "#5f5858ff",
-                            // fontWeight: "bold",
-                            textDecoration: "underline",
-                        }}
-                    >
-                        {/* sairajesh.korla1272@yopmail.com */}
-                        {user?.emailAddress}
-                    </span>
+                <Box display={'flex'} alignItems={'center'} justifyContent={'start'}>
+                    <Typography fontFamily="Plus Jakarta Sans">
+                        Welcome to
+                    </Typography> &ensp;
+                    <img
+                        src={CardByte}
+                        width={100}
+                    />
+                </Box>
+                <Typography fontFamily={'Plus Jakarta Sans'}>
+                    {user?.displayName}
                 </Typography>
             </Grid>
             <Grid
