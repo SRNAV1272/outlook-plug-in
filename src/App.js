@@ -1,7 +1,6 @@
 /* global Office */
 import React, { useEffect, useState } from "react";
 import { getOfficeToken, login, setToken, getToken } from "./services/authService";
-import { fetchSignature } from "./services/apiClient";
 import LoginForm from "./components/LoginForm";
 import SignatureView from "./components/SignatureView";
 // import SignatureView from "./";
