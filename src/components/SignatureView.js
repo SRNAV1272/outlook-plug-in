@@ -608,9 +608,9 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
         // ------ 6️⃣ COPY HTML AS EMAIL SIGNATURE (MIME CLIPBOARD) ------
 
         try {
-            const freshLink = `${"https://cardbyteqasg.blob.core.windows.net/cardbyte-email-signature/5badb545-d26c-4c83-aee2-a49070be7792.png"}?v=${Date.now()}`
+            const freshLink = `${form?.emailSignatureUrl}?v=${Date.now()}`
 
-            const freshLinkForBanner = `https://cardbyteqasg.blob.core.windows.net/cardbyte-email-signature/Banner-CB-ORG-1106202526817349-93132?v=${Date.now()}`
+            const freshLinkForBanner = `${form?.bannerFileUrl}?v=${Date.now()}`
 
             const html = generateEmailSignatureHTML(
                 freshLink,
@@ -944,14 +944,14 @@ export default function SignatureView({ user, showPreview, apply, showSocialMedi
                                                 </Box>
                                             </Box>
                                             {
-                                                !!bannerField?.value &&
+                                                !!form?.bannerFileUrl &&
                                                 <Box
                                                     width={stageSize.width}
                                                     height={stageSize?.width * 0.30}
                                                     overflow="hidden"
                                                 >
                                                     <img
-                                                        src={!!bannerField?.value ? bannerField?.value : uploadbanner}
+                                                        src={!!form?.bannerFileUrl ? form?.bannerFileUrl : uploadbanner}
                                                         style={{
                                                             width: "100%",
                                                             height: "100%",
