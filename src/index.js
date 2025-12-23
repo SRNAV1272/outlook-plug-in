@@ -49,7 +49,7 @@ if (typeof Office !== "undefined") {
             render({
                 accountType: "office365",
                 displayName: "Sai Rajesh Korla",
-                emailAddress: "sairajesh.korla1272@outlook.com",
+                emailAddress: "abhishekchoubey@cardbyte.ai",
                 timeZone: "India Standard Time",
             });
         }
@@ -59,7 +59,7 @@ if (typeof Office !== "undefined") {
     render({
         accountType: "office365",
         displayName: "Sai Rajesh Korla",
-        emailAddress: "sairajesh.korla1272@outlook.com",
+        emailAddress: "abhishekchoubey@cardbyte.ai",
         timeZone: "India Standard Time",
     });
 }
