@@ -185,7 +185,8 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
             const html = generateEmailSignatureHTML(
                 freshLink,
                 data,
-                freshLinkForBanner
+                freshLinkForBanner,
+                !!form?.elements?.find(i => i?.key === "banner")?.link
             );
             // const type = "text/html";
             // const blob = new Blob([html], { type });

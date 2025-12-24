@@ -246,7 +246,7 @@ export function IconAvatar(
 //     return html;
 // }
 
-export function generateEmailSignatureHTML(dataURL, allFields = {}, freshLinkForBanner) {
+export function generateEmailSignatureHTML(dataURL, allFields = {}, freshLinkForBanner, showBanner) {
     const disclaimerField = allFields.find(f => f.key === "disclaimer" && f.show);
     const bannerField = freshLinkForBanner;
 
@@ -339,7 +339,7 @@ export function generateEmailSignatureHTML(dataURL, allFields = {}, freshLinkFor
 
     /* ---------- Banner ---------- */
     const bannerHTML =
-        typeof bannerField === "string" && bannerField.trim()
+        typeof bannerField === "string" && bannerField.trim() && showBanner
             ? `
             <tr>
                 <td align="left" style="padding-top:12px;">
