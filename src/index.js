@@ -34,7 +34,7 @@ const renderApp = (user) => {
  */
 const fallbackUser = {
   accountType: "office365",
-  displayName: "Sai Rajesh Korla",
+  displayName: "K Sai Rajesh",
   emailAddress: "sairajesh.korla1272@outlook.com",
   timeZone: "India Standard Time",
 };

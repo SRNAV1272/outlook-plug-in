@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Stage, Layer, Image as KonvaImage, } from "react-konva";
+import { useEffect, useRef, useState } from "react";
 import { Box, Button, Grid, Paper, Skeleton, Stack, Typography } from "@mui/material";
 import useImage from "use-image";
 import { toast } from "react-toastify";
@@ -13,17 +12,11 @@ import CardByte from "./SignatureComponents/Assets/Images/CardbyteLogo.png"
 
 export default function SignatureView({ user, apply, showSocialMediaIcons = true }) {
     const containerRef = useRef(null);
-    const stageRef = useRef(null);
-
     const [form, setForm] = useState({
         elements: []
     })
-    const baseWidth = 336;
-    const baseHeight = 192;
 
     // Responsive scaling
-    const [stageSize, setStageSize] = useState({ width: baseWidth, height: baseHeight });
-    const [scale, setScale] = useState({ x: 1, y: 1 });
     const [allFields, setAllFields] = useState(
         Array.isArray(form?.elements) ? [...form.elements] : []
     );
@@ -174,31 +167,6 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
         setAllFields(updated);
     }, [card, form?.elements]);
 
-    useEffect(() => {
-        if (!containerRef.current) return;
-
-        const resizeObserver = new ResizeObserver(entries => {
-            const width = entries[0].contentRect.width;
-            if (!width) return;
-
-            const stageWidth = Math.min(width, 800);
-            const scaleRatio = stageWidth / baseWidth;
-
-            setStageSize({
-                width: stageWidth,
-                height: baseHeight * scaleRatio
-            });
-
-            setScale({
-                x: scaleRatio,
-                y: scaleRatio
-            });
-        });
-
-        resizeObserver.observe(containerRef.current);
-        return () => resizeObserver.disconnect();
-    }, [baseWidth, baseHeight, load, allFields]);
-
     const [backgroundImage] = useImage(form?.emailSignatureUrl);
 
 
@@ -251,6 +219,10 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
                 if (response?.data) {
                     const decryptedData = await handleAesDecrypt(response?.data)
                     setForm(JSON.parse(decryptedData))
+                    console.log("asdkjsdkjahdsasd",
+                        JSON.parse(decryptedData)?.elements?.find(i => i?.key === "banner"),
+                        form?.elements?.find(i => i?.key === "banner")
+                    )
                 }
             } catch (e) {
                 console.error(e)
@@ -280,6 +252,10 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
                 </Box>
                 <Typography fontFamily={'Plus Jakarta Sans'}>
                     {user?.displayName}
+                </Typography>
+                <Typography fontFamily={'Plus Jakarta Sans'} color="#595959" fontSize={"12px"}>
+                    This is the signature set up for you by your Organisation Administrator.
+                    Click apply to add the signature to your mail.
                 </Typography>
             </Grid>
             <Grid
@@ -395,23 +371,17 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
                                                     msOverflowStyle: "none",     // IE/Edge
                                                 }}
                                             >
-                                                <Stage
-                                                    ref={stageRef}
-                                                    width={stageSize.width}
-                                                    height={stageSize.height}
-                                                    scale={scale}
-                                                >
-                                                    <Layer>
-                                                        <KonvaImage
-                                                            image={backgroundImage}
-                                                            x={0}
-                                                            y={0}
-                                                            width={stageSize.width / (stageSize.width / baseWidth)}
-                                                            height={stageSize.height / (stageSize.height / baseHeight)}
-                                                            listening={false}
-                                                        />
-                                                    </Layer>
-                                                </Stage>
+                                                <img
+                                                    src={`${form?.emailSignatureUrl}?v=${Date.now()}`}
+                                                    alt="Email Signature"
+                                                    style={{
+                                                        width: "100%",          // ✅ fit width of Paper
+                                                        height: "auto",         // ✅ maintain aspect ratio
+                                                        maxHeight: "100%",      // ✅ never overflow vertically
+                                                        display: "block",
+                                                        objectFit: "contain",   // ✅ contain inside box
+                                                    }}
+                                                />
                                             </Box>
                                             <Box
                                                 sx={{
@@ -474,10 +444,10 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
                                                 </Box>
                                             </Box>
                                             {
-                                                !!form?.bannerFileUrl &&
+                                                !!form?.elements?.find(i => i?.key === "banner")?.link &&
                                                 <Box
-                                                    width={stageSize.width}
-                                                    height={stageSize?.width * 0.30}
+                                                    width={'100%'}
+                                                    height={140}
                                                     overflow="hidden"
                                                 >
                                                     <img
@@ -493,7 +463,7 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
                                             }
                                             {
                                                 !!allFields.find(f => f.key === "disclaimer")?.value &&
-                                                <Box display={'flex'} width={stageSize.width} pt={1}>
+                                                <Box display={'flex'} width={'100%'} pt={1}>
                                                     <Typography
                                                         variant="body2"
                                                         fontFamily="Plus Jakarta Sans"
