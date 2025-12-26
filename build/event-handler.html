@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <script>
+        Office.onReady(() => {
+            console.log("Event handler ready");
+        });
+        function onComposeHandler(event) {
+            const item = Office.context.mailbox.item;
+            const html = Office.context.roamingSettings.get("defaultSignatureHtml");
+
+            if (!item || !html) {
+                event.completed();
+                return;
+            }
+
+            item.body.setSignatureAsync(
+                html,
+                { coercionType: Office.CoercionType.Html },
+                () => event.completed()
+            );
+        }
+
+        window.onComposeHandler = onComposeHandler;
+
+        // function onComposeHandler(event) {
+        //     const item = Office.context.mailbox.item;
+
+        //     if (!item || !item.body) {
+        //         event.completed();
+        //         return;
+        //     }
+
+        //     const defaultSignature = `
+        //             <div style="font-family: Arial; font-size: 12px;">
+        //             <b>John Doe</b><br/>
+        //             Software Engineer<br/>
+        //             <a href="mailto:john@company.com">john@company.com</a>
+        //             </div>
+        //         `;
+
+        //     item.body.setSignatureAsync(
+        //         defaultSignature,
+        //         { coercionType: Office.CoercionType.Html },
+        //         () => event.completed()
+        //     );
+        // }
+
+        // // REQUIRED: expose globally
+        // window.onComposeHandler = onComposeHandler;
+    </script>
+</head>
+
+<body></body>
+
+</html>

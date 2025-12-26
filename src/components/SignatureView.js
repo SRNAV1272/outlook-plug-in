@@ -15,7 +15,7 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
     const [form, setForm] = useState({
         elements: []
     })
-
+    const [error, setError] = useState("")
     // Responsive scaling
     const [allFields, setAllFields] = useState(
         Array.isArray(form?.elements) ? [...form.elements] : []
@@ -221,12 +221,15 @@ export default function SignatureView({ user, apply, showSocialMediaIcons = true
                     const decryptedData = await handleAesDecrypt(response?.data)
                     setForm(JSON.parse(decryptedData))
                     console.log("asdkjsdkjahdsasd",
-                        JSON.parse(decryptedData)?.elements?.find(i => i?.key === "banner"),
-                        form?.elements?.find(i => i?.key === "banner")
+                        decryptedData
                     )
                 }
             } catch (e) {
                 console.error(e)
+                console.log("asdkjsdkjahdsasd",
+                    e?.response?.data?.message
+                )
+                setError()
             } finally {
                 setLoad(false)
             }
