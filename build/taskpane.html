@@ -22,9 +22,127 @@
 <body>
   <div id="root"></div>
 
+  <!-- Event Handler Script - MUST be included before main.js -->
+  <script>
+    // Initialize Office
+    Office.onReady(function () {
+      console.log("Cardbyte: Office.js ready for event handling");
+    });
+
+    // Event handler for ItemSend event
+    // This function is called automatically when user sends an email
+    window.onItemSendHandler = function (event) {
+      console.log("Cardbyte: onItemSendHandler triggered - checking signature");
+
+      try {
+        const item = Office.context.mailbox.item;
+
+        if (!item) {
+          console.log("Cardbyte: No email item available");
+          event.completed({ allowEvent: true });
+          return;
+        }
+
+        // Check if we're in compose mode
+        if (item.itemType !== Office.MailboxEnums.ItemType.Message) {
+          console.log("Cardbyte: Not a message item");
+          event.completed({ allowEvent: true });
+          return;
+        }
+
+        // Get the current email body
+        item.body.getAsync(Office.CoercionType.Html, function (bodyResult) {
+          if (bodyResult.status === Office.AsyncResultStatus.Succeeded) {
+            const currentBody = bodyResult.value;
+
+            // Check if a Cardbyte signature already exists
+            // Add a unique marker to your signatures for reliable detection
+            const hasSignature = currentBody.includes('data-cardbyte="true"') ||
+              currentBody.includes('cardbyte-signature') ||
+              currentBody.includes('Sent with Cardbyte');
+
+            if (!hasSignature) {
+              console.log("Cardbyte: No signature found, attempting to insert");
+
+              // Try to get user's default signature
+              const defaultSignature = getDefaultSignature();
+
+              if (defaultSignature) {
+                console.log("Cardbyte: Inserting default signature");
+
+                // Insert the signature at the end of the email
+                item.body.setSignatureAsync(
+                  defaultSignature,
+                  { coercionType: Office.CoercionType.Html },
+                  function (setResult) {
+                    if (setResult.status === Office.AsyncResultStatus.Succeeded) {
+                      console.log("Cardbyte: Signature auto-inserted successfully");
+                    } else {
+                      console.error("Cardbyte: Failed to insert signature:", setResult.error);
+                    }
+                    // Always complete the event to allow sending
+                    event.completed({ allowEvent: true });
+                  }
+                );
+              } else {
+                console.log("Cardbyte: No default signature configured");
+                event.completed({ allowEvent: true });
+              }
+            } else {
+              console.log("Cardbyte: Signature already exists in email");
+              event.completed({ allowEvent: true });
+            }
+          } else {
+            console.error("Cardbyte: Could not read email body:", bodyResult.error);
+            event.completed({ allowEvent: true });
+          }
+        });
+
+      } catch (error) {
+        console.error("Cardbyte: Error in onItemSendHandler:", error);
+        event.completed({ allowEvent: true });
+      }
+    };
+
+    // Helper function to get default signature
+    // This should match how your React app saves signatures
+    function getDefaultSignature() {
+      // Try to get from localStorage (where your React app should save it)
+      const savedSignature = localStorage.getItem('cardbyte-default-signature');
+
+      if (savedSignature) {
+        return savedSignature;
+      }
+
+      // Fallback: Check for any saved signature
+      const anySignature = localStorage.getItem('cardbyte-signature');
+      if (anySignature) {
+        return anySignature;
+      }
+
+      // Ultimate fallback: Simple default signature
+      return `
+        <div data-cardbyte="true" style="font-family: Arial, sans-serif; font-size: 12px; color: #666; margin-top: 20px; padding-top: 20px; border-top: 1px solid #e0e0e0;">
+          <p>
+            <strong>Sent with Cardbyte Signature Manager</strong><br>
+            Professional email signatures made easy<br>
+            <a href="https://cardbyte.ai" style="color: #0066cc; text-decoration: none;">cardbyte.ai</a>
+          </p>
+        </div>
+      `;
+    }
+
+    // Optional: Also expose onComposeHandler if you want to experiment later
+    window.onComposeHandler = function (event) {
+      console.log("Cardbyte: Compose handler triggered");
+      event.completed();
+    };
+
+    console.log("Cardbyte: Event handlers registered");
+  </script>
+
   <!-- FIXED (non-hashed) JS -->
   <script src="/outlook-plug-in/static/js/main.js"></script>
-  <!-- <script src="/outlook-plug-in/static/js/main.js"></script> -->
 </body>
 
 </html>

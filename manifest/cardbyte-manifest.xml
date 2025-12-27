@@ -6,51 +6,57 @@
   xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides"
   xsi:type="MailApp">
 
+  <!-- 1. IDENTITY & METADATA -->
   <Id>f0a9e2f9-1234-4c81-8e76-123456789001</Id>
-  <Version>1.0.0.10</Version>
+  <Version>1.0.0.7</Version> <!-- Incremented for event activation -->
   <ProviderName>Cardbyte</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Cardbyte Signature Manager" />
-  <Description DefaultValue="Manage and automatically insert email signatures" />
+  <Description DefaultValue="Manage and automatically insert email signatures" /> <!-- Updated -->
 
-  <IconUrl
-    DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/CB_logo_high.png" />
-  <HighResolutionIconUrl
-    DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/CB_logo_high.png" />
+  <!-- Icon URLs updated to correct sizes: 128x128 for mail add-ins[citation:3][citation:6] -->
+  <IconUrl DefaultValue="https://navajna.com/assets/logo-CF_pjoxr.png" />
+  <HighResolutionIconUrl DefaultValue="https://navajna.com/assets/logo-CF_pjoxr.png" />
 
   <SupportUrl DefaultValue="https://cardbyte.ai" />
 
+  <!-- 2. HOSTS & REQUIREMENTS -->
   <Hosts>
     <Host Name="Mailbox" />
   </Hosts>
 
   <Requirements>
+    <!-- MinVersion set to 1.5 for ribbon support[citation:4] -->
     <Sets DefaultMinVersion="1.5">
       <Set Name="Mailbox" MinVersion="1.5" />
     </Sets>
   </Requirements>
 
+  <!-- 3. TASKPANE LOCATION (Fallback for older clients) -->
   <FormSettings>
     <Form xsi:type="ItemRead">
       <DesktopSettings>
-        <SourceLocation DefaultValue="https://signature.cardbyte.ai/" />
+        <SourceLocation DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html" />
         <RequestedHeight>250</RequestedHeight>
       </DesktopSettings>
     </Form>
     <Form xsi:type="ItemEdit">
       <DesktopSettings>
-        <SourceLocation DefaultValue="https://signature.cardbyte.ai/" />
+        <SourceLocation DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html" />
       </DesktopSettings>
     </Form>
   </FormSettings>
 
+  <!-- 4. PERMISSIONS -->
   <Permissions>ReadWriteItem</Permissions>
 
+  <!-- 5. ACTIVATION RULE -->
   <Rule xsi:type="RuleCollection" Mode="Or">
     <Rule xsi:type="ItemIs" ItemType="Message" FormType="Edit" />
     <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read" />
   </Rule>
 
+  <!-- 6. VERSIONOVERRIDES SECTION - REQUIRED FOR RIBBON COMMANDS[citation:9] -->
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides"
     xsi:type="VersionOverridesV1_0">
     <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1"
@@ -63,15 +69,16 @@
       <Hosts>
         <Host xsi:type="MailHost">
           <DesktopFormFactor>
+            <!-- Function file for any ExecuteFunction commands -->
             <FunctionFile resid="functionFile" />
 
-            <!-- ItemSend event for auto-insert before sending -->
+            <!-- ADDED: EVENT-BASED ACTIVATION - ItemSend event -->
             <ExtensionPoint xsi:type="Events">
               <Event Type="ItemSend" FunctionExecution="synchronous"
                 FunctionName="onItemSendHandler" />
             </ExtensionPoint>
 
-            <!-- Ribbon buttons for manual control -->
+            <!-- MESSAGE READ RIBBON BUTTON -->
             <ExtensionPoint xsi:type="MessageReadCommandSurface">
               <OfficeTab id="TabDefault">
                 <Group id="signatureGroup">
@@ -95,6 +102,7 @@
               </OfficeTab>
             </ExtensionPoint>
 
+            <!-- MESSAGE COMPOSE RIBBON BUTTON -->
             <ExtensionPoint xsi:type="MessageComposeCommandSurface">
               <OfficeTab id="TabDefault">
                 <Group id="signatureGroupCompose">
@@ -112,7 +120,6 @@
                     </Icon>
                     <Action xsi:type="ShowTaskpane">
                       <SourceLocation resid="signatureTaskPaneUrl" />
-                      <!-- When opened in compose mode, can auto-insert -->
                     </Action>
                   </Control>
                 </Group>
@@ -122,27 +129,29 @@
         </Host>
       </Hosts>
 
+      <!-- 7. RESOURCES SECTION -->
       <Resources>
         <bt:Images>
-          <bt:Image id="icon16"
-            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/16.png" />
-          <bt:Image id="icon32"
-            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/32.png" />
-          <bt:Image id="icon80"
-            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/80.png" />
+          <!-- Update these URLs to your actual icon files -->
+          <bt:Image id="icon16" DefaultValue="https://navajna.com/assets/logo-CF_pjoxr.png" />
+          <bt:Image id="icon32" DefaultValue="https://navajna.com/assets/logo-CF_pjoxr.png" />
+          <bt:Image id="icon80" DefaultValue="https://navajna.com/assets/logo-CF_pjoxr.png" />
         </bt:Images>
         <bt:Urls>
-          <bt:Url id="functionFile" DefaultValue="https://signature.cardbyte.ai/" />
-          <bt:Url id="signatureTaskPaneUrl" DefaultValue="https://signature.cardbyte.ai/" />
+          <!-- Function file - can be same as taskpane if no functions -->
+          <bt:Url id="functionFile"
+            DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html" />
+          <bt:Url id="signatureTaskPaneUrl"
+            DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html" />
         </bt:Urls>
         <bt:ShortStrings>
           <bt:String id="groupLabel" DefaultValue="Cardbyte Signature" />
-          <bt:String id="paneButtonLabel" DefaultValue="Insert Signature" />
+          <bt:String id="paneButtonLabel" DefaultValue="Open Signature Manager" />
           <bt:String id="superTipTitle" DefaultValue="Cardbyte Signature Manager" />
         </bt:ShortStrings>
         <bt:LongStrings>
           <bt:String id="superTipDescription"
-            DefaultValue="Insert or edit your email signature. Signatures are also auto-added before sending." />
+            DefaultValue="Open the Cardbyte signature manager to insert or edit email signatures. Signatures auto-insert before sending." />
         </bt:LongStrings>
       </Resources>
     </VersionOverrides>

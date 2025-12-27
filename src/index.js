@@ -22,9 +22,8 @@ if (typeof Office !== "undefined") {
     render(
         {
             accountType: "office365",
-            displayName: "Sai Rajesh Korla",
-            emailAddress: 
-            "sairajesh.korla1272@outlook.com", 
+            displayName: "Sai Rajesh",
+            emailAddress: "sairajesh.korla1272@outlook.com", 
             // "sairajesh.korla@navajna.com",
             timeZone: "India Standard Time"
         }
