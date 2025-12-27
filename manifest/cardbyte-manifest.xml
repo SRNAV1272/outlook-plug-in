@@ -8,11 +8,11 @@
 
   <!-- 1. IDENTITY & METADATA -->
   <Id>f0a9e2f9-1234-4c81-8e76-123456789001</Id>
-  <Version>1.0.0.8</Version> <!-- Incremented version -->
+  <Version>1.0.0.8</Version>
   <ProviderName>Cardbyte</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Cardbyte Signature Manager" />
-  <Description DefaultValue="Manage and insert email signatures" /> <!-- Reverted to original -->
+  <Description DefaultValue="Manage and insert email signatures" />
 
   <!-- Icon URLs -->
   <IconUrl
@@ -28,8 +28,8 @@
   </Hosts>
 
   <Requirements>
-    <Sets DefaultMinVersion="1.5">
-      <Set Name="Mailbox" MinVersion="1.5" />
+    <Sets DefaultMinVersion="1.10">
+      <Set Name="Mailbox" MinVersion="1.10" />
     </Sets>
   </Requirements>
 
@@ -63,18 +63,21 @@
     <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1"
       xsi:type="VersionOverridesV1_1">
       <Requirements>
-        <bt:Sets DefaultMinVersion="1.5">
+        <bt:Sets DefaultMinVersion="1.10">
           <bt:Set Name="Mailbox" />
         </bt:Sets>
       </Requirements>
       <Hosts>
         <Host xsi:type="MailHost">
           <DesktopFormFactor>
-            <!-- Function file for any ExecuteFunction commands -->
+            <!-- Function file for ribbon commands -->
             <FunctionFile resid="functionFile" />
 
-            <!-- REMOVED Event-based activation for now to fix installation -->
-            <!-- Keep only the ribbon buttons for now -->
+            <!-- EVENT-BASED ACTIVATION: OnMessageCreated with FunctionExecution -->
+            <ExtensionPoint xsi:type="Events">
+              <Event Type="OnMessageCreated" FunctionExecution="asynchronous"
+                FunctionName="onComposeHandler" />
+            </ExtensionPoint>
 
             <!-- MESSAGE READ RIBBON BUTTON -->
             <ExtensionPoint xsi:type="MessageReadCommandSurface">
@@ -127,8 +130,6 @@
         </Host>
       </Hosts>
 
-      <!-- REMOVED Runtimes section -->
-
       <!-- 7. RESOURCES SECTION -->
       <Resources>
         <bt:Images>
@@ -140,8 +141,11 @@
             DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/80.png" />
         </bt:Images>
         <bt:Urls>
+          <!-- Function file for ribbon commands -->
           <bt:Url id="functionFile" DefaultValue="https://signature.cardbyte.ai/" />
+          <!-- Taskpane URL -->
           <bt:Url id="signatureTaskPaneUrl" DefaultValue="https://signature.cardbyte.ai/" />
+          <!-- Note: No separate event handler URL needed - it uses the functionFile -->
         </bt:Urls>
         <bt:ShortStrings>
           <bt:String id="groupLabel" DefaultValue="Cardbyte Signature" />
