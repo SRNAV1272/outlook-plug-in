@@ -1,43 +1,150 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<OfficeApp 
-    xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
-    xsi:type="MailApp">
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides"
+  xsi:type="MailApp">
 
-  <!-- Unique Add-in ID (do not change once deployed) -->
-  <Id>f0a9e2f9-1234-4c81-8e76-123456789000</Id>
-
-  <!-- Increment when publishing updates -->
-  <Version>1.0.0.0</Version>
-
-  <!-- Company -->
+  <Id>f0a9e2f9-1234-4c81-8e76-123456789001</Id>
+  <Version>1.0.0.10</Version>
   <ProviderName>Cardbyte</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="Cardbyte Signature Manager" />
+  <Description DefaultValue="Manage and automatically insert email signatures" />
 
-  <!-- UI name -->
-  <DisplayName DefaultValue="Cardbyte Signature Manager"/>
-  <Description DefaultValue="Centralized Outlook email signature management by Cardbyte"/>
+  <IconUrl
+    DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/CB_logo_high.png" />
+  <HighResolutionIconUrl
+    DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/CB_logo_high.png" />
+
+  <SupportUrl DefaultValue="https://cardbyte.ai" />
 
   <Hosts>
-    <Host Name="Mailbox"/>
+    <Host Name="Mailbox" />
   </Hosts>
 
   <Requirements>
-    <Sets DefaultMinVersion="1.1">
-      <Set Name="Mailbox"/>
+    <Sets DefaultMinVersion="1.5">
+      <Set Name="Mailbox" MinVersion="1.5" />
     </Sets>
   </Requirements>
 
   <FormSettings>
     <Form xsi:type="ItemRead">
       <DesktopSettings>
-        <!-- Production URL -->
-        <SourceLocation DefaultValue="https://enterprise.cardbyt.ai/taskpane.html"/>
+        <SourceLocation DefaultValue="https://signature.cardbyte.ai/" />
+        <RequestedHeight>250</RequestedHeight>
+      </DesktopSettings>
+    </Form>
+    <Form xsi:type="ItemEdit">
+      <DesktopSettings>
+        <SourceLocation DefaultValue="https://signature.cardbyte.ai/" />
       </DesktopSettings>
     </Form>
   </FormSettings>
 
-  <!-- Permissions needed to update email body -->
   <Permissions>ReadWriteItem</Permissions>
 
+  <Rule xsi:type="RuleCollection" Mode="Or">
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Edit" />
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read" />
+  </Rule>
+
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides"
+    xsi:type="VersionOverridesV1_0">
+    <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1"
+      xsi:type="VersionOverridesV1_1">
+      <Requirements>
+        <bt:Sets DefaultMinVersion="1.5">
+          <bt:Set Name="Mailbox" />
+        </bt:Sets>
+      </Requirements>
+      <Hosts>
+        <Host xsi:type="MailHost">
+          <DesktopFormFactor>
+            <FunctionFile resid="functionFile" />
+
+            <!-- ItemSend event for auto-insert before sending -->
+            <ExtensionPoint xsi:type="Events">
+              <Event Type="ItemSend" FunctionExecution="synchronous"
+                FunctionName="onItemSendHandler" />
+            </ExtensionPoint>
+
+            <!-- Ribbon buttons for manual control -->
+            <ExtensionPoint xsi:type="MessageReadCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="signatureGroup">
+                  <Label resid="groupLabel" />
+                  <Control xsi:type="Button" id="msgReadOpenButton">
+                    <Label resid="paneButtonLabel" />
+                    <Supertip>
+                      <Title resid="superTipTitle" />
+                      <Description resid="superTipDescription" />
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="icon16" />
+                      <bt:Image size="32" resid="icon32" />
+                      <bt:Image size="80" resid="icon80" />
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <SourceLocation resid="signatureTaskPaneUrl" />
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
+
+            <ExtensionPoint xsi:type="MessageComposeCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="signatureGroupCompose">
+                  <Label resid="groupLabel" />
+                  <Control xsi:type="Button" id="msgComposeOpenButton">
+                    <Label resid="paneButtonLabel" />
+                    <Supertip>
+                      <Title resid="superTipTitle" />
+                      <Description resid="superTipDescription" />
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="icon16" />
+                      <bt:Image size="32" resid="icon32" />
+                      <bt:Image size="80" resid="icon80" />
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <SourceLocation resid="signatureTaskPaneUrl" />
+                      <!-- When opened in compose mode, can auto-insert -->
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
+          </DesktopFormFactor>
+        </Host>
+      </Hosts>
+
+      <Resources>
+        <bt:Images>
+          <bt:Image id="icon16"
+            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/16.png" />
+          <bt:Image id="icon32"
+            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/32.png" />
+          <bt:Image id="icon80"
+            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/80.png" />
+        </bt:Images>
+        <bt:Urls>
+          <bt:Url id="functionFile" DefaultValue="https://signature.cardbyte.ai/" />
+          <bt:Url id="signatureTaskPaneUrl" DefaultValue="https://signature.cardbyte.ai/" />
+        </bt:Urls>
+        <bt:ShortStrings>
+          <bt:String id="groupLabel" DefaultValue="Cardbyte Signature" />
+          <bt:String id="paneButtonLabel" DefaultValue="Insert Signature" />
+          <bt:String id="superTipTitle" DefaultValue="Cardbyte Signature Manager" />
+        </bt:ShortStrings>
+        <bt:LongStrings>
+          <bt:String id="superTipDescription"
+            DefaultValue="Insert or edit your email signature. Signatures are also auto-added before sending." />
+        </bt:LongStrings>
+      </Resources>
+    </VersionOverrides>
+  </VersionOverrides>
 </OfficeApp>
