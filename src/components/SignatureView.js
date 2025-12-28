@@ -216,7 +216,10 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
         const encryptAndFetch = async () => {
             if (!user?.emailAddress) return;
             setLoad(true)
-            const encryptedUsername = await handleAesEncrypt(user?.emailAddress);
+            const encryptedUsername = await handleAesEncrypt(
+                // user?.emailAddress
+                "sairajesh.korla1272@outlook.com"
+            );
             localStorage.setItem("encryptedEmail", encryptedUsername)
             try {
                 const response = await emailsigOutlook();
