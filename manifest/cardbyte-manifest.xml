@@ -36,13 +36,13 @@
   <FormSettings>
     <Form xsi:type="ItemRead">
       <DesktopSettings>
-        <SourceLocation DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html" />
+        <SourceLocation DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html?v=1.0.0" />
         <RequestedHeight>250</RequestedHeight>
       </DesktopSettings>
     </Form>
     <Form xsi:type="ItemEdit">
       <DesktopSettings>
-        <SourceLocation DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html" />
+        <SourceLocation DefaultValue="https://srnav1272.github.io/outlook-plug-in/taskpane.html?v=1.0.0" />
       </DesktopSettings>
     </Form>
   </FormSettings>
