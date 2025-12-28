@@ -39,6 +39,56 @@ export default function App({ user }) {
     init();
   }, [init]);
 
+  // function autoApplyDefaultSignature() {
+  //   if (signatureApplied) return;
+
+  //   if (typeof Office === "undefined") return;
+
+  //   const item = Office.context?.mailbox?.item;
+  //   if (!item || !item.body) return;
+
+  //   const settings = Office.context.roamingSettings;
+  //   const storedSignature = settings.get("defaultSignatureHtml");
+
+  //   if (!storedSignature) return;
+
+  //   signatureApplied = true;
+
+  //   item.body.getAsync(Office.CoercionType.Html, (result) => {
+  //     if (result.status !== Office.AsyncResultStatus.Succeeded) return;
+
+  //     const body = result.value || "";
+
+  //     // 🛑 Prevent duplicate
+  //     if (body.includes("data-default-signature")) return;
+
+  //     const signatureHtml = `
+  //     <div data-default-signature="true">
+  //       ${storedSignature}
+  //     </div>
+  //   `;
+
+  //     const isReplyOrForward =
+  //       item.conversationId && body.trim().length > 0;
+
+  //     const updatedBody = isReplyOrForward
+  //       ? signatureHtml + "<br/>" + body
+  //       : body + signatureHtml;
+
+  //     item.body.setAsync(updatedBody, {
+  //       coercionType: Office.CoercionType.Html,
+  //     });
+  //   });
+  // }
+
+  // useEffect(() => {
+  //   if (mode === "ready") {
+  //     Office.onReady(() => {
+  //       autoApplyDefaultSignature();
+  //     });
+  //   }
+  // }, [mode]);
+
   async function loadSignature() {
     try {
       setLoading(true);

@@ -8,6 +8,8 @@ import { generateEmailSignatureHTML, IconAvatar } from "./SignatureComponents/Ic
 import { card } from "../data";
 import { handleAesDecrypt, handleAesEncrypt } from "../util";
 import { emailsigOutlook } from "../services/apiClient";
+import usernotfound from "../components/SignatureComponents/Assets/Images/usernotfound.gif"
+import signnotassigned from "../components/SignatureComponents/Assets/Images/signnotassigned.webp"
 
 export default function SignatureView({ Office, user, apply, showSocialMediaIcons = true }) {
     const containerRef = useRef(null);
@@ -221,15 +223,15 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                 if (response?.data) {
                     const decryptedData = await handleAesDecrypt(response?.data)
                     setForm(JSON.parse(decryptedData))
-                    // console.log("asdkjsdkjahdsasd",
-                    //     JSON.parse(decryptedData)
-                    // )
+                    console.log("asdkjsdkjahdsasd",
+                        JSON.parse(decryptedData)
+                    )
                 }
             } catch (e) {
                 console.error(e)
-                // console.log("asdkjsdkjahdsasd",
-                //     e?.response?.data?.message
-                // )
+                console.log("asdkjsdkjahdsasd",
+                    e?.response?.data?.message
+                )
                 setError(e?.response?.data?.message)
             } finally {
                 setLoad(false)
@@ -267,7 +269,8 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             </Grid>
             <Grid
                 size={{
-                    xs: 11
+                    xs: 11,
+                    lg: 4
                 }}
             >
                 {
@@ -340,10 +343,10 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                         justifyContent="center"
                                         mt={4}
                                     >
-                                        <Box mt={4} textAlign="center">
-                                            <img src={DefaultTemplate} alt="new" width={'100%'} />
+                                        <Box textAlign="center">
+                                            <img src={!!error ? usernotfound : signnotassigned} alt="new" width={'100%'} />
                                             <Typography fontFamily={"Plus Jakarta Sans"} variant="h6" gutterBottom>
-                                                No Signature Available !
+                                                {!!error ? error : "No Signature Assigned !"}
                                             </Typography>
 
                                             <Typography fontFamily={"Plus Jakarta Sans"} variant="body2" color="text.secondary">

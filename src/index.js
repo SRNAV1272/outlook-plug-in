@@ -34,7 +34,7 @@ const renderApp = (user) => {
 const fallbackUser = {
   accountType: "office365",
   displayName: "Korla Sai Rajesh",
-  emailAddress: "sairajesh.korla1272@outlook.com",
+  emailAddress: "sairajesh.korla1@navajna.com",
   timeZone: "India Standard Time",
 };
 
@@ -97,7 +97,7 @@ function applyDefaultSignature() {
 
   const settings = Office.context.roamingSettings;
   const storedSignature = settings.get("defaultSignatureHtml");
-
+  console.log("Asdkjahsdksahdkj", storedSignature)
   // Nothing saved yet → do nothing
   if (!storedSignature) return;
 
@@ -116,7 +116,7 @@ function applyDefaultSignature() {
         ${storedSignature}
       </div>
     `;
-
+    console.log("Asdkjahsdksahdkj", signatureHtml)
     const isReplyOrForward =
       item.conversationId && body.trim().length > 0;
 
