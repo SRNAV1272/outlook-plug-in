@@ -161,10 +161,10 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
     };
 
     useEffect(() => {
-        if (!card || !form?.elements?.length) return;
-        const updated = updateFieldsFromCard(card)([...form?.elements]);
+        if (!form?.card || !form?.elements?.length) return;
+        const updated = updateFieldsFromCard(form?.card)([...form?.elements]);
         setAllFields(updated);
-    }, [form?.elements]);
+    }, [form]);
 
     const [backgroundImage] = useImage(form?.emailSignatureUrl);
 
@@ -194,7 +194,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             //     [type]: blob,
             //     "text/plain": new Blob([html], { type: "text/plain" })
             // });
-            console.log(html)
+            // console.log(html)
             const settings = Office.context.roamingSettings;
             settings.set("defaultSignatureHtml", html)
             apply(html)
@@ -221,15 +221,15 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                 if (response?.data) {
                     const decryptedData = await handleAesDecrypt(response?.data)
                     setForm(JSON.parse(decryptedData))
-                    console.log("asdkjsdkjahdsasd",
-                        decryptedData
-                    )
+                    // console.log("asdkjsdkjahdsasd",
+                    //     JSON.parse(decryptedData)
+                    // )
                 }
             } catch (e) {
                 console.error(e)
-                console.log("asdkjsdkjahdsasd",
-                    e?.response?.data?.message
-                )
+                // console.log("asdkjsdkjahdsasd",
+                //     e?.response?.data?.message
+                // )
                 setError(e?.response?.data?.message)
             } finally {
                 setLoad(false)
