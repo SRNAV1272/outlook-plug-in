@@ -1,5 +1,5 @@
 /* global Office */
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { getOfficeToken, login, setToken, getToken } from "./services/authService";
 import LoginForm from "./components/LoginForm";
 import SignatureView from "./components/SignatureView";
@@ -10,12 +10,7 @@ export default function App({ user }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    // console.log("sdkjahdskjashdkjasd", )
-    init();
-  }, []);
-
-  async function init() {
+  const init = useCallback(async () => {
     setLoading(true);
     setError("");
 
@@ -37,7 +32,12 @@ export default function App({ user }) {
       setMode("ready");
       setLoading(false);
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    // console.log("sdkjahdskjashdkjasd", )
+    init();
+  }, [init]);
 
   async function loadSignature() {
     try {
@@ -107,6 +107,7 @@ export default function App({ user }) {
   if (mode === "ready") {
     return (
       <SignatureView
+        Office={Office}
         user={user}
         apply={applySignature}
         refresh={loadSignature}

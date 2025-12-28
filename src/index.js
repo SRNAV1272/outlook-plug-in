@@ -1,6 +1,5 @@
 /* global Office */
 
-import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";
@@ -51,30 +50,70 @@ let signatureApplied = false;
  * Apply Default Signature (AUTO)
  * --------------------------------------------------
  */
+// function applyDefaultSignature() {
+//   if (signatureApplied) return;
+//   signatureApplied = true;
+
+//   const item = Office.context.mailbox.item;
+//   if (!item || !item.body) return;
+
+//   item.body.getAsync(Office.CoercionType.Html, (result) => {
+//     if (result.status !== Office.AsyncResultStatus.Succeeded) return;
+
+//     const body = result.value || "";
+
+//     // Prevent duplicate signature
+//     if (body.includes("data-default-signature")) return;
+
+//     const profile = Office.context.mailbox.userProfile;
+
+//     const signatureHtml = `
+//       <div data-default-signature="true">
+//         <br/>
+//         <strong>${profile?.displayName ?? fallbackUser.displayName}</strong><br/>
+//         Software Engineer<br/>
+//         📧 ${profile?.emailAddress ?? fallbackUser.emailAddress}<br/>
+//         🌍 India
+//       </div>
+//     `;
+
+//     const isReplyOrForward =
+//       item.conversationId && body.trim().length > 0;
+
+//     const updatedBody = isReplyOrForward
+//       ? signatureHtml + "<br/>" + body
+//       : body + signatureHtml;
+
+//     item.body.setAsync(updatedBody, {
+//       coercionType: Office.CoercionType.Html,
+//     });
+//   });
+// }
 function applyDefaultSignature() {
   if (signatureApplied) return;
-  signatureApplied = true;
 
   const item = Office.context.mailbox.item;
   if (!item || !item.body) return;
+
+  const settings = Office.context.roamingSettings;
+  const storedSignature = settings.get("defaultSignatureHtml");
+
+  // Nothing saved yet → do nothing
+  if (!storedSignature) return;
+
+  signatureApplied = true;
 
   item.body.getAsync(Office.CoercionType.Html, (result) => {
     if (result.status !== Office.AsyncResultStatus.Succeeded) return;
 
     const body = result.value || "";
 
-    // Prevent duplicate signature
+    // 🛑 Prevent duplicate insertion
     if (body.includes("data-default-signature")) return;
-
-    const profile = Office.context.mailbox.userProfile;
 
     const signatureHtml = `
       <div data-default-signature="true">
-        <br/>
-        <strong>${profile?.displayName ?? fallbackUser.displayName}</strong><br/>
-        Software Engineer<br/>
-        📧 ${profile?.emailAddress ?? fallbackUser.emailAddress}<br/>
-        🌍 India
+        ${storedSignature}
       </div>
     `;
 

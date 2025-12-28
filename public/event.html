@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+
+    <script>
+        Office.onReady(() => {
+            console.log("Cardbyte event-based handler ready");
+        });
+
+        async function onComposeHandler(event) {
+            try {
+                const item = Office.context.mailbox.item;
+                if (!item || !item.body) {
+                    event.completed();
+                    return;
+                }
+
+                // 1️⃣ Get existing body
+                const bodyResult = await new Promise((resolve) => {
+                    item.body.getAsync(
+                        Office.CoercionType.Html,
+                        resolve
+                    );
+                });
+
+                const existingHtml = bodyResult.value || "";
+
+                // 2️⃣ Prevent duplicate insertion
+                if (existingHtml.includes("<!--CARDBYTE_SIGNATURE-->")) {
+                    event.completed();
+                    return;
+                }
+
+                // 3️⃣ Load signature (from roaming settings or fallback)
+                const storedSignature =
+                    Office.context.roamingSettings.get("defaultSignatureHtml");
+
+                const signatureHtml = storedSignature || `
+                    <div style="font-family: Arial; font-size: 12px;">
+                        <b>John Doe</b><br/>
+                        Software Engineer<br/>
+                        <a href="mailto:john@company.com">john@company.com</a>
+                    </div>
+                    `;
+
+                // 4️⃣ Insert signature (append)
+                const updatedHtml = `
+                    ${existingHtml}
+                    <!--CARDBYTE_SIGNATURE-->
+                    ${signatureHtml}
+                    `;
+
+                await new Promise((resolve) => {
+                    item.body.setAsync(
+                        updatedHtml,
+                        { coercionType: Office.CoercionType.Html },
+                        resolve
+                    );
+                });
+
+            } catch (err) {
+                console.error("Cardbyte onCompose error", err);
+            } finally {
+                // 5️⃣ REQUIRED
+                event.completed();
+            }
+        }
+
+        // 🔴 REQUIRED: expose globally
+        window.onComposeHandler = onComposeHandler;
+    </script>
+</head>
+
+<body></body>
+
+</html>
