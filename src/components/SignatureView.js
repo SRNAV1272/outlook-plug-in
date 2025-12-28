@@ -199,6 +199,13 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             // console.log(html)
             const settings = Office.context.roamingSettings;
             settings.set("defaultSignatureHtml", html)
+            settings.saveAsync((result) => {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    console.log("✅ Signature saved");
+                } else {
+                    console.error("❌ Failed to save", result.error);
+                }
+            });
             apply(html)
             toast?.success("Signature copied! Now paste directly into Gmail/Outlook.");
 
