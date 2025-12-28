@@ -234,7 +234,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                     const decryptedData = await handleAesDecrypt(response?.data)
                     setForm(JSON.parse(decryptedData))
                     console.log("asdkjsdkjahdsasd",
-                        user?.emailAddress, "sairajesh.korla1272@outlook.com",
+                        user?.emailAddress,
                         JSON.parse(decryptedData)
                     )
                 }
