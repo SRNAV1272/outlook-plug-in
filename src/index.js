@@ -89,6 +89,10 @@ let signatureApplied = false;
 //     });
 //   });
 // }
+function getItemSignatureKey(item) {
+  return `signatureApplied_${item.itemId}`;
+}
+
 function applyDefaultSignature() {
   if (signatureApplied) return;
 
@@ -96,6 +100,11 @@ function applyDefaultSignature() {
   if (!item || !item.body) return;
 
   const settings = Office.context.roamingSettings;
+  const itemKey = getItemSignatureKey(item);
+
+  // ✅ Already applied for THIS draft
+  if (settings.get(itemKey)) return;
+
   const storedSignature = settings.get("defaultSignatureHtml");
   console.log("Asdkjahsdksahdkj", storedSignature)
   // Nothing saved yet → do nothing
@@ -127,6 +136,11 @@ function applyDefaultSignature() {
     item.body.setAsync(updatedBody, {
       coercionType: Office.CoercionType.Html,
     });
+
+    // ✅ Persist flag
+    settings.set(itemKey, true);
+    settings.saveAsync();
+
   });
 }
 
