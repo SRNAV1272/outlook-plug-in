@@ -5,11 +5,9 @@
   xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
   xsi:type="MailApp">
 
-  <!-- ===================== -->
-  <!-- 1. IDENTITY -->
-  <!-- ===================== -->
+  <!-- IDENTITY -->
   <Id>f0a9e2f9-1234-4c81-8e76-123456789001</Id>
-  <Version>1.0.0.9</Version>
+  <Version>1.0.1.0</Version>
   <ProviderName>Cardbyte</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
 
@@ -23,25 +21,19 @@
 
   <SupportUrl DefaultValue="https://cardbyte.ai" />
 
-  <!-- ===================== -->
-  <!-- 2. HOSTS -->
-  <!-- ===================== -->
+  <!-- HOST -->
   <Hosts>
     <Host Name="Mailbox" />
   </Hosts>
 
-  <!-- ===================== -->
-  <!-- 3. REQUIREMENTS -->
-  <!-- ===================== -->
+  <!-- REQUIREMENTS -->
   <Requirements>
     <Sets DefaultMinVersion="1.5">
       <Set Name="Mailbox" MinVersion="1.5" />
     </Sets>
   </Requirements>
 
-  <!-- ===================== -->
-  <!-- 4. FALLBACK TASKPANE -->
-  <!-- ===================== -->
+  <!-- FALLBACK -->
   <FormSettings>
     <Form xsi:type="ItemRead">
       <DesktopSettings>
@@ -56,128 +48,119 @@
     </Form>
   </FormSettings>
 
-  <!-- ===================== -->
-  <!-- 5. PERMISSIONS -->
-  <!-- ===================== -->
+  <!-- PERMISSIONS -->
   <Permissions>ReadWriteItem</Permissions>
 
-  <!-- ===================== -->
-  <!-- 6. ACTIVATION RULE -->
-  <!-- ===================== -->
+  <!-- RULE -->
   <Rule xsi:type="RuleCollection" Mode="Or">
     <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read" />
     <Rule xsi:type="ItemIs" ItemType="Message" FormType="Edit" />
   </Rule>
 
-  <!-- ===================== -->
-  <!-- 7. VERSION OVERRIDES -->
-  <!-- ===================== -->
+  <!-- VERSION OVERRIDES (CORRECT NAMESPACING) -->
   <VersionOverrides
-    xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1"
-    xsi:type="VersionOverridesV1_1">
+    xmlns="http://schemas.microsoft.com/office/mailappversionoverrides"
+    xsi:type="VersionOverridesV1_0">
 
-    <Requirements>
-      <bt:Sets DefaultMinVersion="1.5">
-        <bt:Set Name="Mailbox" />
-      </bt:Sets>
-    </Requirements>
+    <VersionOverrides
+      xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1"
+      xsi:type="VersionOverridesV1_1">
 
-    <Hosts>
-      <Host xsi:type="MailHost">
-        <DesktopFormFactor>
+      <Requirements>
+        <bt:Sets DefaultMinVersion="1.5">
+          <bt:Set Name="Mailbox" />
+        </bt:Sets>
+      </Requirements>
 
-          <!-- Function file for ExecuteFunction -->
-          <FunctionFile resid="functionFile" />
+      <Hosts>
+        <Host xsi:type="MailHost">
+          <DesktopFormFactor>
 
-          <!-- ===================== -->
-          <!-- MESSAGE READ -->
-          <!-- ===================== -->
-          <ExtensionPoint xsi:type="MessageReadCommandSurface">
-            <OfficeTab id="TabDefault">
-              <Group id="cbReadGroup">
-                <Label resid="groupLabel" />
-                <Control xsi:type="Button" id="cbReadButton">
-                  <Label resid="paneButtonLabel" />
-                  <Supertip>
-                    <Title resid="superTipTitle" />
-                    <Description resid="superTipDescription" />
-                  </Supertip>
-                  <Icon>
-                    <bt:Image size="16" resid="icon16" />
-                    <bt:Image size="32" resid="icon32" />
-                    <bt:Image size="64" resid="icon64" />
-                  </Icon>
-                  <Action xsi:type="ShowTaskpane">
-                    <SourceLocation resid="taskpaneUrl" />
-                  </Action>
-                </Control>
-              </Group>
-            </OfficeTab>
-          </ExtensionPoint>
+            <FunctionFile resid="functionFile" />
 
-          <!-- ===================== -->
-          <!-- MESSAGE COMPOSE -->
-          <!-- ===================== -->
-          <ExtensionPoint xsi:type="MessageComposeCommandSurface">
-            <OfficeTab id="TabDefault">
-              <Group id="cbComposeGroup">
-                <Label resid="groupLabel" />
-                <Control xsi:type="Button" id="cbComposeButton">
-                  <Label resid="applyLabel" />
-                  <Supertip>
-                    <Title resid="applyTitle" />
-                    <Description resid="applyDescription" />
-                  </Supertip>
-                  <Icon>
-                    <bt:Image size="16" resid="icon16" />
-                    <bt:Image size="32" resid="icon32" />
-                    <bt:Image size="64" resid="icon64" />
-                  </Icon>
-                  <Action xsi:type="ExecuteFunction">
-                    <FunctionName>applySignature</FunctionName>
-                  </Action>
-                </Control>
-              </Group>
-            </OfficeTab>
-          </ExtensionPoint>
+            <!-- READ -->
+            <ExtensionPoint xsi:type="MessageReadCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="cbReadGroup">
+                  <Label resid="groupLabel" />
+                  <Control xsi:type="Button" id="cbReadBtn">
+                    <Label resid="openLabel" />
 
-        </DesktopFormFactor>
-      </Host>
-    </Hosts>
+                    <Supertip>
+                      <Title resid="openLabel" />
+                      <Description resid="openDescription" />
+                    </Supertip>
 
-    <!-- ===================== -->
-    <!-- 8. RESOURCES -->
-    <!-- ===================== -->
-    <Resources>
-      <bt:Images>
-        <bt:Image id="icon16"
-          DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/16.png" />
-        <bt:Image id="icon32"
-          DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/32.png" />
-        <bt:Image id="icon64"
-          DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/64.png" />
-      </bt:Images>
+                    <!-- CORRECTED: Use Icon (without bt: prefix) for VersionOverridesV1_1 -->
+                    <Icon>
+                      <bt:Image size="16" resid="icon16" />
+                      <bt:Image size="32" resid="icon32" />
+                      <bt:Image size="64" resid="icon64" />
+                    </Icon>
 
-      <bt:Urls>
-        <bt:Url id="taskpaneUrl" DefaultValue="https://signature.cardbyte.ai/taskpane.html" />
-        <bt:Url id="functionFile" DefaultValue="https://signature.cardbyte.ai/event.html" />
-      </bt:Urls>
+                    <Action xsi:type="ShowTaskpane">
+                      <SourceLocation resid="taskpaneUrl" />
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
 
-      <bt:ShortStrings>
-        <bt:String id="groupLabel" DefaultValue="Cardbyte Signature" />
-        <bt:String id="paneButtonLabel" DefaultValue="Open Signature Manager" />
-        <bt:String id="applyLabel" DefaultValue="Insert Signature" />
-        <bt:String id="superTipTitle" DefaultValue="Cardbyte Signature Manager" />
-        <bt:String id="applyTitle" DefaultValue="Insert Signature" />
-      </bt:ShortStrings>
+            <!-- COMPOSE -->
+            <ExtensionPoint xsi:type="MessageComposeCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="cbComposeGroup">
+                  <Label resid="groupLabel" />
+                  <Control xsi:type="Button" id="cbComposeBtn">
+                    <Label resid="insertLabel" />
 
-      <bt:LongStrings>
-        <bt:String id="superTipDescription"
-          DefaultValue="Open Cardbyte to manage and insert your email signature" />
-        <bt:String id="applyDescription"
-          DefaultValue="Insert your Cardbyte email signature into this message" />
-      </bt:LongStrings>
-    </Resources>
+                    <Supertip>
+                      <Title resid="insertLabel" />
+                      <Description resid="insertDescription" />
+                    </Supertip>
 
+                    <!-- CORRECTED: Use Icon (without bt: prefix) for VersionOverridesV1_1 -->
+                    <Icon>
+                      <bt:Image size="16" resid="icon16" />
+                      <bt:Image size="32" resid="icon32" />
+                      <bt:Image size="64" resid="icon64" />
+                    </Icon>
+
+                    <Action xsi:type="ExecuteFunction">
+                      <FunctionName>applySignature</FunctionName>
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
+
+          </DesktopFormFactor>
+        </Host>
+      </Hosts>
+
+      <Resources>
+        <bt:Images>
+          <bt:Image id="icon16"
+            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/16.png" />
+          <bt:Image id="icon32"
+            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/32.png" />
+          <bt:Image id="icon64"
+            DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/64.png" />
+        </bt:Images>
+
+        <bt:Urls>
+          <bt:Url id="taskpaneUrl" DefaultValue="https://signature.cardbyte.ai/taskpane.html" />
+          <bt:Url id="functionFile" DefaultValue="https://signature.cardbyte.ai/event.html" />
+        </bt:Urls>
+
+        <bt:ShortStrings>
+          <bt:String id="groupLabel" DefaultValue="Cardbyte Signature" />
+          <bt:String id="openLabel" DefaultValue="Open Signature Manager" />
+          <bt:String id="insertLabel" DefaultValue="Insert Signature" />
+        </bt:ShortStrings>
+      </Resources>
+
+    </VersionOverrides>
   </VersionOverrides>
+
 </OfficeApp>

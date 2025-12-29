@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!-- <!DOCTYPE html>
 <html>
 
 <head>
@@ -32,5 +32,141 @@
 </head>
 
 <body></body>
+
+</html> -->
+
+
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge">
+    <!-- Add CSP meta tag to allow Office.js -->
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' https://appsforoffice.microsoft.com; script-src 'self' 'unsafe-inline' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline';">
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <script>
+        // Global error handler
+        window.onerror = function (message, source, lineno, colno, error) {
+            console.error('Global error:', message, error);
+            return true;
+        };
+        // Handle Office.js loading errors
+        if (typeof Office === 'undefined') {
+            console.error('Office.js failed to load');
+            // You might need to load a fallback
+            document.write('<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"><\/script>');
+        }
+        Office.onReady(() => {
+            console.log("CardByte: Office.js loaded successfully");
+            // Check if we're in Outlook context
+            if (!Office.context || !Office.context.mailbox) {
+                console.error("Not in Outlook context");
+                return;
+            }
+            // Associate function
+            try {
+                Office.actions.associate("applySignature", applySignature);
+                console.log("Function associated successfully");
+            } catch (err) {
+                console.error("Failed to associate function:", err);
+            }
+        }).catch(err => {
+            console.error("Office.onReady failed:", err);
+        });
+        async function applySignature(event) {
+            console.log("CardByte: Starting signature application...");
+            try {
+                // Validate we have what we need
+                if (!Office.context || !Office.context.mailbox || !Office.context.mailbox.item) {
+                    console.error("Missing Outlook context");
+                    if (event && event.completed) {
+                        event.completed({ allowEvent: false });
+                    }
+                    return;
+                }
+                // Simple test first
+                console.log("Email subject:", Office.context.mailbox.item.subject || "No subject");
+                const signatureHtml = `
+                    <div style="font-family:Arial, sans-serif; font-size:12px; color:#333; margin:20px 0; padding:10px; background:#f5f5f5; border-left:4px solid #0066cc;">
+                    <strong>Korla Sai Rajesh</strong><br/>
+                                            CardByte Email Signature<br/>
+                    <a href="https://cardbyte.ai" style="color:#0066cc;">cardbyte.ai</a>
+                    </div>
+                                    `;
+                // Try different methods
+                await insertSignature(signatureHtml);
+                console.log("CardByte: Signature applied successfully");
+            } catch (err) {
+                console.error("CardByte error:", err);
+            } finally {
+                // CRITICAL: Always complete the event
+                if (event && typeof event.completed === 'function') {
+                    try {
+                        event.completed();
+                    } catch (e) {
+                        console.error("Failed to complete event:", e);
+                    }
+                }
+            }
+        }
+        async function insertSignature(signatureHtml) {
+            return new Promise((resolve, reject) => {
+                // Method 1: Try setSelectedDataAsync first
+                Office.context.mailbox.item.body.setSelectedDataAsync(
+                    signatureHtml,
+                    {
+                        coercionType: Office.CoercionType.Html,
+                        asyncContext: { resolve, reject, signatureHtml }
+                    },
+                    function (result) {
+                        if (result.status === Office.AsyncResultStatus.Succeeded) {
+                            console.log("setSelectedDataAsync succeeded");
+                            result.asyncContext.resolve();
+                        } else {
+                            console.warn("setSelectedDataAsync failed, trying alternative...");
+                            // Fallback to getAsync/setAsync
+                            fallbackInsert(result.asyncContext.signatureHtml, result.asyncContext.resolve, result.asyncContext.reject);
+                        }
+                    }
+                );
+            });
+        }
+        function fallbackInsert(signatureHtml, resolve, reject) {
+            Office.context.mailbox.item.body.getAsync(
+                Office.CoercionType.Html,
+                { asyncContext: { signatureHtml, resolve, reject } },
+                function (bodyResult) {
+                    if (bodyResult.status === Office.AsyncResultStatus.Succeeded) {
+                        const currentBody = bodyResult.value || "";
+                        const newBody = currentBody + signatureHtml;
+                        Office.context.mailbox.item.body.setAsync(
+                            newBody,
+                            { coercionType: Office.CoercionType.Html },
+                            function (setResult) {
+                                if (setResult.status === Office.AsyncResultStatus.Succeeded) {
+                                    console.log("Fallback insert succeeded");
+                                    bodyResult.asyncContext.resolve();
+                                } else {
+                                    console.error("Fallback insert failed:", setResult.error);
+                                    bodyResult.asyncContext.reject(setResult.error);
+                                }
+                            }
+                        );
+                    } else {
+                        console.error("Failed to get body:", bodyResult.error);
+                        bodyResult.asyncContext.reject(bodyResult.error);
+                    }
+                }
+            );
+        }
+    </script>
+</head>
+
+<body>
+    <!-- Minimal body content -->
+    <div style="display:none;">CardByte Signature Manager Function File</div>
+</body>
 
 </html>
