@@ -1,18 +1,17 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
-  xsi:type="MailApp">
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xsi:type="MailApp">
 
   <Id>f0a9e2f9-1234-4c81-8e76-123456789001</Id>
-  <Version>1.0.2.0</Version>
+  <Version>1.0.2.2</Version>
   <ProviderName>CardByte</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
 
   <DisplayName DefaultValue="CardByte Signature Manager" />
-  <Description DefaultValue="Manage and automatically insert email signatures" />
-  <IconUrl DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/CB_logo_high.png" />
-  <HighResolutionIconUrl DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/CB_logo_high.png" />
+  <Description DefaultValue="Auto-inserts signatures on new emails" />
+  <IconUrl
+    DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/CB_logo_high.png" />
   <SupportUrl DefaultValue="https://cardbyte.ai" />
 
   <Hosts>
@@ -38,71 +37,29 @@
 
   <Rule xsi:type="RuleCollection" Mode="Or">
     <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read" />
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Edit" />
   </Rule>
 
   <DisableEntityHighlighting>false</DisableEntityHighlighting>
 
-  <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides" xsi:type="VersionOverridesV1_0">
-    <Requirements>
-      <bt:Sets>
-        <bt:Set Name="Mailbox" MinVersion="1.3" />
-      </bt:Sets>
-    </Requirements>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides"
+    xsi:type="VersionOverridesV1_0">
 
     <Hosts>
       <Host xsi:type="MailHost">
         <DesktopFormFactor>
           <FunctionFile resid="functionFile" />
 
-          <!-- Message Read -->
-          <ExtensionPoint xsi:type="MessageReadCommandSurface">
-            <OfficeTab id="TabDefault">
-              <Group id="readGroup">
-                <Label resid="groupLabel" />
-                <Control xsi:type="Button" id="openReadPane">
-                  <Label resid="openPaneLabel" />
-                  <Supertip>
-                    <Title resid="superTipTitle" />
-                    <Description resid="superTipDescription" />
-                  </Supertip>
-                  <Icon>
-                    <bt:Image size="16" resid="icon16" />
-                    <bt:Image size="32" resid="icon32" />
-                    <bt:Image size="80" resid="icon80" />
-                  </Icon>
-                  <Action xsi:type="ShowTaskpane">
-                    <SourceLocation resid="taskpaneUrl" />
-                  </Action>
-                </Control>
-              </Group>
-            </OfficeTab>
-          </ExtensionPoint>
-
-          <!-- Message Compose -->
+          <!-- Message Compose Button -->
           <ExtensionPoint xsi:type="MessageComposeCommandSurface">
             <OfficeTab id="TabDefault">
               <Group id="composeGroup">
                 <Label resid="groupLabel" />
-                <Control xsi:type="Button" id="openComposePane">
-                  <Label resid="openPaneLabel" />
+                <Control xsi:type="Button" id="insertSignatureBtn">
+                  <Label resid="insertSignatureLabel" />
                   <Supertip>
-                    <Title resid="superTipTitle" />
-                    <Description resid="superTipDescription" />
-                  </Supertip>
-                  <Icon>
-                    <bt:Image size="16" resid="icon16" />
-                    <bt:Image size="32" resid="icon32" />
-                    <bt:Image size="80" resid="icon80" />
-                  </Icon>
-                  <Action xsi:type="ShowTaskpane">
-                    <SourceLocation resid="taskpaneUrl" />
-                  </Action>
-                </Control>
-                <Control xsi:type="Button" id="applySignature">
-                  <Label resid="applySignatureLabel" />
-                  <Supertip>
-                    <Title resid="applySignatureTitle" />
-                    <Description resid="applySignatureDescription" />
+                    <Title resid="insertSignatureTitle" />
+                    <Description resid="insertSignatureDescription" />
                   </Supertip>
                   <Icon>
                     <bt:Image size="16" resid="icon16" />
@@ -110,7 +67,22 @@
                     <bt:Image size="80" resid="icon80" />
                   </Icon>
                   <Action xsi:type="ExecuteFunction">
-                    <FunctionName>applySignature</FunctionName>
+                    <FunctionName>insertSignature</FunctionName>
+                  </Action>
+                </Control>
+                <Control xsi:type="Button" id="openSettingsBtn">
+                  <Label resid="openSettingsLabel" />
+                  <Supertip>
+                    <Title resid="openSettingsTitle" />
+                    <Description resid="openSettingsDescription" />
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="icon16" />
+                    <bt:Image size="32" resid="icon32" />
+                    <bt:Image size="80" resid="icon80" />
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <SourceLocation resid="taskpaneUrl" />
                   </Action>
                 </Control>
               </Group>
@@ -123,24 +95,29 @@
 
     <Resources>
       <bt:Images>
-        <bt:Image id="icon16" DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/16.png" />
-        <bt:Image id="icon32" DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/32.png" />
-        <bt:Image id="icon80" DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/80.png" />
+        <bt:Image id="icon16"
+          DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/16.png" />
+        <bt:Image id="icon32"
+          DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/32.png" />
+        <bt:Image id="icon80"
+          DefaultValue="https://cardbyteprodstoragehot.blob.core.windows.net/cardbyte-resources/outlook-addin-assets/80.png" />
       </bt:Images>
       <bt:Urls>
-        <bt:Url id="taskpaneUrl" DefaultValue="https://signature.cardbyte.ai/taskpane.html" />
         <bt:Url id="functionFile" DefaultValue="https://signature.cardbyte.ai/event.html" />
+        <bt:Url id="taskpaneUrl" DefaultValue="https://signature.cardbyte.ai/taskpane.html" />
       </bt:Urls>
       <bt:ShortStrings>
-        <bt:String id="groupLabel" DefaultValue="CardByte Signature" />
-        <bt:String id="openPaneLabel" DefaultValue="Open Signature Manager" />
-        <bt:String id="superTipTitle" DefaultValue="CardByte Signature Manager" />
-        <bt:String id="applySignatureLabel" DefaultValue="Apply Signature" />
-        <bt:String id="applySignatureTitle" DefaultValue="Apply Email Signature" />
+        <bt:String id="groupLabel" DefaultValue="CardByte" />
+        <bt:String id="insertSignatureLabel" DefaultValue="Insert Signature" />
+        <bt:String id="insertSignatureTitle" DefaultValue="Insert Signature" />
+        <bt:String id="openSettingsLabel" DefaultValue="Settings" />
+        <bt:String id="openSettingsTitle" DefaultValue="Signature Settings" />
       </bt:ShortStrings>
       <bt:LongStrings>
-        <bt:String id="superTipDescription" DefaultValue="Open the CardByte signature manager to insert or edit email signatures" />
-        <bt:String id="applySignatureDescription" DefaultValue="Insert your configured email signature automatically" />
+        <bt:String id="insertSignatureDescription"
+          DefaultValue="Insert your email signature automatically" />
+        <bt:String id="openSettingsDescription"
+          DefaultValue="Open signature settings and management" />
       </bt:LongStrings>
     </Resources>
   </VersionOverrides>
