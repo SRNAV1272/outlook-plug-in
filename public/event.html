@@ -4,73 +4,65 @@
 <head>
     <meta charset="utf-8" />
     <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-
     <script>
         Office.onReady(() => {
             console.log("Cardbyte event-based handler ready");
+            Office.actions.associate(
+                "onNewMessageHandler",
+                onNewMessageHandler
+            );
         });
-
-        async function onComposeHandler(event) {
+        async function onNewMessageHandler(event) {
             try {
                 const item = Office.context.mailbox.item;
-                if (!item || !item.body) {
+                if (!item?.body) {
                     event.completed();
                     return;
                 }
-
-                // 1️⃣ Get existing body
-                const bodyResult = await new Promise((resolve) => {
-                    item.body.getAsync(
-                        Office.CoercionType.Html,
-                        resolve
-                    );
-                });
-
-                const existingHtml = bodyResult.value || "";
-
-                // 2️⃣ Prevent duplicate insertion
-                if (existingHtml.includes("<!--CARDBYTE_SIGNATURE-->")) {
-                    event.completed();
-                    return;
-                }
-
-                // 3️⃣ Load signature (from roaming settings or fallback)
-                const storedSignature =
-                    Office.context.roamingSettings.get("defaultSignatureHtml");
-
+                // Get signature from your storage or API
+                const storedSignature = Office.context.roamingSettings.get("defaultSignatureHtml");
                 const signatureHtml = storedSignature || `
-                    <div style="font-family: Arial; font-size: 12px;">
-                        <b>John Doe</b><br/>
-                        Software Engineer<br/>
-                        <a href="mailto:john@company.com">john@company.com</a>
-                    </div>
-                    `;
-
-                // 4️⃣ Insert signature (append)
-                const updatedHtml = `
-                    ${existingHtml}
-                    <!--CARDBYTE_SIGNATURE-->
-                    ${signatureHtml}
-                    `;
-
-                await new Promise((resolve) => {
-                    item.body.setAsync(
-                        updatedHtml,
-                        { coercionType: Office.CoercionType.Html },
-                        resolve
-                    );
+                            <div style="font-family: Arial, sans-serif; font-size: 12px; color: #333; margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd;">
+                            <b>John Doe</b><br/>
+                                                    Software Engineer | CardByte<br/>
+                                                    📧 <a href="mailto:john@company.com" style="color: #0066cc; text-decoration: none;">john@company.com</a><br/>
+                                                    📱 +1 (123) 456-7890<br/>
+                                                    🌐 <a href="https://cardbyte.ai" style="color: #0066cc; text-decoration: none;">cardbyte.ai</a>
+                            </div>
+                                                `;
+                // Get current body content
+                const bodyResult = await new Promise((resolve) => {
+                    item.body.getAsync(Office.CoercionType.Html, (result) => {
+                        resolve(result);
+                    });
                 });
-
+                if (bodyResult.status === Office.AsyncResultStatus.Succeeded) {
+                    let currentBody = bodyResult.value || "";
+                    // Check if signature already exists to avoid duplicates
+                    const signatureMarker = "<!--CARDBYTE_SIGNATURE-->";
+                    if (!currentBody.includes(signatureMarker)) {
+                        // Append signature to the end
+                        const newBody = currentBody + signatureMarker + signatureHtml;
+                        // Set the new body
+                        await new Promise((resolve) => {
+                            item.body.setAsync(newBody,
+                                { coercionType: Office.CoercionType.Html },
+                                (result) => {
+                                    console.log("Signature inserted successfully");
+                                    resolve(result);
+                                }
+                            );
+                        });
+                    } else {
+                        console.log("Signature already exists, skipping");
+                    }
+                }
             } catch (err) {
                 console.error("Cardbyte onCompose error", err);
             } finally {
-                // 5️⃣ REQUIRED
-                event.completed();
+                event.completed(); // ✅ REQUIRED - tells Outlook we're done
             }
         }
-
-        // 🔴 REQUIRED: expose globally
-        window.onComposeHandler = onComposeHandler;
     </script>
 </head>
 

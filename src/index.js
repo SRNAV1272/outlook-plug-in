@@ -103,7 +103,7 @@ function applyDefaultSignature() {
   const itemKey = getItemSignatureKey(item);
 
   // ✅ Already applied for THIS draft
-  if (settings.get(itemKey)) return;
+  // if (settings.get(itemKey)) return;
 
   const storedSignature = settings.get("defaultSignatureHtml");
   console.log("Asdkjahsdksahdkj", storedSignature)
