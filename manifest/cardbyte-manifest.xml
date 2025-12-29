@@ -8,7 +8,7 @@
 
   <!-- 1. IDENTITY & METADATA -->
   <Id>f0a9e2f9-1234-4c81-8e76-123456789001</Id>
-  <Version>1.0.0.6</Version> <!-- Incremented version -->
+  <Version>1.0.0.8</Version> <!-- Incremented version -->
   <ProviderName>Cardbyte</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Cardbyte Signature Manager" />
@@ -50,7 +50,7 @@
   </FormSettings>
 
   <!-- 4. PERMISSIONS -->
-  <Permissions>ReadWriteItem</Permissions>
+  <Permissions>ReadWriteMailbox</Permissions>
 
   <!-- 5. ACTIVATION RULE -->
   <Rule xsi:type="RuleCollection" Mode="Or">
@@ -121,6 +121,13 @@
                 </Group>
               </OfficeTab>
             </ExtensionPoint>
+
+            <!-- âœ… Added for event-based activation -->
+            <ExtensionPoint xsi:type="Events">
+              <Event Type="OnMessageCompose" FunctionName="onNewMessageHandler"
+                FunctionExecution="synchronous" />
+            </ExtensionPoint>
+
           </DesktopFormFactor>
         </Host>
       </Hosts>
@@ -138,8 +145,9 @@
         </bt:Images>
         <bt:Urls>
           <!-- Function file - can be same as taskpane if no functions -->
-          <bt:Url id="functionFile" DefaultValue="https://signature.cardbyte.ai/" />
-          <bt:Url id="signatureTaskPaneUrl" DefaultValue="https://signature.cardbyte.ai/" />
+          <bt:Url id="functionFile" DefaultValue="https://signature.cardbyte.ai/event.html" />
+          <bt:Url id="signatureTaskPaneUrl"
+            DefaultValue="https://signature.cardbyte.ai/taskpane.html" />
         </bt:Urls>
         <bt:ShortStrings>
           <bt:String id="groupLabel" DefaultValue="Cardbyte Signature" />
