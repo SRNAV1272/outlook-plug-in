@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <script>
+        // Debug logging
+        console.log("=== CARDBYTE EVENT.HTML LOADED ===", new Date().toISOString());
+        Office.onReady(async () => {
+            console.log("✅ Office.js ready in CardByte event handler");
+            console.log("Mailbox available:", Office.context.mailbox ? "Yes" : "No");
+            // ✅ REGISTER THE FUNCTION - THIS IS CRITICAL
+            try {
+                Office.actions.associate("applySignature", applySignature);
+                console.log("✅ Function 'applySignature' registered successfully");
+            } catch (error) {
+                console.error("❌ Failed to register function:", error);
+            }
+            // Optional: Test if we can access email item
+            if (Office.context.mailbox && Office.context.mailbox.item) {
+                console.log("📧 Current item type:", Office.context.mailbox.item.itemType);
+            }
+        });
+        // ✅ AUTO-RUN FUNCTION - MUST HAVE event PARAMETER
+        async function applySignature(event) {
+            console.log("🚀 applySignature() called by auto-run!", new Date().toISOString());
+            console.log("Event type:", event ? "Received" : "Missing");
+            try {
+                // Validate Outlook context
+                if (!Office.context || !Office.context.mailbox || !Office.context.mailbox.item) {
+                    console.error("❌ No Outlook context or email item");
+                    if (event && event.completed) event.completed();
+                    return;
+                }
+                const item = Office.context.mailbox.item;
+                console.log("📝 Composing email:", item.subject || "No subject");
+                // Get signature (from storage or default)
+                const storedSignature = Office.context.roamingSettings.get("defaultSignatureHtml");
+                const signatureHtml = storedSignature ||
+                    `
+                        <div style="font-family: Arial, sans-serif; font-size: 12px; color: #333; margin-top: 20px; padding-top: 20px; border-top: 2px solid #0066cc;">
+                        <table cellpadding="0" cellspacing="0" style="border-collapse: collapse;">
+                        <tr>
+                        <td style="padding-right: 15px; vertical-align: top;">
+                        <!-- Optional logo -->
+                        </td>
+                        <td style="vertical-align: top;">
+                        <strong style="color: #0066cc; font-size: 14px;">Korla Sai Rajesh</strong><br/>
+                        <span style="color: #666;">CardByte Signature Manager</span><br/><br/>
+                                                            📧 <a href="mailto:support@cardbyte.ai" style="color: #0066cc; text-decoration: none;">support@cardbyte.ai</a><br/>
+                                                            🌐 <a href="https://cardbyte.ai" style="color: #0066cc; text-decoration: none;">cardbyte.ai</a>
+                        </td>
+                        </tr>
+                        </table>
+                        <div style="font-size: 10px; color: #999; margin-top: 10px;">
+                                                    Sent with CardByte Signature Manager
+                        </div>
+                        </div>
+                    `;
+                // ✅ METHOD 1: Use setSelectedDataAsync (most reliable)
+                await insertSignatureAtCursor(item, signatureHtml);
+                console.log("✅ Signature applied successfully");
+            } catch (error) {
+                console.error("❌ Error in applySignature:", error);
+            } finally {
+                // ✅ CRITICAL: MUST call event.completed() for auto-run
+                if (event && typeof event.completed === 'function') {
+                    console.log("📞 Calling event.completed()");
+                    event.completed();
+                } else {
+                    console.warn("⚠️ event.completed() not available");
+                }
+            }
+        }
+        // Helper function to insert signature
+        function insertSignatureAtCursor(item, signatureHtml) {
+            return new Promise((resolve, reject) => {
+                item.body.setSelectedDataAsync(
+                    signatureHtml,
+                    {
+                        coercionType: Office.CoercionType.Html,
+                        asyncContext: { resolve, reject }
+                    },
+                    function (result) {
+                        if (result.status === Office.AsyncResultStatus.Succeeded) {
+                            console.log("✅ Signature inserted at cursor");
+                            result.asyncContext.resolve();
+                        } else {
+                            console.warn("⚠️ setSelectedDataAsync failed, trying fallback...");
+                            // Fallback: append to body
+                            appendToBody(item, signatureHtml)
+                                .then(() => result.asyncContext.resolve())
+                                .catch(error => result.asyncContext.reject(error));
+                        }
+                    }
+                );
+            });
+        }
+        // Fallback: Append to end of body
+        function appendToBody(item, signatureHtml) {
+            return new Promise((resolve, reject) => {
+                item.body.getAsync(
+                    Office.CoercionType.Html,
+                    { asyncContext: { signatureHtml, resolve, reject } },
+                    function (bodyResult) {
+                        if (bodyResult.status === Office.AsyncResultStatus.Succeeded) {
+                            const currentBody = bodyResult.value || "";
+                            const marker = "<!-- CARDBYTE_SIGNATURE -->";
+                            // Check for existing signature
+                            if (currentBody.includes(marker)) {
+                                console.log("📌 Signature already exists, skipping");
+                                bodyResult.asyncContext.resolve();
+                                return;
+                            }
+                            const newBody = currentBody + "<br><br>" + marker + bodyResult.asyncContext.signatureHtml;
+                            item.body.setAsync(
+                                newBody,
+                                { coercionType: Office.CoercionType.Html },
+                                function (setResult) {
+                                    if (setResult.status === Office.AsyncResultStatus.Succeeded) {
+                                        console.log("✅ Signature appended to body");
+                                        bodyResult.asyncContext.resolve();
+                                    } else {
+                                        bodyResult.asyncContext.reject(setResult.error);
+                                    }
+                                }
+                            );
+                        } else {
+                            bodyResult.asyncContext.reject(bodyResult.error);
+                        }
+                    }
+                );
+            });
+        }
+        // ✅ Manual test function (call from console)
+        window.testCardByteAutoRun = function () {
+            console.log("🧪 Manual test triggered");
+            const testEvent = {
+                completed: function () { console.log("✅ Test event completed"); }
+            };
+            applySignature(testEvent);
+        };
+    </script>
+</head>
+
+<body>
+    <!-- Empty body for function files -->
+</body>
+
+</html>
