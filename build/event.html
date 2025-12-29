@@ -34,39 +34,3 @@
 <body></body>
 
 </html>
-<!DOCTYPE html>
-<html>
-
-<head>
-    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-    <script>
-        Office.onReady(() => { });
-
-        async function applySignature() {
-            const signatureHtml = `
-        <div style="font-family:Arial">
-          <strong>Korla Sai Rajesh</strong><br/>
-          Cardbyte<br/>
-          <a href="https://cardbyte.ai">cardbyte.ai</a>
-        </div>
-      `;
-
-            Office.context.mailbox.item.body.setAsync(
-                signatureHtml,
-                { coercionType: Office.CoercionType.Html },
-                (result) => {
-                    if (result.status === Office.AsyncResultStatus.Failed) {
-                        console.error(result.error);
-                    }
-                }
-            );
-        }
-
-        // 🔴 REQUIRED for ExecuteFunction
-        Office.actions.associate("applySignature", applySignature);
-    </script>
-</head>
-
-<body></body>
-
-</html>
