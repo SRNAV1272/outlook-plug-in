@@ -1,262 +1,708 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
     <meta charset="utf-8" />
+    <title>CardByte Event Handler</title>
+
+    <!-- Office.js -->
     <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+
     <script>
-        console.log("=== CARDBYTE AUTOLOADER LOADED ===", new Date().toISOString());
+        /* =========================================================
+           CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER
+           ========================================================= */
 
-        let autoInsertEnabled = true;
-        let insertedMessages = new Set(); // Track inserted messages
+        const API_URL =
+            "https://newqa-enterprise.cardbyte.ai/email-signature/outlook/get-active";
 
-        Office.onReady(() => {
-            console.log("✅ Office.js ready");
+        const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
+        const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
-            // Register function for manual button
-            if (Office.actions) {
-                Office.actions.associate("insertSignature", insertSignatureManual);
-                console.log("✅ Manual insert function registered");
+        const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
+
+        /* ---------------------------------------------------------
+           Office Ready
+           --------------------------------------------------------- */
+        Office.onReady(async () => {
+            console.log("✅ CardByte event.html ready");
+
+            try {
+                // const mailbox = Office.context.mailbox;
+                // const item = mailbox?.item;
+                // // if (!item) return;
+                // const user = mailbox.userProfile;
+                const encryptedEmail = await encryptEmail("sairajesh.korla1272@outlook.com");
+
+                const apiResponse = await fetchActiveSignature(encryptedEmail);
+                let updatedCombinedData;
+
+                if (apiResponse.card) {
+                    updatedCombinedData =
+                        updateFieldsFromCard(apiResponse.card)([...apiResponse.elements]);
+                } else {
+                    updatedCombinedData = [...apiResponse.elements];
+                }
+
+                // const updatedCombinedData = updateFieldsFromCard(apiResponse?.card)([...apiResponse?.elements])
+                console.log("📦 Signature API response", apiResponse, updatedCombinedData);
+                const freshLink = `${apiResponse?.emailSignatureUrl}?v=${Date.now()}`
+
+                const freshLinkForBanner = `${apiResponse?.bannerFileUrl}?v=${Date.now()}`
+
+                const html = generateEmailSignatureHTML(
+                    freshLink,
+                    updatedCombinedData,
+                    freshLinkForBanner,
+                    !!apiResponse?.elements?.find(i => i?.key === "banner")?.link
+                );
+
+                // const settings = Office.context.roamingSettings;
+                // settings.set("defaultSignatureHtml", html)
+                // settings.saveAsync((result) => {
+                //     if (result.status === Office.AsyncResultStatus.Succeeded) {
+                //         console.log("✅ Signature saved");
+                //     } else {
+                //         console.error("❌ Failed to save", result.error);
+                //     }
+                // });
+                // apply(html)
+                console.log("📦 Signature API response", html);
+
+                // Office.actions.associate("applySignature", window.applySignature);
+                console.log("✅ applySignature associated");
+            } catch (e) {
+                console.error("❌ Association failed", e);
+                const settings = Office.context.roamingSettings;
+
+                const signatureHtml =
+                    settings.get("defaultSignatureHtml") ||
+                    `
+                        <div style="font-family:Arial;font-size:12px">
+                            <strong>${user.displayName}</strong><br/>
+                            ${user.emailAddress}<br/>
+                            <span style="color:#999">Sent with CardByte</span>
+                        </div>
+                    `;
+
+                try {
+                    await insertAtCursor(item, signatureHtml);
+                } catch {
+                    await appendSignature(item, signatureHtml);
+                }
             }
-
-            // Setup auto-insertion
-            setupAutoInsertion();
-
-            // Check immediately if we're already in a compose window
-            checkAndAutoInsert();
         });
 
-        // Manual insert from button
-        function insertSignatureManual(event) {
-            console.log("🔘 Manual insert triggered");
-            insertSignature()
-                .then(() => {
-                    if (event && event.completed) event.completed();
-                })
-                .catch(error => {
-                    console.error("Manual insert failed:", error);
-                    if (event && event.completed) event.completed();
-                });
+        /* ---------------------------------------------------------
+           Utilities
+           --------------------------------------------------------- */
+        function base64ToArrayBuffer(base64) {
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes.buffer;
         }
+        /* ---------------------------------------------------------
+           AES Decryption Helper (Outlook-safe)
+           --------------------------------------------------------- */
 
-        function setupAutoInsertion() {
-            try {
-                // Method 1: Listen for item changes (most reliable)
-                Office.context.mailbox.addHandlerAsync(
-                    Office.EventType.ItemChanged,
-                    handleItemChanged,
-                    function (result) {
-                        console.log("ItemChanged handler registered:",
-                            result.status === Office.AsyncResultStatus.Succeeded ? "✅" : "❌");
+        function handleAesDecrypt(encryptedText, generatedKey) {
+            return new Promise(async (resolve) => {
+                try {
+                    if (!encryptedText) {
+                        resolve("");
+                        return;
                     }
-                );
 
-                // Method 2: Listen for appointment time changed (also triggers for emails)
-                Office.context.mailbox.addHandlerAsync(
-                    Office.EventType.AppointmentTimeChanged,
-                    handleItemChanged,
-                    function (result) {
-                        console.log("AppointmentTimeChanged handler registered:",
-                            result.status === Office.AsyncResultStatus.Succeeded ? "✅" : "❌");
-                    }
-                );
+                    const keyBuffer = await crypto.subtle.importKey(
+                        "raw",
+                        base64ToArrayBuffer(generatedKey || AES_KEY),
+                        { name: "AES-CBC" },
+                        false,
+                        ["decrypt"]
+                    );
 
-                console.log("✅ Auto-insertion handlers registered");
+                    const decryptedBuffer = await crypto.subtle.decrypt(
+                        {
+                            name: "AES-CBC",
+                            iv: base64ToArrayBuffer(AES_IV),
+                        },
+                        keyBuffer,
+                        base64ToArrayBuffer(encryptedText)
+                    );
 
-            } catch (error) {
-                console.error("Failed to setup auto-insertion:", error);
-            }
-        }
+                    const decryptedText = new TextDecoder().decode(decryptedBuffer);
+                    resolve(decryptedText);
 
-        function handleItemChanged(eventArgs) {
-            console.log("🔄 Item changed event triggered");
-            // Delay to ensure compose window is ready
-            setTimeout(checkAndAutoInsert, 1000);
-        }
-
-        async function checkAndAutoInsert() {
-            if (!autoInsertEnabled) {
-                console.log("⏸️ Auto-insert disabled");
-                return;
-            }
-
-            const item = Office.context.mailbox.item;
-            if (!item || item.itemType !== Office.MailboxEnums.ItemType.Message) {
-                return;
-            }
-
-            // Generate unique ID for this message
-            const messageId = await getMessageId(item);
-
-            // Check if we already inserted signature in this message
-            if (insertedMessages.has(messageId)) {
-                console.log("📌 Already inserted in this message");
-                return;
-            }
-
-            // Check if this is a new message
-            const isNewMessage = await checkIfNewMessage(item);
-            if (!isNewMessage) {
-                console.log("⏭️ Not a new message, skipping");
-                return;
-            }
-
-            console.log("🎯 New message detected, auto-inserting signature");
-            await insertSignature();
-            insertedMessages.add(messageId);
-        }
-
-        async function getMessageId(item) {
-            try {
-                // Try to get conversation ID or create a timestamp-based ID
-                const conversationId = item.conversationId;
-                if (conversationId) return conversationId;
-
-                // Fallback: timestamp + random
-                return Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-            } catch (error) {
-                return 'unknown-' + Date.now();
-            }
-        }
-
-        async function checkIfNewMessage(item) {
-            try {
-                // Get subject and body
-                const subject = item.subject || "";
-                const bodyResult = await new Promise(resolve => {
-                    item.body.getAsync(Office.CoercionType.Html, resolve);
-                });
-
-                if (bodyResult.status !== Office.AsyncResultStatus.Succeeded) {
-                    return false;
+                } catch (error) {
+                    console.error("❌ AES decrypt failed:", error);
+                    // Fail-safe: return original text (never block signature flow)
+                    resolve(encryptedText);
                 }
+            });
+        }
+        async function encryptEmail(email) {
+            const key = await crypto.subtle.importKey(
+                "raw",
+                base64ToArrayBuffer(AES_KEY),
+                { name: "AES-CBC" },
+                false,
+                ["encrypt"]
+            );
 
-                const body = bodyResult.value || "";
+            const encrypted = await crypto.subtle.encrypt(
+                { name: "AES-CBC", iv: base64ToArrayBuffer(AES_IV) },
+                key,
+                new TextEncoder().encode(email)
+            );
 
-                // Check for reply/forward indicators
-                const isReplyOrForward =
-                    subject.toLowerCase().includes("re:") ||
-                    subject.toLowerCase().includes("fw:") ||
-                    subject.toLowerCase().includes("fwd:") ||
-                    body.includes("From:") ||
-                    body.includes("Sent:") ||
-                    body.includes("To:") ||
-                    body.includes("Subject:") ||
-                    body.includes("Original Message") ||
-                    body.length > 500; // Long bodies are likely replies
-
-                return !isReplyOrForward;
-
-            } catch (error) {
-                console.error("Error checking message:", error);
-                return false;
-            }
+            return btoa(String.fromCharCode(...new Uint8Array(encrypted)));
         }
 
-        async function insertSignature() {
-            console.log("📝 Inserting signature...");
+        async function fetchActiveSignature(encryptedEmail) {
+            const res = await fetch(API_URL, {
+                method: "GET",
+                headers: {
+                    Accept: "application/json",
+                    "Content-Type": "application/json",
+                    username: encryptedEmail,
+                },
+            });
 
-            try {
-                const item = Office.context.mailbox.item;
-                const signature = await getSignature();
-
-                // Method 1: Try to insert at cursor
-                await insertAtCursor(item, signature);
-
-                console.log("✅ Signature inserted successfully");
-                return true;
-
-            } catch (error) {
-                console.error("Failed to insert signature:", error);
-                return false;
-            }
-        }
-
-        async function getSignature() {
-            // Try to get from localStorage first (set by taskpane)
-            try {
-                const saved = localStorage.getItem('cardbyte_signature');
-                if (saved) {
-                    console.log("📋 Using saved signature from localStorage");
-                    return saved;
-                }
-            } catch (error) {
-                console.warn("Could not access localStorage:", error);
+            if (!res.ok) {
+                throw new Error("Signature API failed: " + res.status);
             }
 
-            // Default signature
-            return `
-                <div style="font-family: Arial, sans-serif; font-size: 12px; color: #333; margin-top: 20px; padding-top: 20px; border-top: 2px solid #0066cc;">
-                    <strong style="color: #0066cc; font-size: 14px;">CardByte Signature</strong><br/>
-                    <span style="color: #666;">Auto-inserted signature</span><br/><br/>
-                    📧 <a href="mailto:support@cardbyte.ai" style="color: #0066cc; text-decoration: none;">support@cardbyte.ai</a><br/>
-                    🌐 <a href="https://cardbyte.ai" style="color: #0066cc; text-decoration: none;">cardbyte.ai</a>
-                    <div style="font-size: 10px; color: #999; margin-top: 10px;">
-                        Sent with CardByte Signature Manager
-                    </div>
-                </div>
-            `;
+            // ✅ ALWAYS read as text first
+            const rawText = await res.text();
+
+            let encryptedPayload;
+
+            // ✅ If backend returned JSON string
+            if (rawText.trim().startsWith("{")) {
+                const parsed = JSON.parse(rawText);
+                encryptedPayload = parsed?.data;
+            }
+            // ✅ If backend returned plain encrypted string
+            else {
+                encryptedPayload = rawText;
+            }
+
+            if (!encryptedPayload) {
+                throw new Error("No encrypted payload received");
+            }
+
+            // ✅ Decrypt
+            const decryptedText = await handleAesDecrypt(encryptedPayload);
+
+            // ✅ Parse decrypted JSON
+            const parsedData = JSON.parse(decryptedText);
+
+            return parsedData;
         }
 
-        async function insertAtCursor(item, signature) {
+        /* ---------------------------------------------------------
+           Signature Helpers
+           --------------------------------------------------------- */
+        function insertAtCursor(item, html) {
             return new Promise((resolve, reject) => {
                 item.body.setSelectedDataAsync(
-                    signature,
+                    html,
                     { coercionType: Office.CoercionType.Html },
-                    function (result) {
-                        if (result.status === Office.AsyncResultStatus.Succeeded) {
-                            resolve();
-                        } else {
-                            // Fallback to append
-                            appendToBody(item, signature).then(resolve).catch(reject);
-                        }
-                    }
+                    r => (r.status === "succeeded" ? resolve() : reject(r.error))
                 );
             });
         }
 
-        async function appendToBody(item, signature) {
+        function appendSignature(item, html) {
             return new Promise((resolve, reject) => {
                 item.body.getAsync(
                     Office.CoercionType.Html,
-                    function (result) {
-                        if (result.status !== Office.AsyncResultStatus.Succeeded) {
-                            reject(result.error);
+                    r => {
+                        if (r.status !== "succeeded") {
+                            reject(r.error);
                             return;
                         }
 
-                        const currentBody = result.value || "";
-                        const newBody = currentBody + "<br><br>" + signature;
+                        if (r.value.includes(SIGNATURE_MARKER)) {
+                            console.log("📌 Signature already present");
+                            resolve();
+                            return;
+                        }
+
+                        const updated =
+                            r.value + "<br><br>" + SIGNATURE_MARKER + html;
 
                         item.body.setAsync(
-                            newBody,
+                            updated,
                             { coercionType: Office.CoercionType.Html },
-                            function (setResult) {
-                                if (setResult.status === Office.AsyncResultStatus.Succeeded) {
-                                    resolve();
-                                } else {
-                                    reject(setResult.error);
-                                }
-                            }
+                            s => (s.status === "succeeded" ? resolve() : reject(s.error))
                         );
                     }
                 );
             });
         }
 
-        // Enable/disable auto-insert from taskpane
-        window.cardByteAutoInsert = {
-            enable: function () { autoInsertEnabled = true; console.log("✅ Auto-insert enabled"); },
-            disable: function () { autoInsertEnabled = false; console.log("⏸️ Auto-insert disabled"); },
-            test: function () { checkAndAutoInsert(); }
+        const updateFieldsFromCard = (card) => (prevFields) => {
+            console.log("sadlkaskdahd", card, prevFields)
+            if (!card) return prevFields;
+            let youtubeIndex = 0; // for duplicate socials
+
+            return prevFields.map((field) => {
+                // ==========================
+                // ✅ BASIC TEXT MAPPINGS
+                // ==========================
+                // ✅ FULL NAME = prefix + firstName + lastName
+                if (field.key === "fullName") {
+                    const prefix = card.prefix ?? "";
+                    const firstName = card.firstName ?? "";
+                    const lastName = card.lastName ?? "";
+
+                    const fullName = [prefix, firstName, lastName]
+                        .filter(Boolean)
+                        .join(" ");
+
+                    return {
+                        ...field,
+                        value: fullName,
+                        // show: Boolean(fullName)   // hide if empty
+                    };
+                }
+                if (field.key === "designation") return { ...field, value: card.designation ?? "" };
+                if (field.key === "companyName") return { ...field, value: card.companyName ?? "" };
+                if (field.key === "website") return { ...field, value: card.website ?? "" };
+
+                // ==========================
+                // ✅ PROFILE PHOTO
+                // ==========================
+                if (field.key === "profilePhoto") {
+                    return {
+                        ...field,
+                        value: card.profileImage
+                            ? `${window.location.origin}/v2/getCardProfileImage/${card.profileImage}`
+                            : "",
+                        show: field.show,
+                    };
+                }
+
+                // ==========================
+                // ✅ CUSTOM TEXT SAFETY
+                // ==========================
+                if (field?.key?.startsWith("customText-")) {
+                    return field; // DO NOT TOUCH
+                }
+
+                // ==========================
+                // ✅ EMAIL MAPPING (MULTIPLE)
+                // ==========================
+                if (field.key?.startsWith("email")) {
+                    const index = Number(field.key.replace("email", "")) || 0;
+                    const value = card.email?.[index] ?? "";
+                    return {
+                        ...field,
+                        value,
+                        // show: Boolean(value && !card.hiddenEmail?.[index])
+                    };
+                }
+
+                // ==========================
+                // ✅ MOBILE MAPPING
+                // ==========================
+                if (field.key?.startsWith("mobileNumber")) {
+                    const index = Number(field.key.replace("mobileNumber", "")) || 0;
+                    const mobile = card.mobileNumber?.[index];
+
+                    const value = mobile
+                        ? `${mobile.countryCode} ${mobile.number}`
+                        : "";
+
+                    return {
+                        ...field,
+                        value,
+                        // show: Boolean(value && !card.hiddenMobile?.[index])
+                    };
+                }
+                if (field.key?.startsWith("fax")) {
+                    const index = Number(field.key.replace("fax", "")) || 0;
+                    const value = card.fax?.[index] ?? "";
+
+                    return {
+                        ...field,
+                        value,
+                        // show: Boolean(value && !card.hiddenFax?.[index])
+                    };
+                }
+
+                // ==========================
+                // ✅ LANDLINE
+                // ==========================
+                if (field.key?.startsWith("landlineNumber")) {
+                    const index = Number(field.key.replace("landlineNumber", "")) || 0;
+                    const value = card.landlineNumber?.[index] ?? "";
+
+                    return {
+                        ...field,
+                        value,
+                        // show: Boolean(value && !card.hiddenLandline?.[index])
+                    };
+                }
+
+                // ==========================
+                // ✅ ADDRESS
+                // ==========================
+                if (field.key === "addressLine1") return { ...field, value: card.address?.addressLine1 ?? "" };
+                if (field.key === "addressLine2") return { ...field, value: card.address?.addressLine2 ?? "" };
+                if (field.key === "city") return { ...field, value: card.address?.city ?? "" };
+                if (field.key === "state") return { ...field, value: card.address?.state ?? "" };
+                if (field.key === "country") return { ...field, value: card.address?.country ?? "" };
+                if (field.key === "pincode") return { ...field, value: card.address?.pinCode ?? "" };
+
+                // ==========================
+                // ✅ SOCIAL LINKS (MULTI YOUTUBE SAFE)
+                // ==========================
+                if (field?.name) {
+                    const entries = card.social?.filter(
+                        soc => soc.socialMediaName === field.name
+                    );
+
+                    const social = entries?.[youtubeIndex] || entries?.[0];
+
+                    if (field.name === "youtube") youtubeIndex++;
+
+                    return social
+                        ? { ...field, link: social.value }
+                        : { ...field, link: "", show: false };
+                }
+
+                // ==========================
+                // ✅ DEFAULT
+                // ==========================
+                return field;
+            });
         };
 
-        console.log("=== AUTOLOADER INITIALIZED ===");
+        /* ---------------------------------------------------------
+           AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
+           --------------------------------------------------------- */
+        window.applySignature = async function (event) {
+            console.log("🚀 applySignature triggered");
+
+            try {
+                const mailbox = Office.context.mailbox;
+                const item = mailbox?.item;
+                if (!item) return;
+
+                const user = mailbox.userProfile;
+                const encryptedEmail = await encryptEmail(user.emailAddress);
+
+                const apiResponse = await fetchActiveSignature(encryptedEmail);
+                let updatedCombinedData;
+                console.log("🔍 apiResponse type:", typeof apiResponse);
+                console.log("🔍 apiResponse value:", apiResponse);
+                console.log("🔍 apiResponse?.elements:", apiResponse?.elements);
+                console.log("🔍 Array.isArray(elements):", Array.isArray(apiResponse?.elements));
+
+                if (apiResponse.card) {
+                    updatedCombinedData =
+                        updateFieldsFromCard(apiResponse.card)([...apiResponse.elements]);
+                } else {
+                    console.log("⚠️ No card object, using elements as-is");
+                    updatedCombinedData = [...apiResponse.elements];
+                }
+
+                console.log("📦 Signature API response", apiResponse, updatedCombinedData);
+                const freshLink = `${apiResponse?.emailSignatureUrl}?v=${Date.now()}`
+
+                const freshLinkForBanner = `${apiResponse?.bannerFileUrl}?v=${Date.now()}`
+
+                const html = generateEmailSignatureHTML(
+                    freshLink,
+                    updatedCombinedData,
+                    freshLinkForBanner,
+                    !!apiResponse?.elements?.find(i => i?.key === "banner")?.link
+                );
+                const settings = Office.context.roamingSettings;
+
+                const signatureHtml =
+                    html || settings.get("defaultSignatureHtml") ||
+                    `
+                        <div style="font-family:Arial;font-size:12px">
+                            <strong>${user.displayName}</strong><br/>
+                            ${user.emailAddress}<br/>
+                            <span style="color:#999">Sent with CardByte</span>
+                        </div>
+                    `;
+
+                try {
+                    await insertAtCursor(item, signatureHtml);
+                } catch {
+                    await appendSignature(item, signatureHtml);
+                }
+
+                console.log("✅ Signature applied");
+            } catch (err) {
+                console.error("❌ applySignature error", err);
+            } finally {
+                event.completed();
+            }
+        };
+
+        function generateEmailSignatureHTML(dataURL, allFields = {}, freshLinkForBanner, showBanner) {
+            const disclaimerField = allFields.find(f => f.key === "disclaimer" && f.show);
+            const bannerField = freshLinkForBanner;
+
+            const normalLinks = allFields
+                ?.filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+                ?.filter(i => !["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+                ?.filter(i => i?.show);
+
+            const buttonLinks = allFields
+                ?.filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+                ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+                ?.filter(i => i?.show);
+
+            /* ---------- Signature Image ---------- */
+            const signatureImageHTML =
+                typeof dataURL === "string" && dataURL.trim()
+                    ? `
+            <tr>
+            <td style="padding-bottom:10px;">
+                <img
+                src="${dataURL}"
+                alt="Signature"
+                style="
+                    display:block;
+                    max-width:400px;
+                    width:100%;
+                    height:auto;
+                    border:1px solid #ccc;
+                    border-radius:10px;
+                "
+                />
+            </td>
+            </tr>`
+                    : "";
+
+            /* ---------- Social Icons ---------- */
+            const socialIconsHTML = normalLinks.length
+                ? `
+<tr>
+  <td style="padding-top:8px;">
+    ${normalLinks
+                    .map(
+                        s => `
+<a href="${s?.link}" target="_blank" style="margin-right:6px;">
+  <img src="${s.value}" width="30" height="30" style="display:inline-block;border:0;" />
+</a>`
+                    )
+                    .join("")}
+  </td>
+</tr>`
+                : "";
+
+            /* ---------- Buttons ---------- */
+            const buttonHTML = buttonLinks.length
+                ? `
+<tr>
+  <td style="padding-top:12px;">
+    ${buttonLinks
+                    .map(
+                        link => `
+<a
+  href="${link?.link}"
+  target="_blank"
+  style="
+    background:#fff;
+    padding:10px 20px;
+    border-radius:20px;
+    border:1px solid #000;
+    color:#000;
+    font-family:Arial, sans-serif;
+    font-size:14px;
+    font-weight:500;
+    text-decoration:none;
+    display:inline-block;
+    margin-right:10px;
+    margin-bottom:6px;
+  "
+>
+  ${link?.value
+                                ? `<img src="${link.value}" width="16" style="vertical-align:middle;margin-right:6px;" />`
+                                : ""
+                            }
+  ${link?.label || link?.name || "Click"}
+</a>`
+                    )
+                    .join("")}
+  </td>
+</tr>`
+                : "";
+
+            /* ---------- Combined Social + Buttons (Outlook Safe) ---------- */
+            const combinedLinks = [...normalLinks, ...buttonLinks];
+
+            const combinedLinksHTML = combinedLinks.length
+                ? `
+<tr>
+  <td style="padding-top:10px;">
+    ${combinedLinks.map(link => {
+                    const isButton = ["teams", "meet", "calendly", "pdf", "url"].includes(link?.name);
+
+                    return `
+<table
+  role="presentation"
+  cellpadding="0"
+  cellspacing="0"
+  border="0"
+  style="
+    display:inline-table;
+    vertical-align:middle;
+    margin-right:10px;
+    margin-bottom:8px;
+  "
+>
+  <tr>
+    <td
+      valign="${isButton ? "middle" : "top"}"
+      style="${isButton ? "" : "padding-top:2px;"}"
+    >
+      ${isButton
+                            ? `
+<a
+  href="${link?.link}"
+  target="_blank"
+  style="
+    display:inline-block;
+    background:#fff;
+    padding:10px 20px;
+    border-radius:20px;
+    border:1px solid #000;
+    color:#000;
+    font-family:Arial, sans-serif;
+    font-size:14px;
+    font-weight:500;
+    text-decoration:none;
+    white-space:nowrap;
+  "
+>
+  ${link?.value
+                                ? `<img src="${link.value}" width="16" style="vertical-align:middle;margin-right:6px;" />`
+                                : ""
+                            }
+  ${link?.label || link?.name || "Click"}
+</a>`
+                            : `
+<a href="${link?.link}" target="_blank">
+  <img
+    src="${link.value}"
+    width="30"
+    height="30"
+    style="display:block;border:0;"
+  />
+</a>`
+                        }
+    </td>
+  </tr>
+</table>`;
+                }).join("")}
+  </td>
+</tr>`
+                : "";
+
+
+            /* ---------- Banner ---------- */
+            const bannerHTML =
+                typeof bannerField === "string" && bannerField.trim() && showBanner
+                    ? `
+            <tr>
+                <td align="left" style="padding-top:12px;">
+                    
+                    <!--[if mso]>
+                    <table role="presentation" width="400" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                        <td>
+                    <![endif]-->
+
+                    <table
+                    role="presentation"
+                    cellpadding="0"
+                    cellspacing="0"
+                    border="0"
+                    width="100%"
+                    style="max-width:400px;"
+                    >
+                    <tr>
+                        <td align="left">
+                        <img
+                            src="${bannerField}"
+                            alt=""
+                            width="400"
+                            hieght="130"
+                            style="
+                            display:block;
+                            width:100%;
+                            max-width:400px;
+                            height:130px;
+                            border:0;
+                            outline:none;
+                            text-decoration:none;
+                            "
+                        />
+                        </td>
+                    </tr>
+                    </table>
+
+                    <!--[if mso]>
+                        </td>
+                    </tr>
+                    </table>
+                    <![endif]-->
+
+                </td>
+            </tr>
+            `
+                    : "";
+
+            /* ---------- Disclaimer ---------- */
+            const disclaimerHTML = disclaimerField
+                ? `
+<tr>
+  <td style="padding-top:12px;">
+    <p style="
+      font-size:11px;
+      color:#666;
+      line-height:1.45;
+      margin:0;
+      font-family:Arial, sans-serif;
+    ">
+      ${disclaimerField.value.replace(/\n+/g, " ")}
+    </p>
+  </td>
+</tr>`
+                : "";
+
+            /* ---------- Final HTML ---------- */
+            return `
+<table cellpadding="0" cellspacing="0" border="0"
+  style="font-family:Arial, sans-serif; max-width:600px; width:100%;">
+  ${signatureImageHTML}
+  ${combinedLinksHTML}
+  ${bannerHTML}
+  ${disclaimerHTML}
+</table>
+`.trim();
+        }
+
+        /* ---------------------------------------------------------
+           Manual Debug Trigger
+           --------------------------------------------------------- */
+        window.testCardByte = () =>
+            window.applySignature({ completed: () => console.log("🧪 done") });
     </script>
 </head>
 
-<body>
-    <!-- Empty body -->
-</body>
+<body></body>
 
 </html>

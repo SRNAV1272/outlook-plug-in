@@ -22,6 +22,89 @@
                 console.log("📧 Current item type:", Office.context.mailbox.item.itemType);
             }
         });
+
+        const key = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
+        const iv = "3YapeNfJDung7TXxeKXn4g==";
+
+        export const handleAesEncrypt = async (plainText, generatedKey) => {
+            try {
+                const keyBuffer = await window.crypto.subtle.importKey(
+                    "raw",
+                    base64ToArrayBuffer(generatedKey || key),
+                    { name: "AES-CBC", length: 256 },
+                    false,
+                    ["encrypt"]
+                );
+
+                const encrypted = await window.crypto.subtle.encrypt(
+                    {
+                        name: "AES-CBC",
+                        iv: base64ToArrayBuffer(iv),
+                    },
+                    keyBuffer,
+                    new TextEncoder().encode(plainText)
+                );
+
+                const encryptedText = window.btoa(
+                    String.fromCharCode(...new Uint8Array(encrypted))
+                );
+
+                return encryptedText;
+            } catch (error) {
+                console.error("Error encrypting:", error, key, iv);
+                // toast.error("Encryption failed. Please try again.");
+                return plainText;
+            }
+        };
+
+        export const handleAesDecrypt = async (encryptedText, generatedKey) => {
+            try {
+                const keyBuffer = await window.crypto.subtle.importKey(
+                    "raw",
+                    base64ToArrayBuffer(generatedKey || key),
+                    { name: "AES-CBC", length: 256 },
+                    false,
+                    ["decrypt"]
+                );
+
+                const decrypted = await window.crypto.subtle.decrypt(
+                    {
+                        name: "AES-CBC",
+                        iv: base64ToArrayBuffer(iv),
+                    },
+                    keyBuffer,
+                    base64ToArrayBuffer(encryptedText)
+                );
+
+                const decryptedText = new TextDecoder().decode(decrypted);
+
+                return decryptedText;
+            } catch (error) {
+                console.error("Error decrypting: ", encryptedText, error);
+                return encryptedText;
+            }
+        };
+
+        export const emailsigOutlook = async (encryptedUsername) => {
+            const response = await fetch(
+                "https://newqa-enterprise.cardbyte.ai/email-signature/outlook/get-active",
+                {
+                    method: "GET",
+                    headers: {
+                        Accept: "application/json",
+                        "Content-Type": "application/json",
+                        username: encryptedUsername,
+                    },
+                }
+            );
+
+            if (!response.ok) {
+                throw new Error(`Request failed: ${response.status}`);
+            }
+
+            return await response.json();
+        };
+
         // ✅ AUTO-RUN FUNCTION - MUST HAVE event PARAMETER
         async function applySignature(event) {
             console.log("🚀 applySignature() called by auto-run!", new Date().toISOString());
@@ -33,8 +116,23 @@
                     if (event && event.completed) event.completed();
                     return;
                 }
+
+                const user = Office.context.mailbox.userProfile;
+                const encryptedUsername = await handleAesEncrypt(
+                    user?.emailAddress
+                    // "sairajesh.korla1272@outlook.com"
+                );
+                // localStorage.setItem("encryptedEmail", encryptedUsername)
+
+                try {
+                    const data = await emailsigOutlook(encryptedUsername);
+                    console.log("Signature data:", data);
+                } catch (err) {
+                    console.error("API error:", err);
+                }
+
                 const item = Office.context.mailbox.item;
-                console.log("📝 Composing email:", item.subject || "No subject");
+                console.log("📝 Composing email:", item.subject || "No subject", user);
                 // Get signature (from storage or default)
                 const storedSignature = Office.context.roamingSettings.get("defaultSignatureHtml");
                 const signatureHtml = storedSignature ||
