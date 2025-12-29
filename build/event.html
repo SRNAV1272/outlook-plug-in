@@ -469,35 +469,35 @@
                 ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
                 ?.filter(i => i?.show);
 
-            /* ---------- Signature Image ---------- */
+            /* ---------- Signature Image (100px) ---------- */
             const signatureImageHTML =
                 typeof dataURL === "string" && dataURL.trim()
                     ? `
 <tr>
-  <td style="padding-bottom:8px;">
+  <td style="padding-bottom:4px;">
     <img
       src="${dataURL}"
       alt="Signature"
       style="
         display:block;
-        max-width:280px;
+        max-width:100px;
         width:100%;
         height:auto;
-        border:1px solid #ccc;
-        border-radius:8px;
+        border:1px solid #dcdcdc;
+        border-radius:4px;
       "
     />
   </td>
 </tr>`
                     : "";
 
-            /* ---------- Combined Social + Buttons (Outlook Safe) ---------- */
+            /* ---------- Social Icons + Buttons ---------- */
             const combinedLinks = [...normalLinks, ...buttonLinks];
 
             const combinedLinksHTML = combinedLinks.length
                 ? `
 <tr>
-  <td style="padding-top:6px;">
+  <td style="padding-top:4px;">
     ${combinedLinks
                     .map(link => {
                         const isButton = ["teams", "meet", "calendly", "pdf", "url"].includes(
@@ -513,8 +513,8 @@
   style="
     display:inline-table;
     vertical-align:middle;
-    margin-right:6px;
-    margin-bottom:6px;
+    margin-right:4px;
+    margin-bottom:4px;
   "
 >
   <tr>
@@ -527,19 +527,19 @@
   style="
     display:inline-block;
     background:#fff;
-    padding:6px 14px;
-    border-radius:18px;
+    padding:3px 8px;
+    border-radius:12px;
     border:1px solid #000;
     color:#000;
     font-family:Arial, sans-serif;
-    font-size:12px;
+    font-size:10px;
     font-weight:500;
     text-decoration:none;
     white-space:nowrap;
   "
 >
   ${link?.value
-                                    ? `<img src="${link.value}" width="14" style="vertical-align:middle;margin-right:5px;" />`
+                                    ? `<img src="${link.value}" width="10" style="vertical-align:middle;margin-right:3px;" />`
                                     : ""
                                 }
   ${link?.label || link?.name || "Click"}
@@ -548,8 +548,8 @@
 <a href="${link?.link}" target="_blank">
   <img
     src="${link.value}"
-    width="22"
-    height="22"
+    width="14"
+    height="14"
     style="display:block;border:0;"
   />
 </a>`
@@ -563,18 +563,17 @@
 </tr>`
                 : "";
 
-            /* ---------- Banner ---------- */
+            /* ---------- Banner (100px) ---------- */
             const bannerHTML =
                 typeof freshLinkForBanner === "string" &&
                     freshLinkForBanner.trim() &&
                     showBanner
                     ? `
 <tr>
-  <td align="left" style="padding-top:8px;">
+  <td style="padding-top:4px;">
     <!--[if mso]>
-    <table role="presentation" width="280" cellpadding="0" cellspacing="0" border="0">
-      <tr>
-        <td>
+    <table role="presentation" width="100" cellpadding="0" cellspacing="0" border="0">
+      <tr><td>
     <![endif]-->
 
     <table
@@ -583,34 +582,28 @@
       cellspacing="0"
       border="0"
       width="100%"
-      style="max-width:280px;"
+      style="max-width:100px;"
     >
       <tr>
         <td>
           <img
             src="${freshLinkForBanner}"
             alt=""
-            width="280"
-            height="90"
+            width="100"
+            height="32"
             style="
               display:block;
               width:100%;
-              max-width:280px;
-              height:90px;
+              max-width:100px;
+              height:32px;
               border:0;
-              outline:none;
-              text-decoration:none;
             "
           />
         </td>
       </tr>
     </table>
 
-    <!--[if mso]>
-        </td>
-      </tr>
-    </table>
-    <![endif]-->
+    <!--[if mso]></td></tr></table><![endif]-->
   </td>
 </tr>`
                     : "";
@@ -619,12 +612,12 @@
             const disclaimerHTML = disclaimerField
                 ? `
 <tr>
-  <td style="padding-top:8px;">
+  <td style="padding-top:4px;">
     <p
       style="
-        font-size:10px;
-        color:#666;
-        line-height:1.4;
+        font-size:9px;
+        color:#777;
+        line-height:1.3;
         margin:0;
         font-family:Arial, sans-serif;
       "
@@ -643,7 +636,7 @@
   border="0"
   style="
     font-family:Arial, sans-serif;
-    max-width:420px;
+    max-width:280px;
     width:100%;
   "
 >
