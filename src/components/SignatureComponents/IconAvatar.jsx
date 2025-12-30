@@ -318,18 +318,18 @@ export function generateEmailSignatureHTML(
     ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
     ?.filter(i => i?.show);
 
-  /* ---------- Signature Image (200px) ---------- */
+  /* ---------- Signature Image (250px) ---------- */
   const signatureImageHTML =
     typeof dataURL === "string" && dataURL.trim()
       ? `
 <tr>
-  <td style="padding-bottom:5px;">
+  <td style="padding-bottom:6px;">
     <img
       src="${dataURL}"
       alt="Signature"
       style="
         display:block;
-        max-width:200px;
+        max-width:250px;
         width:100%;
         height:auto;
         border:1px solid #dcdcdc;
@@ -346,7 +346,7 @@ export function generateEmailSignatureHTML(
   const combinedLinksHTML = combinedLinks.length
     ? `
 <tr>
-  <td style="padding-top:5px;">
+  <td style="padding-top:6px;">
     ${combinedLinks
       .map(link => {
         const isButton = ["teams", "meet", "calendly", "pdf", "url"].includes(
@@ -362,8 +362,8 @@ export function generateEmailSignatureHTML(
   style="
     display:inline-table;
     vertical-align:middle;
-    margin-right:5px;
-    margin-bottom:5px;
+    margin-right:6px;
+    margin-bottom:6px;
   "
 >
   <tr>
@@ -376,8 +376,8 @@ export function generateEmailSignatureHTML(
   style="
     display:inline-block;
     background:#fff;
-    padding:5px 12px;
-    border-radius:16px;
+    padding:6px 14px;
+    border-radius:18px;
     border:1px solid #000;
     color:#000;
     font-family:Arial, sans-serif;
@@ -412,16 +412,16 @@ export function generateEmailSignatureHTML(
 </tr>`
     : "";
 
-  /* ---------- Banner (200px) ---------- */
+  /* ---------- Banner (250px) ---------- */
   const bannerHTML =
     typeof freshLinkForBanner === "string" &&
       freshLinkForBanner.trim() &&
       showBanner
       ? `
 <tr>
-  <td style="padding-top:5px;">
+  <td style="padding-top:6px;">
     <!--[if mso]>
-    <table role="presentation" width="200" cellpadding="0" cellspacing="0" border="0">
+    <table role="presentation" width="250" cellpadding="0" cellspacing="0" border="0">
       <tr><td>
     <![endif]-->
 
@@ -431,20 +431,20 @@ export function generateEmailSignatureHTML(
       cellspacing="0"
       border="0"
       width="100%"
-      style="max-width:200px;"
+      style="max-width:250px;"
     >
       <tr>
         <td>
           <img
             src="${freshLinkForBanner}"
             alt=""
-            width="200"
-            height="64"
+            width="250"
+            height="80"
             style="
               display:block;
               width:100%;
-              max-width:200px;
-              height:64px;
+              max-width:250px;
+              height:80px;
               border:0;
             "
           />
@@ -461,7 +461,7 @@ export function generateEmailSignatureHTML(
   const disclaimerHTML = disclaimerField
     ? `
 <tr>
-  <td style="padding-top:5px;">
+  <td style="padding-top:6px;">
     <p
       style="
         font-size:10px;
@@ -485,7 +485,7 @@ export function generateEmailSignatureHTML(
   border="0"
   style="
     font-family:Arial, sans-serif;
-    max-width:320px;
+    max-width:360px;
     width:100%;
   "
 >
@@ -496,6 +496,7 @@ export function generateEmailSignatureHTML(
 </table>
 `.trim();
 }
+
 
 
 
