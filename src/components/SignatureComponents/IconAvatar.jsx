@@ -309,44 +309,44 @@ export function generateEmailSignatureHTML(
   );
 
   const normalLinks = allFields
-    ?.filter(i => i?.key?.toLowerCase()?.startsWith("social"))
-    ?.filter(i => !["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
-    ?.filter(i => i?.show);
+    .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+    .filter(i => !["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+    .filter(i => i?.show);
 
   const buttonLinks = allFields
-    ?.filter(i => i?.key?.toLowerCase()?.startsWith("social"))
-    ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
-    ?.filter(i => i?.show);
+    .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+    .filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+    .filter(i => i?.show);
 
-  /* ---------- Signature Image (250px) ---------- */
+  /* ---------- MAIN SIGNATURE CARD (350px) ---------- */
   const signatureImageHTML =
     typeof dataURL === "string" && dataURL.trim()
       ? `
 <tr>
-  <td style="padding-bottom:6px;">
+  <td style="padding-bottom:8px;">
     <img
       src="${dataURL}"
       alt="Signature"
+      width="350"
       style="
         display:block;
-        max-width:250px;
-        width:100%;
+        width:350px;
         height:auto;
-        border:1px solid #dcdcdc;
-        border-radius:6px;
+        border:1px solid #ddd;
+        border-radius:8px;
       "
     />
   </td>
 </tr>`
       : "";
 
-  /* ---------- Social Icons + Buttons ---------- */
+  /* ---------- SOCIAL ICONS + CTA BUTTONS ---------- */
   const combinedLinks = [...normalLinks, ...buttonLinks];
 
   const combinedLinksHTML = combinedLinks.length
     ? `
 <tr>
-  <td style="padding-top:6px;">
+  <td style="padding-top:8px;">
     ${combinedLinks
       .map(link => {
         const isButton = ["teams", "meet", "calendly", "pdf", "url"].includes(
@@ -354,53 +354,33 @@ export function generateEmailSignatureHTML(
         );
 
         return `
-<table
-  role="presentation"
-  cellpadding="0"
-  cellspacing="0"
-  border="0"
-  style="
-    display:inline-table;
-    vertical-align:middle;
-    margin-right:6px;
-    margin-bottom:6px;
-  "
->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"
+  style="display:inline-table;margin-right:8px;margin-bottom:8px;">
   <tr>
     <td valign="middle">
       ${isButton
             ? `
-<a
-  href="${link?.link}"
-  target="_blank"
+<a href="${link?.link}" target="_blank"
   style="
     display:inline-block;
-    background:#fff;
-    padding:6px 14px;
-    border-radius:18px;
+    padding:8px 18px;
     border:1px solid #000;
-    color:#000;
+    border-radius:22px;
+    font-size:13px;
     font-family:Arial, sans-serif;
-    font-size:12px;
-    font-weight:500;
+    color:#000;
     text-decoration:none;
     white-space:nowrap;
-  "
->
+  ">
   ${link?.value
-              ? `<img src="${link.value}" width="14" style="vertical-align:middle;margin-right:5px;" />`
+              ? `<img src="${link.value}" width="16" style="vertical-align:middle;margin-right:6px;" />`
               : ""
             }
-  ${link?.label || link?.name || "Click"}
+  ${link?.label || link?.name}
 </a>`
             : `
 <a href="${link?.link}" target="_blank">
-  <img
-    src="${link.value}"
-    width="18"
-    height="18"
-    style="display:block;border:0;"
-  />
+  <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
 </a>`
           }
     </td>
@@ -412,81 +392,63 @@ export function generateEmailSignatureHTML(
 </tr>`
     : "";
 
-  /* ---------- Banner (250px) ---------- */
+  /* ---------- BANNER (350px LOCKED) ---------- */
   const bannerHTML =
     typeof freshLinkForBanner === "string" &&
       freshLinkForBanner.trim() &&
       showBanner
       ? `
 <tr>
-  <td style="padding-top:6px;">
+  <td style="padding-top:8px;">
     <!--[if mso]>
-    <table role="presentation" width="250" cellpadding="0" cellspacing="0" border="0">
-      <tr><td>
+    <table width="350" cellpadding="0" cellspacing="0" border="0"><tr><td>
     <![endif]-->
 
-    <table
-      role="presentation"
-      cellpadding="0"
-      cellspacing="0"
-      border="0"
-      width="100%"
-      style="max-width:250px;"
-    >
-      <tr>
-        <td>
-          <img
-            src="${freshLinkForBanner}"
-            alt=""
-            width="250"
-            height="80"
-            style="
-              display:block;
-              width:100%;
-              max-width:250px;
-              height:80px;
-              border:0;
-            "
-          />
-        </td>
-      </tr>
-    </table>
+    <img
+      src="${freshLinkForBanner}"
+      alt=""
+      width="350"
+      height="110"
+      style="
+        display:block;
+        width:350px;
+        height:110px;
+        border:0;
+      "
+    />
 
     <!--[if mso]></td></tr></table><![endif]-->
   </td>
 </tr>`
       : "";
 
-  /* ---------- Disclaimer ---------- */
+  /* ---------- DISCLAIMER ---------- */
   const disclaimerHTML = disclaimerField
     ? `
 <tr>
-  <td style="padding-top:6px;">
-    <p
-      style="
-        font-size:10px;
-        color:#777;
-        line-height:1.35;
-        margin:0;
-        font-family:Arial, sans-serif;
-      "
-    >
+  <td style="padding-top:8px;">
+    <p style="
+      margin:0;
+      font-size:11px;
+      line-height:1.45;
+      color:#777;
+      font-family:Arial, sans-serif;">
       ${disclaimerField.value.replace(/\n+/g, " ")}
     </p>
   </td>
 </tr>`
     : "";
 
-  /* ---------- Final HTML ---------- */
+  /* ---------- FINAL WRAPPER (HARD WIDTH) ---------- */
   return `
 <table
   cellpadding="0"
   cellspacing="0"
   border="0"
+  width="350"
   style="
+    width:350px;
     font-family:Arial, sans-serif;
-    max-width:360px;
-    width:100%;
   "
 >
   ${signatureImageHTML}
@@ -496,6 +458,7 @@ export function generateEmailSignatureHTML(
 </table>
 `.trim();
 }
+
 
 
 
