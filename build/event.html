@@ -30,28 +30,28 @@
             console.log("✅ CardByte event.html ready");
 
             try {
-                const mailbox = Office.context.mailbox;
-                const item = mailbox?.item;
+                // const mailbox = Office.context.mailbox;
+                // const item = mailbox?.item;
                 // if (!item) return;
-                const user = {
-                    emailAddress:
-                        "riya00907@outlook.com"
-                        // "Muskanrai@cardbyte.ai"
-                    // "sairajesh.korla1272@outlook.com"
-                };
+                // const user = mailbox.userProfile;
+                // // const user = {
+                // //     emailAddress:
+                // //         "riya00907@outlook.com"
+                // //     // "Muskanrai@cardbyte.ai"
+                // //     // "sairajesh.korla1272@outlook.com"
+                // // };
+                // const apiResponse = await renderSignatureOnServer(user)
+                // const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse
+                // const freshLink = `${emailSignatureUrl}?v=${Date.now()}`
 
-                const apiResponse = await renderSignatureOnServer(user)
-                const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse
-                const freshLink = `${emailSignatureUrl}?v=${Date.now()}`
+                // const freshLinkForBanner = `${bannerFileUrl}?v=${Date.now()}`
 
-                const freshLinkForBanner = `${bannerFileUrl}?v=${Date.now()}`
-
-                const html = generateEmailSignatureHTML(
-                    freshLink,
-                    elements,
-                    freshLinkForBanner,
-                    !!elements?.find(i => i?.key === "banner")?.link
-                );
+                // const html = generateEmailSignatureHTML(
+                //     freshLink,
+                //     elements,
+                //     freshLinkForBanner,
+                //     !!elements?.find(i => i?.key === "banner")?.link
+                // );
 
                 // // const settings = Office.context.roamingSettings;
                 // // settings.set("defaultSignatureHtml", html)
@@ -63,7 +63,7 @@
                 // //     }
                 // // });
                 // apply(html)
-                console.log("📦 Signature API response", html);
+                // console.log("📦 Signature API response", html);
             } catch (e) {
                 console.error("❌ Association failed", e);
                 const settings = Office.context.roamingSettings;
