@@ -35,8 +35,8 @@
                 // if (!item) return;
                 const user = {
                     emailAddress:
-                        // "riya00907@outlook.com"
-                        "Muskanrai@cardbyte.ai"
+                        "riya00907@outlook.com"
+                        // "Muskanrai@cardbyte.ai"
                     // "sairajesh.korla1272@outlook.com"
                 };
 
@@ -87,7 +87,7 @@
         });
 
         async function renderSignatureOnServer(user) {
-            const res = await fetch("http://node-renderer.cardbyte-frontend.svc.cluster.local:4000/render-signature", {
+            const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
