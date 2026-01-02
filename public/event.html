@@ -21,9 +21,6 @@
         const API_URL =
             "https://newqa-enterprise.cardbyte.ai/email-signature/outlook/get-active";
 
-        const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
-        const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-
         const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 
         /* ---------------------------------------------------------
@@ -33,49 +30,40 @@
             console.log("✅ CardByte event.html ready");
 
             try {
-                // const mailbox = Office.context.mailbox;
-                // const item = mailbox?.item;
-                // // if (!item) return;
-                // const user = mailbox.userProfile;
-                const encryptedEmail = await encryptEmail("sairajesh.korla1272@outlook.com");
+                const mailbox = Office.context.mailbox;
+                const item = mailbox?.item;
+                // if (!item) return;
+                const user = {
+                    emailAddress:
+                        // "riya00907@outlook.com"
+                        "Muskanrai@cardbyte.ai"
+                    // "sairajesh.korla1272@outlook.com"
+                };
 
-                const apiResponse = await fetchActiveSignature(encryptedEmail);
-                let updatedCombinedData;
+                const apiResponse = await renderSignatureOnServer(user)
+                const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse
+                const freshLink = `${emailSignatureUrl}?v=${Date.now()}`
 
-                if (apiResponse.card) {
-                    updatedCombinedData =
-                        updateFieldsFromCard(apiResponse.card)([...apiResponse.elements]);
-                } else {
-                    updatedCombinedData = [...apiResponse.elements];
-                }
-
-                // const updatedCombinedData = updateFieldsFromCard(apiResponse?.card)([...apiResponse?.elements])
-                console.log("📦 Signature API response", apiResponse, updatedCombinedData);
-                const freshLink = `${apiResponse?.emailSignatureUrl}?v=${Date.now()}`
-
-                const freshLinkForBanner = `${apiResponse?.bannerFileUrl}?v=${Date.now()}`
+                const freshLinkForBanner = `${bannerFileUrl}?v=${Date.now()}`
 
                 const html = generateEmailSignatureHTML(
                     freshLink,
-                    updatedCombinedData,
+                    elements,
                     freshLinkForBanner,
-                    !!apiResponse?.elements?.find(i => i?.key === "banner")?.link
+                    !!elements?.find(i => i?.key === "banner")?.link
                 );
 
-                // const settings = Office.context.roamingSettings;
-                // settings.set("defaultSignatureHtml", html)
-                // settings.saveAsync((result) => {
-                //     if (result.status === Office.AsyncResultStatus.Succeeded) {
-                //         console.log("✅ Signature saved");
-                //     } else {
-                //         console.error("❌ Failed to save", result.error);
-                //     }
-                // });
+                // // const settings = Office.context.roamingSettings;
+                // // settings.set("defaultSignatureHtml", html)
+                // // settings.saveAsync((result) => {
+                // //     if (result.status === Office.AsyncResultStatus.Succeeded) {
+                // //         console.log("✅ Signature saved");
+                // //     } else {
+                // //         console.error("❌ Failed to save", result.error);
+                // //     }
+                // // });
                 // apply(html)
                 console.log("📦 Signature API response", html);
-
-                // Office.actions.associate("applySignature", window.applySignature);
-                console.log("✅ applySignature associated");
             } catch (e) {
                 console.error("❌ Association failed", e);
                 const settings = Office.context.roamingSettings;
@@ -98,114 +86,37 @@
             }
         });
 
-        /* ---------------------------------------------------------
-           Utilities
-           --------------------------------------------------------- */
-        function base64ToArrayBuffer(base64) {
-            const binary = atob(base64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
-            }
-            return bytes.buffer;
-        }
-        /* ---------------------------------------------------------
-           AES Decryption Helper (Outlook-safe)
-           --------------------------------------------------------- */
-
-        function handleAesDecrypt(encryptedText, generatedKey) {
-            return new Promise(async (resolve) => {
-                try {
-                    if (!encryptedText) {
-                        resolve("");
-                        return;
-                    }
-
-                    const keyBuffer = await crypto.subtle.importKey(
-                        "raw",
-                        base64ToArrayBuffer(generatedKey || AES_KEY),
-                        { name: "AES-CBC" },
-                        false,
-                        ["decrypt"]
-                    );
-
-                    const decryptedBuffer = await crypto.subtle.decrypt(
-                        {
-                            name: "AES-CBC",
-                            iv: base64ToArrayBuffer(AES_IV),
-                        },
-                        keyBuffer,
-                        base64ToArrayBuffer(encryptedText)
-                    );
-
-                    const decryptedText = new TextDecoder().decode(decryptedBuffer);
-                    resolve(decryptedText);
-
-                } catch (error) {
-                    console.error("❌ AES decrypt failed:", error);
-                    // Fail-safe: return original text (never block signature flow)
-                    resolve(encryptedText);
-                }
-            });
-        }
-        async function encryptEmail(email) {
-            const key = await crypto.subtle.importKey(
-                "raw",
-                base64ToArrayBuffer(AES_KEY),
-                { name: "AES-CBC" },
-                false,
-                ["encrypt"]
-            );
-
-            const encrypted = await crypto.subtle.encrypt(
-                { name: "AES-CBC", iv: base64ToArrayBuffer(AES_IV) },
-                key,
-                new TextEncoder().encode(email)
-            );
-
-            return btoa(String.fromCharCode(...new Uint8Array(encrypted)));
-        }
-
-        async function fetchActiveSignature(encryptedEmail) {
-            const res = await fetch(API_URL, {
-                method: "GET",
+        async function renderSignatureOnServer(user) {
+            const res = await fetch("http://node-renderer.cardbyte-frontend.svc.cluster.local:4000/render-signature", {
+                method: "POST",
                 headers: {
-                    Accept: "application/json",
-                    "Content-Type": "application/json",
-                    username: encryptedEmail,
+                    "Content-Type": "application/json"
                 },
+                body: JSON.stringify({ email: user.emailAddress })
             });
-
+            // console.log("adjahsdkhsad", data)
             if (!res.ok) {
-                throw new Error("Signature API failed: " + res.status);
+                throw new Error("Node renderer failed");
             }
+            const data = await res?.json()
+            console.log("sdajsdkjhsdkjsad", data)
+            // const blob = await res.blob();
 
-            // ✅ ALWAYS read as text first
-            const rawText = await res.text();
+            // // ✅ Create downloadable URL
+            // const url = URL.createObjectURL(blob);
 
-            let encryptedPayload;
+            // // ✅ Trigger download
+            // const a = document.createElement("a");
+            // a.href = url;
+            // a.download = "signature.png"; // 👈 filename
+            // document.body.appendChild(a);
+            // a.click();
 
-            // ✅ If backend returned JSON string
-            if (rawText.trim().startsWith("{")) {
-                const parsed = JSON.parse(rawText);
-                encryptedPayload = parsed?.data;
-            }
-            // ✅ If backend returned plain encrypted string
-            else {
-                encryptedPayload = rawText;
-            }
+            // // ✅ Cleanup
+            // document.body.removeChild(a);
+            // URL.revokeObjectURL(url);
 
-            if (!encryptedPayload) {
-                throw new Error("No encrypted payload received");
-            }
-
-            // ✅ Decrypt
-            const decryptedText = await handleAesDecrypt(encryptedPayload);
-
-            // ✅ Parse decrypted JSON
-            const parsedData = JSON.parse(decryptedText);
-
-            return parsedData;
+            return data; // optional
         }
 
         /* ---------------------------------------------------------
@@ -253,143 +164,6 @@
             });
         }
 
-        const updateFieldsFromCard = (card) => (prevFields) => {
-            console.log("sadlkaskdahd", card, prevFields)
-            if (!card) return prevFields;
-            let youtubeIndex = 0; // for duplicate socials
-
-            return prevFields.map((field) => {
-                // ==========================
-                // ✅ BASIC TEXT MAPPINGS
-                // ==========================
-                // ✅ FULL NAME = prefix + firstName + lastName
-                if (field.key === "fullName") {
-                    const prefix = card.prefix ?? "";
-                    const firstName = card.firstName ?? "";
-                    const lastName = card.lastName ?? "";
-
-                    const fullName = [prefix, firstName, lastName]
-                        .filter(Boolean)
-                        .join(" ");
-
-                    return {
-                        ...field,
-                        value: fullName,
-                        // show: Boolean(fullName)   // hide if empty
-                    };
-                }
-                if (field.key === "designation") return { ...field, value: card.designation ?? "" };
-                if (field.key === "companyName") return { ...field, value: card.companyName ?? "" };
-                if (field.key === "website") return { ...field, value: card.website ?? "" };
-
-                // ==========================
-                // ✅ PROFILE PHOTO
-                // ==========================
-                if (field.key === "profilePhoto") {
-                    return {
-                        ...field,
-                        value: card.profileImage
-                            ? `${window.location.origin}/v2/getCardProfileImage/${card.profileImage}`
-                            : "",
-                        show: field.show,
-                    };
-                }
-
-                // ==========================
-                // ✅ CUSTOM TEXT SAFETY
-                // ==========================
-                if (field?.key?.startsWith("customText-")) {
-                    return field; // DO NOT TOUCH
-                }
-
-                // ==========================
-                // ✅ EMAIL MAPPING (MULTIPLE)
-                // ==========================
-                if (field.key?.startsWith("email")) {
-                    const index = Number(field.key.replace("email", "")) || 0;
-                    const value = card.email?.[index] ?? "";
-                    return {
-                        ...field,
-                        value,
-                        // show: Boolean(value && !card.hiddenEmail?.[index])
-                    };
-                }
-
-                // ==========================
-                // ✅ MOBILE MAPPING
-                // ==========================
-                if (field.key?.startsWith("mobileNumber")) {
-                    const index = Number(field.key.replace("mobileNumber", "")) || 0;
-                    const mobile = card.mobileNumber?.[index];
-
-                    const value = mobile
-                        ? `${mobile.countryCode} ${mobile.number}`
-                        : "";
-
-                    return {
-                        ...field,
-                        value,
-                        // show: Boolean(value && !card.hiddenMobile?.[index])
-                    };
-                }
-                if (field.key?.startsWith("fax")) {
-                    const index = Number(field.key.replace("fax", "")) || 0;
-                    const value = card.fax?.[index] ?? "";
-
-                    return {
-                        ...field,
-                        value,
-                        // show: Boolean(value && !card.hiddenFax?.[index])
-                    };
-                }
-
-                // ==========================
-                // ✅ LANDLINE
-                // ==========================
-                if (field.key?.startsWith("landlineNumber")) {
-                    const index = Number(field.key.replace("landlineNumber", "")) || 0;
-                    const value = card.landlineNumber?.[index] ?? "";
-
-                    return {
-                        ...field,
-                        value,
-                        // show: Boolean(value && !card.hiddenLandline?.[index])
-                    };
-                }
-
-                // ==========================
-                // ✅ ADDRESS
-                // ==========================
-                if (field.key === "addressLine1") return { ...field, value: card.address?.addressLine1 ?? "" };
-                if (field.key === "addressLine2") return { ...field, value: card.address?.addressLine2 ?? "" };
-                if (field.key === "city") return { ...field, value: card.address?.city ?? "" };
-                if (field.key === "state") return { ...field, value: card.address?.state ?? "" };
-                if (field.key === "country") return { ...field, value: card.address?.country ?? "" };
-                if (field.key === "pincode") return { ...field, value: card.address?.pinCode ?? "" };
-
-                // ==========================
-                // ✅ SOCIAL LINKS (MULTI YOUTUBE SAFE)
-                // ==========================
-                if (field?.name) {
-                    const entries = card.social?.filter(
-                        soc => soc.socialMediaName === field.name
-                    );
-
-                    const social = entries?.[youtubeIndex] || entries?.[0];
-
-                    if (field.name === "youtube") youtubeIndex++;
-
-                    return social
-                        ? { ...field, link: social.value }
-                        : { ...field, link: "", show: false };
-                }
-
-                // ==========================
-                // ✅ DEFAULT
-                // ==========================
-                return field;
-            });
-        };
 
         /* ---------------------------------------------------------
            AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
@@ -403,33 +177,18 @@
                 if (!item) return;
 
                 const user = mailbox.userProfile;
-                const encryptedEmail = await encryptEmail(user.emailAddress);
+                const apiResponse = await renderSignatureOnServer(user)
+                const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse
+                console.log("📦 Signature API response", apiResponse);
+                const freshLink = `${emailSignatureUrl}?v=${Date.now()}`
 
-                const apiResponse = await fetchActiveSignature(encryptedEmail);
-                let updatedCombinedData;
-                console.log("🔍 apiResponse type:", typeof apiResponse);
-                console.log("🔍 apiResponse value:", apiResponse);
-                console.log("🔍 apiResponse?.elements:", apiResponse?.elements);
-                console.log("🔍 Array.isArray(elements):", Array.isArray(apiResponse?.elements));
-
-                if (apiResponse.card) {
-                    updatedCombinedData =
-                        updateFieldsFromCard(apiResponse.card)([...apiResponse.elements]);
-                } else {
-                    console.log("⚠️ No card object, using elements as-is");
-                    updatedCombinedData = [...apiResponse.elements];
-                }
-
-                console.log("📦 Signature API response", apiResponse, updatedCombinedData);
-                const freshLink = `${apiResponse?.emailSignatureUrl}?v=${Date.now()}`
-
-                const freshLinkForBanner = `${apiResponse?.bannerFileUrl}?v=${Date.now()}`
+                const freshLinkForBanner = `${bannerFileUrl}?v=${Date.now()}`
 
                 const html = generateEmailSignatureHTML(
                     freshLink,
-                    updatedCombinedData,
+                    elements,
                     freshLinkForBanner,
-                    !!apiResponse?.elements?.find(i => i?.key === "banner")?.link
+                    !!elements?.find(i => i?.key === "banner")?.link
                 );
                 const settings = Office.context.roamingSettings;
 

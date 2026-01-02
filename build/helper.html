@@ -87,7 +87,7 @@
         });
 
         async function renderSignatureOnServer(user) {
-            const res = await fetch("http://node-renderer.cardbyte-frontend.svc.cluster.local:4000/render-signature", {
+            const res = await fetch("http://192.168.1.115:4000/render-signature", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
@@ -99,7 +99,7 @@
                 throw new Error("Node renderer failed");
             }
             const data = await res?.json()
-            console.log("sdajsdkjhsdkjsad", data)
+
             // const blob = await res.blob();
 
             // // ✅ Create downloadable URL
