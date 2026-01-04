@@ -23,51 +23,31 @@
         const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 
         const LOADER_HTML = `
-                    <table cellpadding="0" cellspacing="0" border="0" width="350">
+                <div id="CARDBYTE_LOADER">
+                <table cellpadding="0" cellspacing="0" border="0" width="350">
                     <tr>
-                        <td align="center" style="padding:16px;">
-                        <div style="
-                            font-family:Arial, sans-serif;
-                            font-size:12px;
-                            color:#666;
-                        ">
-                            ⏳ Generating your email signature…
-                        </div>
-                        <div style="margin-top:8px;">
-                            <div style="
-                            width:24px;
-                            height:24px;
-                            border:3px solid #ddd;
-                            border-top:3px solid #333;
-                            border-radius:50%;
-                            animation: spin 1s linear infinite;
-                            "></div>
-                        </div>
-                        </td>
+                    <td align="center" style="padding:16px;">
+                        <span style="font-family:Arial; font-size:12px; color:#666;">
+                        ⏳ Generating your email signature…
+                        </span>
+                    </td>
                     </tr>
-                    </table>
-
-                    <style>
-                    @keyframes spin {
-                    0% { transform: rotate(0deg); }
-                    100% { transform: rotate(360deg); }
-                    }
-                    </style>
+                </table>
+                </div>
                 `;
 
 
         /* ---------------------------------------------------------
            Office Ready
            --------------------------------------------------------- */
-
         async function replaceSignature(item, html) {
             return new Promise((resolve, reject) => {
                 item.body.getAsync(Office.CoercionType.Html, r => {
                     if (r.status !== "succeeded") return reject(r.error);
 
                     const updated = r.value.replace(
-                        SIGNATURE_MARKER + LOADER_HTML,
-                        SIGNATURE_MARKER + html
+                        /<div id="CARDBYTE_LOADER">[\s\S]*?<\/div>/,
+                        html
                     );
 
                     item.body.setAsync(
@@ -78,7 +58,6 @@
                 });
             });
         }
-
 
         Office.onReady(async () => {
             console.log("✅ CardByte event.html ready");
@@ -241,13 +220,14 @@
         window.applySignature = async function (event) {
             console.log("🚀 applySignature triggered");
 
+            const mailbox = Office.context.mailbox;
+            const item = mailbox?.item;
+
             try {
-                const mailbox = Office.context.mailbox;
-                const item = mailbox?.item;
                 if (!item) return;
 
                 // 🔹 STEP 1: Insert loader immediately
-                await insertAtCursor(item, LOADER_HTML);
+                await insertAtCursor(item, SIGNATURE_MARKER + LOADER_HTML);
 
                 // 🔹 STEP 2: Call API
                 const user = mailbox.userProfile;
@@ -256,7 +236,7 @@
 
                 const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
 
-                const html = generateEmailSignatureHTML(
+                const finalHtml = generateEmailSignatureHTML(
                     `${emailSignatureUrl}?v=${Date.now()}`,
                     elements,
                     `${bannerFileUrl}?v=${Date.now()}`,
@@ -264,24 +244,35 @@
                 );
 
                 // 🔹 STEP 3: Replace loader with final signature
-                await replaceSignature(item, html);
+                await replaceSignature(item, finalHtml);
 
                 console.log("✅ Signature applied");
             } catch (err) {
-                const settings = Office.context.roamingSettings;
-                const signatureHtml =
-                    settings.get("defaultSignatureHtml") || SIGNATURE_MARKER +
-                    `
-                <div style="font-family:Arial;font-size:12px">
-                        <strong>${user.displayName}</strong><br/>
-                        ${user.emailAddress}<br/>
-                        <span style="color:#999">Sent via CardByte</span>
-                        </div>
-                        `;
-                console.log("sdkjhadkhsad", e, signatureHtml)
-                // 🔹 STEP 3: Replace loader with final signature
-                await replaceSignature(item, html);
                 console.error("❌ applySignature error", err);
+
+                try {
+                    const settings = Office.context.roamingSettings;
+                    const user = mailbox?.userProfile || {};
+
+                    const fallbackHtml =
+                        settings.get("defaultSignatureHtml") ||
+                        `
+                            <table cellpadding="0" cellspacing="0" border="0" width="350">
+                            <tr>
+                                <td style="font-family:Arial,sans-serif;font-size:12px;">
+                                <strong>${user.displayName || ""}</strong><br/>
+                                ${user.emailAddress || ""}<br/>
+                                <span style="color:#999;">Sent via CardByte</span>
+                                </td>
+                            </tr>
+                            </table>
+                        `.trim();
+
+                    // 🔁 Replace loader with fallback signature
+                    await replaceSignature(item, fallbackHtml);
+                } catch (fallbackErr) {
+                    console.error("❌ Failed to apply fallback signature", fallbackErr);
+                }
             } finally {
                 event.completed();
             }
