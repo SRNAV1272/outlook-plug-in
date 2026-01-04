@@ -306,7 +306,7 @@
                         `.trim();
 
                     // 🔁 Replace loader with fallback signature
-                    await replaceSignature(item, fallbackHtml);
+                    await insertAtCursor(item, fallbackHtml);
                 } catch (fallbackErr) {
                     console.error("❌ Failed to apply fallback signature", fallbackErr);
                 }
