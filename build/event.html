@@ -28,58 +28,6 @@
            Office Ready
            --------------------------------------------------------- */
 
-        // Office.onReady(async () => {
-        //     console.log("✅ CardByte event.html ready");
-        //     const mailbox = Office.context.mailbox;
-        //     const item = mailbox?.item;
-        //     const user = mailbox.userProfile;
-
-        //     try {
-        //         if (!item) return;
-
-        //         const apiResponse = await renderSignatureOnServer(user);
-        //         if (!apiResponse) throw new Error("API failed");
-
-        //         const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
-
-        //         const finalHtml = generateEmailSignatureHTML(
-        //             `${emailSignatureUrl}?v=${Date.now()}`,
-        //             elements,
-        //             `${bannerFileUrl}?v=${Date.now()}`,
-        //             !!elements?.find(i => i?.key === "banner")?.link
-        //         );
-
-        //         await insertAtCursor(item, finalHtml);
-
-        //         console.log("✅ Signature applied", finalHtml);
-        //     } catch (err) {
-        //         console.error("❌ applySignature error", err);
-
-        //         try {
-        //             const settings = Office.context.roamingSettings;
-        //             const user = mailbox?.userProfile || {};
-
-        //             const fallbackHtml =
-        //                 settings.get("defaultSignatureHtml") ||
-        //                 `
-        //                     <table cellpadding="0" cellspacing="0" border="0" width="350">
-        //                     <tr>
-        //                         <td style="font-family:Arial,sans-serif;font-size:12px;">
-        //                         <strong>${user.displayName || ""}</strong><br/>
-        //                         ${user.emailAddress || ""}<br/>
-        //                         <span style="color:#999;">Sent via CardByte</span>
-        //                         </td>
-        //                     </tr>
-        //                     </table>
-        //                 `.trim();
-
-        //             await insertAtCursor(item, fallbackHtml);
-        //         } catch (fallbackErr) {
-        //             console.error("❌ Failed to apply fallback signature", fallbackErr);
-        //         }
-        //     }
-        // });
-
         Office.onReady(() => {
             console.log("✅ CardByte event.html ready");
 
@@ -126,63 +74,6 @@
            AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
            --------------------------------------------------------- */
 
-        // window.applySignature = async function (event) {
-        //     console.log("🚀 applySignature triggered");
-        //     const mailbox = Office.context.mailbox;
-        //     const user = mailbox.userProfile;
-        //     const item = mailbox?.item;
-
-        //     try {
-        //         if (!item) return;
-
-        //         // 🔹 STEP 2: Call API
-        //         const apiResponse = await renderSignatureOnServer(user);
-        //         if (!apiResponse) throw new Error("API failed");
-
-        //         const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
-
-        //         const finalHtml = generateEmailSignatureHTML(
-        //             `${emailSignatureUrl}?v=${Date.now()}`,
-        //             elements,
-        //             `${bannerFileUrl}?v=${Date.now()}`,
-        //             !!elements?.find(i => i?.key === "banner")?.link
-        //         );
-
-        //         await insertAtCursor(item, finalHtml);
-
-        //         console.log("✅ Signature applied");
-        //     } catch (err) {
-        //         console.error("❌ applySignature error", err);
-
-        //         try {
-        //             const settings = Office.context.roamingSettings;
-        //             const user = mailbox?.userProfile || {};
-
-        //             const fallbackHtml =
-        //                 settings.get("defaultSignatureHtml") ||
-        //                 `
-        //                     <table cellpadding="0" cellspacing="0" border="0" width="350">
-        //                     <tr>
-        //                         <td style="font-family:Arial,sans-serif;font-size:12px;">
-        //                         <strong>${user.displayName || ""}</strong><br/>
-        //                         ${user.emailAddress || ""}<br/>
-        //                         <span style="color:#999;">Sent via CardByte</span>
-        //                         </td>
-        //                     </tr>
-        //                     </table>
-        //                 `.trim();
-
-        //             // 🔁 Replace loader with fallback signature
-        //             await insertAtCursor(item, fallbackHtml);
-        //         } catch (fallbackErr) {
-        //             console.error("❌ Failed to apply fallback signature", fallbackErr);
-        //         }
-        //     } finally {
-        //         event.completed();
-        //     }
-        // };
-
-
         window.applySignature = async function (event = { completed: () => { } }) {
             console.log("🚀 applySignature triggered");
 
@@ -202,6 +93,10 @@
             const mailbox = Office.context.mailbox;
             const item = mailbox?.item;
             const user = mailbox.userProfile;
+            // const user = {
+            //     displayName: "John Doe",
+            //     emailAddress: "sairajesh.korla1272@outlook.com"
+            // };
 
             try {
                 if (!item) return;
@@ -226,7 +121,7 @@
                 // ✅ Mark success
                 SIGNATURE_STATE = "applied";
 
-                console.log("✅ Signature applied");
+                console.log("✅ Signature applied", finalHtml);
             } catch (err) {
                 console.error("❌ applySignature error", err);
 

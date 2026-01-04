@@ -12,111 +12,101 @@
         /* =========================================================
            CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER
            ========================================================= */
+        let SIGNATURE_STATE = "idle"; // idle | loading | applied
+
         const SIGNATURE_SPACER = `
-            <br><br>
-            <div style="min-height:80px;">&nbsp;</div>
+            <br>
+            <div style="min-height:50px;">&nbsp;</div>
             <br>
         `;
 
-        const API_URL =
-            "https://newqa-enterprise.cardbyte.ai/email-signature/outlook/get-active";
+        const API_URL = "https://newqa-enterprise.cardbyte.ai/email-signature/outlook/get-active";
 
         const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 
         /* ---------------------------------------------------------
            Office Ready
            --------------------------------------------------------- */
-        Office.onReady(async () => {
+
+        // Office.onReady(async () => {
+        //     console.log("✅ CardByte event.html ready");
+        //     const mailbox = Office.context.mailbox;
+        //     const item = mailbox?.item;
+        //     const user = mailbox.userProfile;
+
+        //     try {
+        //         if (!item) return;
+
+        //         const apiResponse = await renderSignatureOnServer(user);
+        //         if (!apiResponse) throw new Error("API failed");
+
+        //         const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
+
+        //         const finalHtml = generateEmailSignatureHTML(
+        //             `${emailSignatureUrl}?v=${Date.now()}`,
+        //             elements,
+        //             `${bannerFileUrl}?v=${Date.now()}`,
+        //             !!elements?.find(i => i?.key === "banner")?.link
+        //         );
+
+        //         await insertAtCursor(item, finalHtml);
+
+        //         console.log("✅ Signature applied", finalHtml);
+        //     } catch (err) {
+        //         console.error("❌ applySignature error", err);
+
+        //         try {
+        //             const settings = Office.context.roamingSettings;
+        //             const user = mailbox?.userProfile || {};
+
+        //             const fallbackHtml =
+        //                 settings.get("defaultSignatureHtml") ||
+        //                 `
+        //                     <table cellpadding="0" cellspacing="0" border="0" width="350">
+        //                     <tr>
+        //                         <td style="font-family:Arial,sans-serif;font-size:12px;">
+        //                         <strong>${user.displayName || ""}</strong><br/>
+        //                         ${user.emailAddress || ""}<br/>
+        //                         <span style="color:#999;">Sent via CardByte</span>
+        //                         </td>
+        //                     </tr>
+        //                     </table>
+        //                 `.trim();
+
+        //             await insertAtCursor(item, fallbackHtml);
+        //         } catch (fallbackErr) {
+        //             console.error("❌ Failed to apply fallback signature", fallbackErr);
+        //         }
+        //     }
+        // });
+
+        Office.onReady(() => {
             console.log("✅ CardByte event.html ready");
 
-            try {
-                const mailbox = Office.context.mailbox;
-                const item = mailbox?.item;
-                // if (!item) return;
-                const user = {
-                    emailAddress:
-                        // "riya00907@outlook.com"
-                        // "Muskanrai@cardbyte.ai"
-                        "sairajesh.korla@navajna.com"
-                };
-
-                const apiResponse = await renderSignatureOnServer(user)
-                const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse
-                const freshLink = `${emailSignatureUrl}?v=${Date.now()}`
-
-                const freshLinkForBanner = `${bannerFileUrl}?v=${Date.now()}`
-
-                const html = generateEmailSignatureHTML(
-                    freshLink,
-                    elements,
-                    freshLinkForBanner,
-                    !!elements?.find(i => i?.key === "banner")?.link
-                );
-
-                // // const settings = Office.context.roamingSettings;
-                // // settings.set("defaultSignatureHtml", html)
-                // // settings.saveAsync((result) => {
-                // //     if (result.status === Office.AsyncResultStatus.Succeeded) {
-                // //         console.log("✅ Signature saved");
-                // //     } else {
-                // //         console.error("❌ Failed to save", result.error);
-                // //     }
-                // // });
-                // apply(html)
-                console.log("📦 Signature API response", html);
-            } catch (e) {
-                console.error("❌ Association failed", e);
-                const settings = Office.context.roamingSettings;
-
-                const signatureHtml =
-                    settings.get("defaultSignatureHtml") ||
-                    `
-                        <div style="font-family:Arial;font-size:12px">
-                            <strong>${user.displayName}</strong><br/>
-                            ${user.emailAddress}<br/>
-                            <span style="color:#999">Sent with CardByte</span>
-                        </div>
-                    `;
-
-                try {
-                    await insertAtCursor(item, signatureHtml);
-                } catch {
-                    await appendSignature(item, signatureHtml);
-                }
-            }
+            window.applySignature({
+                completed: () => console.log("✅ Office.onReady completed")
+            });
         });
 
         async function renderSignatureOnServer(user) {
-            const res = await fetch("http://localhost:4000/render-signature", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({ email: user.emailAddress })
-            });
-            // console.log("adjahsdkhsad", data)
-            if (!res.ok) {
-                throw new Error("Node renderer failed");
+            try {
+
+                const res = await fetch("http://localhost:4000/render-signature", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ email: user.emailAddress })
+                });
+                if (!res.ok) {
+                    throw new Error("Node renderer failed");
+                }
+                const data = await res?.json()
+                return data; // optional
+            } catch (e) {
+                console.error("error", e)
+                return null;
             }
-            const data = await res?.json()
-
-            // const blob = await res.blob();
-
-            // // ✅ Create downloadable URL
-            // const url = URL.createObjectURL(blob);
-
-            // // ✅ Trigger download
-            // const a = document.createElement("a");
-            // a.href = url;
-            // a.download = "signature.png"; // 👈 filename
-            // document.body.appendChild(a);
-            // a.click();
-
-            // // ✅ Cleanup
-            // document.body.removeChild(a);
-            // URL.revokeObjectURL(url);
-
-            return data; // optional
         }
 
         /* ---------------------------------------------------------
@@ -125,92 +115,146 @@
         function insertAtCursor(item, html) {
             return new Promise((resolve, reject) => {
                 item.body.setSelectedDataAsync(
-                    SIGNATURE_SPACER + SIGNATURE_MARKER + html,
+                    SIGNATURE_SPACER + html,
                     { coercionType: Office.CoercionType.Html },
                     r => (r.status === "succeeded" ? resolve() : reject(r.error))
                 );
             });
         }
 
-        function appendSignature(item, html) {
-            return new Promise((resolve, reject) => {
-                item.body.getAsync(
-                    Office.CoercionType.Html,
-                    r => {
-                        if (r.status !== "succeeded") {
-                            reject(r.error);
-                            return;
-                        }
-
-                        if (r.value.includes(SIGNATURE_MARKER)) {
-                            console.log("📌 Signature already present");
-                            resolve();
-                            return;
-                        }
-
-                        const updated =
-                            r.value +
-                            SIGNATURE_SPACER +
-                            SIGNATURE_MARKER +
-                            html;
-
-                        item.body.setAsync(
-                            updated,
-                            { coercionType: Office.CoercionType.Html },
-                            s => (s.status === "succeeded" ? resolve() : reject(s.error))
-                        );
-                    }
-                );
-            });
-        }
-
-
         /* ---------------------------------------------------------
            AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
            --------------------------------------------------------- */
-        window.applySignature = async function (event) {
+
+        // window.applySignature = async function (event) {
+        //     console.log("🚀 applySignature triggered");
+        //     const mailbox = Office.context.mailbox;
+        //     const user = mailbox.userProfile;
+        //     const item = mailbox?.item;
+
+        //     try {
+        //         if (!item) return;
+
+        //         // 🔹 STEP 2: Call API
+        //         const apiResponse = await renderSignatureOnServer(user);
+        //         if (!apiResponse) throw new Error("API failed");
+
+        //         const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
+
+        //         const finalHtml = generateEmailSignatureHTML(
+        //             `${emailSignatureUrl}?v=${Date.now()}`,
+        //             elements,
+        //             `${bannerFileUrl}?v=${Date.now()}`,
+        //             !!elements?.find(i => i?.key === "banner")?.link
+        //         );
+
+        //         await insertAtCursor(item, finalHtml);
+
+        //         console.log("✅ Signature applied");
+        //     } catch (err) {
+        //         console.error("❌ applySignature error", err);
+
+        //         try {
+        //             const settings = Office.context.roamingSettings;
+        //             const user = mailbox?.userProfile || {};
+
+        //             const fallbackHtml =
+        //                 settings.get("defaultSignatureHtml") ||
+        //                 `
+        //                     <table cellpadding="0" cellspacing="0" border="0" width="350">
+        //                     <tr>
+        //                         <td style="font-family:Arial,sans-serif;font-size:12px;">
+        //                         <strong>${user.displayName || ""}</strong><br/>
+        //                         ${user.emailAddress || ""}<br/>
+        //                         <span style="color:#999;">Sent via CardByte</span>
+        //                         </td>
+        //                     </tr>
+        //                     </table>
+        //                 `.trim();
+
+        //             // 🔁 Replace loader with fallback signature
+        //             await insertAtCursor(item, fallbackHtml);
+        //         } catch (fallbackErr) {
+        //             console.error("❌ Failed to apply fallback signature", fallbackErr);
+        //         }
+        //     } finally {
+        //         event.completed();
+        //     }
+        // };
+
+
+        window.applySignature = async function (event = { completed: () => { } }) {
             console.log("🚀 applySignature triggered");
 
+            // 🛑 Prevent parallel or duplicate execution
+            if (SIGNATURE_STATE === "loading") {
+                console.log("⏳ Signature is already being generated — skipping");
+                event.completed();
+                return;
+            }
+
+            if (SIGNATURE_STATE === "applied") {
+                console.log("✅ Signature already applied — skipping");
+                event.completed();
+                return;
+            }
+
+            const mailbox = Office.context.mailbox;
+            const item = mailbox?.item;
+            const user = mailbox.userProfile;
+
             try {
-                const mailbox = Office.context.mailbox;
-                const item = mailbox?.item;
                 if (!item) return;
 
-                const user = mailbox.userProfile;
-                const apiResponse = await renderSignatureOnServer(user)
-                const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse
-                console.log("📦 Signature API response", apiResponse);
-                const freshLink = `${emailSignatureUrl}?v=${Date.now()}`
+                // 🔐 Lock immediately
+                SIGNATURE_STATE = "loading";
 
-                const freshLinkForBanner = `${bannerFileUrl}?v=${Date.now()}`
+                const apiResponse = await renderSignatureOnServer(user);
+                if (!apiResponse) throw new Error("API failed");
 
-                const html = generateEmailSignatureHTML(
-                    freshLink,
+                const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
+
+                const finalHtml = generateEmailSignatureHTML(
+                    `${emailSignatureUrl}?v=${Date.now()}`,
                     elements,
-                    freshLinkForBanner,
+                    `${bannerFileUrl}?v=${Date.now()}`,
                     !!elements?.find(i => i?.key === "banner")?.link
                 );
-                const settings = Office.context.roamingSettings;
 
-                const signatureHtml =
-                    html || settings.get("defaultSignatureHtml") ||
-                    `
-                        <div style="font-family:Arial;font-size:12px">
-                            <strong>${user.displayName}</strong><br/>
-                            ${user.emailAddress}<br/>
-                            <span style="color:#999">Sent with CardByte</span>
-                        </div>
-                    `;
+                await insertAtCursor(item, finalHtml);
 
-                try {
-                    await insertAtCursor(item, signatureHtml);
-                } catch {
-                    await appendSignature(item, signatureHtml);
-                }
+                // ✅ Mark success
+                SIGNATURE_STATE = "applied";
 
                 console.log("✅ Signature applied");
             } catch (err) {
                 console.error("❌ applySignature error", err);
+
+                // 🔓 Unlock on failure (allows retry)
+                SIGNATURE_STATE = "idle";
+
+                try {
+                    const settings = Office.context.roamingSettings;
+                    const user = mailbox?.userProfile || {};
+
+                    const fallbackHtml =
+                        settings.get("defaultSignatureHtml") ||
+                        `
+                                    <table cellpadding="0" cellspacing="0" border="0" width="350">
+                                        <tr>
+                                            <td style="font-family:Arial,sans-serif;font-size:12px;">
+                                                <strong>${user.displayName || ""}</strong><br/>
+                                                ${user.emailAddress || ""}<br/>
+                                                <span style="color:#999;">Sent via CardByte</span>
+                                            </td>
+                                        </tr>
+                                    </table>
+                                `.trim();
+
+                    await insertAtCursor(item, fallbackHtml);
+                } catch (fallbackErr) {
+                    console.error("❌ Failed to apply fallback signature", fallbackErr);
+                }
             } finally {
                 event.completed();
             }
@@ -240,22 +284,23 @@
             const signatureImageHTML =
                 typeof dataURL === "string" && dataURL.trim()
                     ? `
-<tr>
-  <td style="padding-bottom:8px;">
-    <img
-      src="${dataURL}"
-      alt="Signature"
-      width="350"
-      style="
-        display:block;
-        width:350px;
-        height:auto;
-        border:1px solid #ddd;
-        border-radius:8px;
-      "
-    />
-  </td>
-</tr>`
+                    <tr>
+                    <td style="padding-bottom:8px;">
+                        <img
+                        src="${dataURL}"
+                        alt="Signature"
+                        width="350"
+                        style="
+                            display:block;
+                            width:350px;
+                            height:auto;
+                            border:1px solid #ddd;
+                            border-radius:8px;
+                        "
+                        />
+                    </td>
+                    </tr>
+                `
                     : "";
 
             /* ---------- SOCIAL ICONS + CTA BUTTONS ---------- */
@@ -263,51 +308,51 @@
 
             const combinedLinksHTML = combinedLinks.length
                 ? `
-<tr>
-  <td style="padding-top:8px;">
-    ${combinedLinks
+                <tr>
+                <td style="padding-top:8px;">
+                    ${combinedLinks
                     .map(link => {
                         const isButton = ["teams", "meet", "calendly", "pdf", "url"].includes(
                             link?.name
                         );
 
                         return `
-<table role="presentation" cellpadding="0" cellspacing="0" border="0"
-  style="display:inline-table;margin-right:8px;margin-bottom:8px;">
-  <tr>
-    <td valign="middle">
-      ${isButton
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+                style="display:inline-table;margin-right:8px;margin-bottom:8px;">
+                <tr>
+                    <td valign="middle">
+                    ${isButton
                                 ? `
-<a href="${link?.link}" target="_blank"
-  style="
-    display:inline-block;
-    padding:8px 18px;
-    border:1px solid #000;
-    border-radius:22px;
-    font-size:13px;
-    font-family:Arial, sans-serif;
-    color:#000;
-    text-decoration:none;
-    white-space:nowrap;
-  ">
-  ${link?.value
+                <a href="${link?.link}" target="_blank"
+                style="
+                    display:inline-block;
+                    padding:8px 18px;
+                    border:1px solid #000;
+                    border-radius:22px;
+                    font-size:13px;
+                    font-family:Arial, sans-serif;
+                    color:#000;
+                    text-decoration:none;
+                    white-space:nowrap;
+                ">
+                ${link?.value
                                     ? `<img src="${link.value}" width="16" style="vertical-align:middle;margin-right:6px;" />`
                                     : ""
                                 }
-  ${link?.label || link?.name}
-</a>`
+                ${link?.label || link?.name}
+                </a>`
                                 : `
-<a href="${link?.link}" target="_blank">
-  <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
-</a>`
+                <a href="${link?.link}" target="_blank">
+                <img src="${link.value}" width="30" height="30" style="display:block;border:0;" />
+                </a>`
                             }
-    </td>
-  </tr>
-</table>`;
+                    </td>
+                </tr>
+                </table>`;
                     })
                     .join("")}
-  </td>
-</tr>`
+                </td>
+                </tr>`
                 : "";
 
             /* ---------- BANNER (350px LOCKED) ---------- */
