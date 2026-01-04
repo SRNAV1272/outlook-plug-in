@@ -74,17 +74,24 @@
 
         Office.onReady(async () => {
             console.log("✅ CardByte event.html ready");
-            const mailbox = Office.context.mailbox;
-            const item = mailbox?.item;
-
+            // const mailbox = Office.context.mailbox;
+            // const item = mailbox?.item;
+            const user = {
+                emailAddress:
+                    // "riya00907@outlook.com"
+                    // "Muskanrai@cardbyte.ai"
+                    "sairajesh.korla1272@outlook.com"
+                // "sairajeshkorla@gamil.com"
+            };
             try {
-                if (!item) return;
+                // if (!item) return;
 
                 // 🔹 STEP 1: Insert loader immediately
                 // await insertLoader(item);
 
                 // 🔹 STEP 2: Call API
-                const user = mailbox.userProfile;
+                // const user = mailbox.userProfile;
+
                 const apiResponse = await renderSignatureOnServer(user);
                 if (!apiResponse) throw new Error("API failed");
 
@@ -98,18 +105,18 @@
                 );
 
                 // 🔹 STEP 3: Replace loader with final signature
-                await insertAtCursor(item, finalHtml);
+                // await insertAtCursor(item, finalHtml);
 
-                console.log("✅ Signature applied");
+                console.log("✅ Signature applied", finalHtml);
             } catch (err) {
                 console.error("❌ applySignature error", err);
 
                 try {
-                    const settings = Office.context.roamingSettings;
-                    const user = mailbox?.userProfile || {};
+                    // const settings = Office.context.roamingSettings;
+                    // const user = mailbox?.userProfile || {};
 
                     const fallbackHtml =
-                        settings.get("defaultSignatureHtml") ||
+                        // settings.get("defaultSignatureHtml") ||
                         `
                             <table cellpadding="0" cellspacing="0" border="0" width="350">
                             <tr>
@@ -135,7 +142,7 @@
         async function renderSignatureOnServer(user) {
             try {
 
-                const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
+                const res = await fetch("http://localhost:4000/render-signature", {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json"
@@ -202,54 +209,6 @@
         /* ---------------------------------------------------------
            AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
            --------------------------------------------------------- */
-        // window.applySignature = async function (event) {
-        //     console.log("🚀 applySignature triggered");
-
-        //     try {
-        //         const mailbox = Office.context.mailbox;
-        //         const item = mailbox?.item;
-        //         if (!item) return;
-
-        //         const user = mailbox.userProfile;
-        //         const apiResponse = await renderSignatureOnServer(user)
-        //         const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse
-        //         console.log("📦 Signature API response", apiResponse);
-        //         const freshLink = `${emailSignatureUrl}?v=${Date.now()}`
-
-        //         const freshLinkForBanner = `${bannerFileUrl}?v=${Date.now()}`
-
-        //         const html = generateEmailSignatureHTML(
-        //             freshLink,
-        //             elements,
-        //             freshLinkForBanner,
-        //             !!elements?.find(i => i?.key === "banner")?.link
-        //         );
-        //         const settings = Office.context.roamingSettings;
-
-        //         const signatureHtml =
-        //             html || settings.get("defaultSignatureHtml") ||
-        //             `
-        //                 <div style="font-family:Arial;font-size:12px">
-        //                     <strong>${user.displayName}</strong><br/>
-        //                     ${user.emailAddress}<br/>
-        //                     <span style="color:#999">Sent with CardByte</span>
-        //                 </div>
-        //             `;
-
-        //         try {
-        //             await insertAtCursor(item, signatureHtml);
-        //         } catch {
-        //             await appendSignature(item, signatureHtml);
-        //         }
-
-        //         console.log("✅ Signature applied");
-        //     } catch (err) {
-        //         console.error("❌ applySignature error", err);
-        //     } finally {
-        //         event.completed();
-        //     }
-        // };
-
         async function insertLoader(item) {
             return new Promise((resolve, reject) => {
                 item.body.getAsync(Office.CoercionType.Html, r => {
@@ -385,51 +344,51 @@
 
             const combinedLinksHTML = combinedLinks.length
                 ? `
-<tr>
-  <td style="padding-top:8px;">
-    ${combinedLinks
-                    .map(link => {
-                        const isButton = ["teams", "meet", "calendly", "pdf", "url"].includes(
-                            link?.name
-                        );
+                <tr>
+                <td style="padding-top:8px;">
+                    ${combinedLinks
+                                    .map(link => {
+                                        const isButton = ["teams", "meet", "calendly", "pdf", "url"].includes(
+                                            link?.name
+                                        );
 
-                        return `
-<table role="presentation" cellpadding="0" cellspacing="0" border="0"
-  style="display:inline-table;margin-right:8px;margin-bottom:8px;">
-  <tr>
-    <td valign="middle">
-      ${isButton
-                                ? `
-<a href="${link?.link}" target="_blank"
-  style="
-    display:inline-block;
-    padding:8px 18px;
-    border:1px solid #000;
-    border-radius:22px;
-    font-size:13px;
-    font-family:Arial, sans-serif;
-    color:#000;
-    text-decoration:none;
-    white-space:nowrap;
-  ">
-  ${link?.value
-                                    ? `<img src="${link.value}" width="16" style="vertical-align:middle;margin-right:6px;" />`
-                                    : ""
-                                }
-  ${link?.label || link?.name}
-</a>`
-                                : `
-<a href="${link?.link}" target="_blank">
-  <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
-</a>`
-                            }
-    </td>
-  </tr>
-</table>`;
-                    })
-                    .join("")}
-  </td>
-</tr>`
+                                        return `
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+                style="display:inline-table;margin-right:8px;margin-bottom:8px;">
+                <tr>
+                    <td valign="middle">
+                    ${isButton
+                                                ? `
+                <a href="${link?.link}" target="_blank"
+                style="
+                    display:inline-block;
+                    padding:8px 18px;
+                    border:1px solid #000;
+                    border-radius:22px;
+                    font-size:13px;
+                    font-family:Arial, sans-serif;
+                    color:#000;
+                    text-decoration:none;
+                    white-space:nowrap;
+                ">
+                ${link?.value
+                                                    ? `<img src="${link.value}" width="16" style="vertical-align:middle;margin-right:6px;" />`
+                                                    : ""
+                                                }
+                ${link?.label || link?.name}
+                </a>`
+                                                : `
+                <a href="${link?.link}" target="_blank">
+                <img src="${link.value}" width="30" height="30" style="display:block;border:0;" />
+                </a>`
+                                            }
+                    </td>
+                </tr>
+                </table>`;
+                                    })
+                                    .join("")}
+                </td>
+                </tr>`
                 : "";
 
             /* ---------- BANNER (350px LOCKED) ---------- */
