@@ -264,7 +264,7 @@
                 if (!item) return;
 
                 // 🔹 STEP 1: Insert loader immediately
-                await insertLoader(item);
+                // await insertLoader(item);
 
                 // 🔹 STEP 2: Call API
                 const user = mailbox.userProfile;
@@ -281,7 +281,7 @@
                 );
 
                 // 🔹 STEP 3: Replace loader with final signature
-                await replaceSignature(item, finalHtml);
+                await insertAtCursor(item, finalHtml);
 
                 console.log("✅ Signature applied");
             } catch (err) {
