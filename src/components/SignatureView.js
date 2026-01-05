@@ -25,7 +25,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                 freshLinkForBanner,
                 !!form?.elements?.find(i => i?.key === "banner")?.link
             );
-            // const settings = Office.context.roamingSettings;
+            const settings = Office.context.roamingSettings;
             // settings.set("defaultSignatureHtml", html)
 
             // const type = "text/html";
