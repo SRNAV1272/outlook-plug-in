@@ -342,16 +342,42 @@ export function generateEmailSignatureHTML(
 
   /* ---------- SOCIAL ICONS + CTA BUTTONS ---------- */
   const combinedLinks = [...normalLinks, ...buttonLinks];
+  const BUTTON_TYPES = ["teams", "meet", "calendly", "pdf", "url"];
+
+  const sortedLinks = [...combinedLinks].sort((a, b) => {
+    const aIsButton = BUTTON_TYPES.includes(a?.name);
+    const bIsButton = BUTTON_TYPES.includes(b?.name);
+
+    const aLabelEmpty = !a?.label || !String(a.label).trim();
+    const bLabelEmpty = !b?.label || !String(b.label).trim();
+
+    // 1️⃣ Non-buttons first
+    if (!aIsButton && bIsButton) return -1;
+    if (aIsButton && !bIsButton) return 1;
+
+    // 2️⃣ Among buttons → empty label first
+    if (aIsButton && bIsButton) {
+      if (aLabelEmpty && !bLabelEmpty) return -1;
+      if (!aLabelEmpty && bLabelEmpty) return 1;
+    }
+
+    // 3️⃣ Keep original order
+    return 0;
+  });
+
+  sortedLinks.map(link => {
+    const isButton = BUTTON_TYPES.includes(link?.name);
+    // render logic
+  });
+
 
   const combinedLinksHTML = combinedLinks.length
     ? `
 <tr>
   <td style="padding-top:8px;">
-    ${combinedLinks
+    ${sortedLinks
       .map(link => {
-        const isButton = ["teams", "meet", "calendly", "pdf", "url"].includes(
-          link?.name
-        );
+        const isButton = BUTTON_TYPES.includes(link?.name);
 
         return `
 <table role="presentation" cellpadding="0" cellspacing="0" border="0"
@@ -364,7 +390,7 @@ export function generateEmailSignatureHTML(
   style="
     display:inline-block;
     padding:8px 18px;
-    border:1px solid #000;
+    border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
     border-radius:22px;
     font-size:13px;
     font-family:Arial, sans-serif;
@@ -373,19 +399,34 @@ export function generateEmailSignatureHTML(
     white-space:nowrap;
   ">
   ${link?.value
-              ? `<img src="${link.value}" width="16" style="vertical-align:middle;margin-right:6px;" />`
+              ? `<img src="${link.value}" width="${!!link?.label ? 16 : 22}" style="vertical-align:middle;margin-right:6px;" />`
               : ""
             }
-  ${link?.label || link?.name}
+  ${link?.label}
 </a>`
             : `
-<a href="${link?.link}" target="_blank">
-  <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
+<a href="${link?.link}" target="_blank"
+  style="
+    display:inline-block;
+    padding:8px 18px;
+    border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
+    border-radius:22px;
+    font-size:13px;
+    font-family:Arial, sans-serif;
+    color:#000;
+    text-decoration:none;
+    white-space:nowrap;
+  ">
+  ${link?.value
+              ? `<img src="${link.value}" width="${!!link?.label ? 16 : 22}" style="vertical-align:middle;margin-right:6px;" />`
+              : ""
+            }
+  ${link?.label}
 </a>`
           }
-    </td>
-  </tr>
-</table>`;
+    </td >
+  </tr >
+</table > `;
       })
       .join("")}
   </td>

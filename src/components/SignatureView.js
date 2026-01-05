@@ -5,6 +5,7 @@ import DefaultTemplate from "./SignatureComponents/Assets/Images/DefaultTemplate
 import { generateEmailSignatureHTML, IconAvatar } from "./SignatureComponents/IconAvatar";
 import usernotfound from "../components/SignatureComponents/Assets/Images/usernotfound.gif"
 import signnotassigned from "../components/SignatureComponents/Assets/Images/signnotassigned.webp"
+import qrcode_default from "../components/SignatureComponents/Assets/Images/qr_code_default_logo.png"
 
 export default function SignatureView({ Office, user, apply, showSocialMediaIcons = true }) {
     const containerRef = useRef(null);
@@ -24,8 +25,19 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                 freshLinkForBanner,
                 !!form?.elements?.find(i => i?.key === "banner")?.link
             );
-            const settings = Office.context.roamingSettings;
-            settings.set("defaultSignatureHtml", html)
+            // const settings = Office.context.roamingSettings;
+            // settings.set("defaultSignatureHtml", html)
+
+            // const type = "text/html";
+            // const blob = new Blob([html], { type });
+            // // eslint-disable-next-line no-undef
+            // const clipboardItem = new ClipboardItem({
+            //     [type]: blob,
+            //     "text/plain": new Blob([html], { type: "text/plain" })
+            // });
+
+            // await navigator.clipboard.write([clipboardItem]);
+            // toast.success("Signature copied! Now paste directly into Gmail/Outlook.");
             settings.saveAsync((result) => {
                 if (result.status === Office.AsyncResultStatus.Succeeded) {
                     console.log("✅ Signature saved");
@@ -251,7 +263,14 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                             ?.filter(i => !["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
                                                             ?.filter(i => i?.show)
                                                             ?.map(field => (
-                                                                <a href={`${field?.link}`} rel="noreferrer" target="_blank">
+                                                                <a
+                                                                    href={`${field?.link}`} rel="noreferrer" target="_blank"
+                                                                    style={{
+                                                                        // border: "1px solid #0b2e79ff",
+                                                                        padding: "5px 20px",
+                                                                        borderRadius: "20px",
+                                                                    }}
+                                                                >
                                                                     <IconAvatar
                                                                         key={field.key}
                                                                         image={field?.value}
@@ -272,9 +291,9 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                                         background: "#fff",
                                                                         padding: "5px 20px",
                                                                         borderRadius: "20px",
-                                                                        border: "1px solid #000",
-                                                                        color: "#000",
-                                                                        fontFamily: "Arial, sans-serif",
+                                                                        border: !!field?.label ? "1px solid #0b2e79ff" : "none",
+                                                                        color: "#0b2e79ff",
+                                                                        fontFamily: "Plus Jakarta Sans",
                                                                         fontSize: "14px",
                                                                         fontWeight: 500,
                                                                         textDecoration: "none",
@@ -283,9 +302,10 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                                         columnGap: 5
                                                                     }}
                                                                 >
+                                                                    {console.log("field.value", field)}
                                                                     <img
                                                                         src={field?.value}
-                                                                        width="16"
+                                                                        width="25"
                                                                         alt="cardbyte"
                                                                     />
                                                                     {field?.label}
@@ -304,12 +324,22 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                 onClick={() => applyHTML()}
                                                 variant="outlined"
                                                 size="small"
+                                                startIcon={
+                                                    <img
+                                                        src={qrcode_default}
+                                                        alt="Cardbyte Logo"
+                                                        style={{
+                                                            width: 12,
+                                                            height: 'auto'
+                                                        }}
+                                                    />
+                                                }
                                                 sx={{
                                                     width: "100px",
-                                                    height: "47px",
+                                                    height: "40px",
                                                     marginRight: "8px",
                                                     backgroundColor: "#fff",
-                                                    border: "1px solid #eeeeee",
+                                                    border: "1.5px solid #0b2e79ff",
                                                     borderRadius: "13px",
                                                     fontSize: "13px",
                                                     fontFamily: "Plus Jakarta Sans",
@@ -317,7 +347,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                     color: "#4A5056",
                                                     "&:hover": {
                                                         color: "#4A5056",
-                                                        borderColor: "#ccc",
+                                                        borderColor: "#144CC9",
                                                     },
                                                 }}
                                             >
