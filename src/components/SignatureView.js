@@ -267,7 +267,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                                     href={`${field?.link}`} rel="noreferrer" target="_blank"
                                                                     style={{
                                                                         // border: "1px solid #0b2e79ff",
-                                                                        padding: "5px 20px",
+                                                                        padding: "5px 5px",
                                                                         borderRadius: "20px",
                                                                     }}
                                                                 >
@@ -289,7 +289,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                                     rel="noreferrer"
                                                                     style={{
                                                                         background: "#fff",
-                                                                        padding: "5px 20px",
+                                                                        padding: "5px 10px",
                                                                         borderRadius: "20px",
                                                                         border: !!field?.label ? "1px solid #0b2e79ff" : "none",
                                                                         color: "#0b2e79ff",

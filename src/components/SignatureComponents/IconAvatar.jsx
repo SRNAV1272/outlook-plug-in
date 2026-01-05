@@ -389,7 +389,7 @@ export function generateEmailSignatureHTML(
 <a href="${link?.link}" target="_blank"
   style="
     display:inline-block;
-    padding:8px 18px;
+    padding:${!!link?.label ? "8px 18px" : "8px 8px"};
     border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
     border-radius:22px;
     font-size:13px;
@@ -408,7 +408,7 @@ export function generateEmailSignatureHTML(
 <a href="${link?.link}" target="_blank"
   style="
     display:inline-block;
-    padding:8px 18px;
+    padding:8px 0px;
     border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
     border-radius:22px;
     font-size:13px;
