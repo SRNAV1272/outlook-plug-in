@@ -34,7 +34,7 @@ const renderApp = (user) => {
 const fallbackUser = {
   accountType: "office365",
   displayName: "Korla Sai Rajesh",
-  emailAddress: "sairajesh.korla1@navajna.com",
+  emailAddress: "sairajesh.korla1272@outlook.com",//"sairajesh.korla1@navajna.com",
   timeZone: "India Standard Time",
 };
 
@@ -50,9 +50,26 @@ let signatureApplied = false;
  * Apply Default Signature (AUTO)
  * --------------------------------------------------
  */
+
+function hasCardByteSignature(bodyHtml = "") {
+  if (!bodyHtml) return false;
+
+  // ✅ PRIMARY (MOST RELIABLE)
+  // Azure Blob rendered signature image
+  if (bodyHtml.includes("cardbyte-email-signature")) {
+    return true;
+  }
+
+  // ✅ SECONDARY (legacy renderer / fallback)
+  if (bodyHtml.includes("cardbyte.ai")) {
+    return true;
+  }
+
+  return false;
+}
+
 // function applyDefaultSignature() {
 //   if (signatureApplied) return;
-//   signatureApplied = true;
 
 //   const item = Office.context.mailbox.item;
 //   if (!item || !item.body) return;
@@ -60,87 +77,82 @@ let signatureApplied = false;
 //   item.body.getAsync(Office.CoercionType.Html, (result) => {
 //     if (result.status !== Office.AsyncResultStatus.Succeeded) return;
 
-//     const body = result.value || "";
+//     const bodyHtml = result.value || "";
 
-//     // Prevent duplicate signature
-//     if (body.includes("data-default-signature")) return;
+//     // 🛑 SIGNATURE ALREADY EXISTS (event.html already ran)
+//     if (hasCardByteSignature(bodyHtml)) {
+//       console.log("✅ Signature already present — skipping React auto apply");
+//       signatureApplied = true;
+//       return;
+//     }
 
-//     const profile = Office.context.mailbox.userProfile;
+//     const settings = Office.context.roamingSettings;
+//     const storedSignature = settings.get("defaultSignatureHtml");
+
+//     if (!storedSignature) return;
+
+//     signatureApplied = true;
 
 //     const signatureHtml = `
-//       <div data-default-signature="true">
-//         <br/>
-//         <strong>${profile?.displayName ?? fallbackUser.displayName}</strong><br/>
-//         Software Engineer<br/>
-//         📧 ${profile?.emailAddress ?? fallbackUser.emailAddress}<br/>
-//         🌍 India
+//       <div>
+//         ${storedSignature}
 //       </div>
 //     `;
 
 //     const isReplyOrForward =
-//       item.conversationId && body.trim().length > 0;
+//       item.conversationId && bodyHtml.trim().length > 0;
 
 //     const updatedBody = isReplyOrForward
-//       ? signatureHtml + "<br/>" + body
-//       : body + signatureHtml;
+//       ? signatureHtml + "<br/>" + bodyHtml
+//       : bodyHtml + signatureHtml;
 
 //     item.body.setAsync(updatedBody, {
 //       coercionType: Office.CoercionType.Html,
 //     });
 //   });
 // }
-function getItemSignatureKey(item) {
-  return `signatureApplied_${item.itemId}`;
-}
-
 function applyDefaultSignature() {
   if (signatureApplied) return;
 
   const item = Office.context.mailbox.item;
   if (!item || !item.body) return;
 
-  const settings = Office.context.roamingSettings;
-  const itemKey = getItemSignatureKey(item);
-
-  // ✅ Already applied for THIS draft
-  // if (settings.get(itemKey)) return;
-
-  const storedSignature = settings.get("defaultSignatureHtml");
-  console.log("Asdkjahsdksahdkj", storedSignature)
-  // Nothing saved yet → do nothing
-  if (!storedSignature) return;
-
-  signatureApplied = true;
-
   item.body.getAsync(Office.CoercionType.Html, (result) => {
     if (result.status !== Office.AsyncResultStatus.Succeeded) return;
 
-    const body = result.value || "";
+    const bodyHtml = result.value || "";
 
-    // 🛑 Prevent duplicate insertion
-    if (body.includes("data-default-signature")) return;
+    // 🛑 HARD STOP — signature already exists
+    if (hasCardByteSignature(bodyHtml)) {
+      console.log("✅ CardByte signature already detected — skipping auto apply");
+      signatureApplied = true;
+      return;
+    }
+
+    const settings = Office.context.roamingSettings;
+    const storedSignature = settings.get("defaultSignatureHtml");
+
+    if (!storedSignature) return;
+
+    // ✅ Lock immediately to avoid double insert
+    signatureApplied = true;
 
     const signatureHtml = `
-      <div data-default-signature="true">
+      <div data-cardbyte-signature="true">
         ${storedSignature}
       </div>
     `;
-    console.log("Asdkjahsdksahdkj", signatureHtml)
+
     const isReplyOrForward =
-      item.conversationId && body.trim().length > 0;
+      item.conversationId && bodyHtml.trim().length > 0;
 
     const updatedBody = isReplyOrForward
-      ? signatureHtml + "<br/>" + body
-      : body + signatureHtml;
+      ? signatureHtml + "<br/>" + bodyHtml
+      : bodyHtml + signatureHtml;
 
     item.body.setAsync(updatedBody, {
       coercionType: Office.CoercionType.Html,
     });
-
-    // ✅ Persist flag
-    settings.set(itemKey, true);
-    settings.saveAsync();
-
   });
 }
 
