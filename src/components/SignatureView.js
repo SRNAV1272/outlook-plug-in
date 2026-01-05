@@ -344,7 +344,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                     fontSize: "13px",
                                                     fontFamily: "Plus Jakarta Sans",
                                                     textTransform: "capitalize",
-                                                    color: "#4A5056",
+                                                    color: "#0b2e79ff",
                                                     "&:hover": {
                                                         color: "#4A5056",
                                                         borderColor: "#144CC9",
