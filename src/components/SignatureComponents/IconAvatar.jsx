@@ -372,7 +372,6 @@ export function generateEmailSignatureHTML(
     ${sortedLinks
       .map(link => {
         const isButton = BUTTON_TYPES.includes(link?.name);
-
         return `
 <table role="presentation" cellpadding="0" cellspacing="0" border="0"
   style="display:inline-table;margin-right:8px;margin-bottom:8px;">
@@ -383,17 +382,26 @@ export function generateEmailSignatureHTML(
 <a href="${link?.link}" target="_blank"
   style="
     display:inline-block;
-    padding:${!!link?.label ? "8px 18px" : "1px 1px"};
+    padding:${!!link?.label ? "8px 14px" : "0px 0px"};
     border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
     border-radius:22px;
-    font-size:13px;
-    font-family:Arial, sans-serif;
+    font-size:10px;
+    font-family:Plus Jakarta Sans;
     color:#000;
     text-decoration:none;
     white-space:nowrap;
   ">
   ${link?.value
-              ? `<img src="${link.value}" width="${!!link?.label ? 16 : 22}" style="vertical-align:middle;margin-right:6px;" />`
+  ? `<img 
+      src="${link.value}" width="${!!link?.label ? 18 : 20}" 
+              style="
+              display:block;
+              border:0;
+              outline:none;
+              text-decoration:none;
+              margin:0;
+            " 
+        />`
               : ""
             }
   ${link?.label}
@@ -402,16 +410,16 @@ export function generateEmailSignatureHTML(
 <a href="${link?.link}" target="_blank"
   style="
     display:inline-block;
-    padding:1px 1px;
+    padding:0px 0px;
     border-radius:22px;
-    font-size:13px;
-    font-family:Arial, sans-serif;
+    font-size:10px;
+    font-family:Plus Jakarta Sans;
     color:#000;
     text-decoration:none;
     white-space:nowrap;
   ">
   ${link?.value
-              ? `<img src="${link.value}" width="${22}" style="vertical-align:middle;margin-right:6px;" />`
+              ? `<img src="${link.value}" width="${20}" style="vertical-align:middle;margin-right:6px;" />`
               : ""
             }
 </a>`

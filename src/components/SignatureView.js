@@ -28,15 +28,15 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             const settings = Office.context.roamingSettings;
             // settings.set("defaultSignatureHtml", html)
 
-            // const type = "text/html";
-            // const blob = new Blob([html], { type });
-            // // eslint-disable-next-line no-undef
-            // const clipboardItem = new ClipboardItem({
-            //     [type]: blob,
-            //     "text/plain": new Blob([html], { type: "text/plain" })
-            // });
+            const type = "text/html";
+            const blob = new Blob([html], { type });
+            // eslint-disable-next-line no-undef
+            const clipboardItem = new ClipboardItem({
+                [type]: blob,
+                "text/plain": new Blob([html], { type: "text/plain" })
+            });
 
-            // await navigator.clipboard.write([clipboardItem]);
+            await navigator.clipboard.write([clipboardItem]);
             // toast.success("Signature copied! Now paste directly into Gmail/Outlook.");
             settings.saveAsync((result) => {
                 if (result.status === Office.AsyncResultStatus.Succeeded) {
@@ -222,7 +222,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                 sx={{
                                                     width: "100%",
                                                     maxWidth: 800,
-                                                    borderRadius: 5,
+                                                    borderRadius: 2,
                                                     margin: "auto",
 
                                                     // 🚫 no scrollbars, just clip anything extra
@@ -320,6 +320,27 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                     </Stack>
                                                 </Box>
                                             </Box>
+                                            {console.log("form?.bannerFileUrl", !!form?.bannerFileUrl, containerRef?.current?.offsetWidth)}
+                                            {
+                                                (!!form?.bannerFileUrl &&
+                                                    <Box
+                                                        width={containerRef?.current ? containerRef?.current.offsetWidth : '100%'}
+                                                        height={containerRef?.current ? containerRef?.current.offsetWidth * 0.30 : '30%'}
+                                                        mt={1}
+                                                        overflow="hidden"
+                                                    >
+                                                        <img
+                                                            src={!!form?.bannerFileUrl ? form?.bannerFileUrl : form?.bannerFileUrl}
+                                                            style={{
+                                                                width: "100%",
+                                                                height: "100%",
+                                                                // objectFit: "contain",   // ✅ preserves aspect ratio
+                                                                display: "block",
+                                                                borderRadius: "8px"
+                                                            }}
+                                                        />
+                                                    </Box>)
+                                            }
                                         </Box>
                                         <Stack
                                             mt={1}
@@ -331,7 +352,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                 variant="outlined"
                                                 size="small"
                                                 sx={{
-                                                    width: "100px",
+                                                    width: "180px",
                                                     height: "40px",
                                                     marginRight: "8px",
                                                     backgroundColor: "#0b2e79ff",
@@ -348,7 +369,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                     },
                                                 }}
                                             >
-                                                Apply
+                                                Apply Signature
                                             </Button>
                                         </Stack>
                                     </>
