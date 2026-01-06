@@ -85,9 +85,9 @@ function hasCardByteSignature(bodyHtml = "") {
 
 //     const bodyHtml = result.value || "";
 
-//     // 🛑 SIGNATURE ALREADY EXISTS (event.html already ran)
+//     // 🛑 HARD STOP — signature already exists
 //     if (hasCardByteSignature(bodyHtml)) {
-//       console.log("✅ Signature already present — skipping React auto apply");
+//       console.log("✅ CardByte signature already detected — skipping auto apply");
 //       signatureApplied = true;
 //       return;
 //     }
@@ -97,10 +97,11 @@ function hasCardByteSignature(bodyHtml = "") {
 
 //     if (!storedSignature) return;
 
+//     // ✅ Lock immediately to avoid double insert
 //     signatureApplied = true;
 
 //     const signatureHtml = `
-//       <div>
+//       <div data-cardbyte-signature="true">
 //         ${storedSignature}
 //       </div>
 //     `;
@@ -117,50 +118,6 @@ function hasCardByteSignature(bodyHtml = "") {
 //     });
 //   });
 // }
-function applyDefaultSignature() {
-  if (signatureApplied) return;
-
-  const item = Office.context.mailbox.item;
-  if (!item || !item.body) return;
-
-  item.body.getAsync(Office.CoercionType.Html, (result) => {
-    if (result.status !== Office.AsyncResultStatus.Succeeded) return;
-
-    const bodyHtml = result.value || "";
-
-    // 🛑 HARD STOP — signature already exists
-    if (hasCardByteSignature(bodyHtml)) {
-      console.log("✅ CardByte signature already detected — skipping auto apply");
-      signatureApplied = true;
-      return;
-    }
-
-    const settings = Office.context.roamingSettings;
-    const storedSignature = settings.get("defaultSignatureHtml");
-
-    if (!storedSignature) return;
-
-    // ✅ Lock immediately to avoid double insert
-    signatureApplied = true;
-
-    const signatureHtml = `
-      <div data-cardbyte-signature="true">
-        ${storedSignature}
-      </div>
-    `;
-
-    const isReplyOrForward =
-      item.conversationId && bodyHtml.trim().length > 0;
-
-    const updatedBody = isReplyOrForward
-      ? signatureHtml + "<br/>" + bodyHtml
-      : bodyHtml + signatureHtml;
-
-    item.body.setAsync(updatedBody, {
-      coercionType: Office.CoercionType.Html,
-    });
-  });
-}
 
 /**
  * --------------------------------------------------
@@ -169,9 +126,9 @@ function applyDefaultSignature() {
  */
 if (typeof Office !== "undefined") {
   Office.onReady((info) => {
-    if (Office.context.mailbox?.item) {
-      applyDefaultSignature();
-    }
+    // if (Office.context.mailbox?.item) {
+    //   applyDefaultSignature();
+    // }
 
     if (info.host === Office.HostType.Outlook) {
       const user = Office.context.mailbox.userProfile;
