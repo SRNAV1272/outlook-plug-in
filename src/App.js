@@ -85,7 +85,7 @@ export default function App({ user }) {
         return;
       }
 
-      item.body.setSignatureAsync(
+      item.body.setSelectedDataAsync(
         signature,
         { coercionType: Office.CoercionType.Html },
         (result) => {
