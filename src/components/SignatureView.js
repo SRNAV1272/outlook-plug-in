@@ -28,15 +28,15 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             const settings = Office.context.roamingSettings;
             // settings.set("defaultSignatureHtml", html)
 
-            // const type = "text/html";
-            // const blob = new Blob([html], { type });
-            // // eslint-disable-next-line no-undef
-            // const clipboardItem = new ClipboardItem({
-            //     [type]: blob,
-            //     "text/plain": new Blob([html], { type: "text/plain" })
-            // });
+            const type = "text/html";
+            const blob = new Blob([html], { type });
+            // eslint-disable-next-line no-undef
+            const clipboardItem = new ClipboardItem({
+                [type]: blob,
+                "text/plain": new Blob([html], { type: "text/plain" })
+            });
 
-            // await navigator.clipboard.write([clipboardItem]);
+            await navigator.clipboard.write([clipboardItem]);
             // toast.success("Signature copied! Now paste directly into Gmail/Outlook.");
             settings.saveAsync((result) => {
                 if (result.status === Office.AsyncResultStatus.Succeeded) {
@@ -56,7 +56,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
     async function renderSignatureOnServer(user) {
         try {
 
-            const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
+            const res = await fetch("http://localhost:4000/render-signature", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
@@ -282,6 +282,12 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                             ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
                                                             ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
                                                             ?.filter(i => i?.show)
+                                                            // 🔽 EMPTY FIRST
+                                                            ?.sort((a, b) => {
+                                                                const aEmpty = !(a?.label);
+                                                                const bEmpty = !(b?.label);
+                                                                return Number(bEmpty) - Number(aEmpty);
+                                                            })
                                                             ?.map(field => (
                                                                 <a
                                                                     href={`${field?.link}`}
@@ -318,36 +324,27 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                         <Stack
                                             mt={1}
                                             display={"flex"}
-                                            direction="row" justifyContent={'end'} width={'100%'}
+                                            direction="row" justifyContent={'center'} width={'100%'}
                                         >
                                             <Button
                                                 onClick={() => applyHTML()}
                                                 variant="outlined"
                                                 size="small"
-                                                startIcon={
-                                                    <img
-                                                        src={qrcode_default}
-                                                        alt="Cardbyte Logo"
-                                                        style={{
-                                                            width: 12,
-                                                            height: 'auto'
-                                                        }}
-                                                    />
-                                                }
                                                 sx={{
                                                     width: "100px",
                                                     height: "40px",
                                                     marginRight: "8px",
-                                                    backgroundColor: "#fff",
-                                                    border: "1.5px solid #0b2e79ff",
+                                                    backgroundColor: "#0b2e79ff",
+                                                    // border: "1.5px solid #0b2e79ff",
                                                     borderRadius: "13px",
                                                     fontSize: "13px",
                                                     fontFamily: "Plus Jakarta Sans",
                                                     textTransform: "capitalize",
-                                                    color: "#0b2e79ff",
+                                                    color: "#fff",
                                                     "&:hover": {
-                                                        color: "#4A5056",
+                                                        color: "#fff",
                                                         borderColor: "#144CC9",
+                                                        backgroundColor: "#506AA3",
                                                     },
                                                 }}
                                             >

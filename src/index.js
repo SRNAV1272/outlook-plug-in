@@ -3,6 +3,7 @@
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";
+import React from "react";
 
 /**
  * --------------------------------------------------
@@ -23,7 +24,12 @@ const renderApp = (user) => {
   if (rendered) return;
   rendered = true;
 
-  root.render(<App user={user} />);
+  root.render(
+    <React.StrictMode>
+      {/* <App /> */}
+      <App user={user} />
+    </React.StrictMode>
+  );
 };
 
 /**

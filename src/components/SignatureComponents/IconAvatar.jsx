@@ -365,12 +365,6 @@ export function generateEmailSignatureHTML(
     return 0;
   });
 
-  sortedLinks.map(link => {
-    const isButton = BUTTON_TYPES.includes(link?.name);
-    // render logic
-  });
-
-
   const combinedLinksHTML = combinedLinks.length
     ? `
 <tr>
@@ -408,8 +402,7 @@ export function generateEmailSignatureHTML(
 <a href="${link?.link}" target="_blank"
   style="
     display:inline-block;
-    padding:8px 0px;
-    border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
+    padding:8px 8px;
     border-radius:22px;
     font-size:13px;
     font-family:Arial, sans-serif;
@@ -418,10 +411,9 @@ export function generateEmailSignatureHTML(
     white-space:nowrap;
   ">
   ${link?.value
-              ? `<img src="${link.value}" width="${!!link?.label ? 16 : 22}" style="vertical-align:middle;margin-right:6px;" />`
+              ? `<img src="${link.value}" width="${22}" style="vertical-align:middle;margin-right:6px;" />`
               : ""
             }
-  ${link?.label}
 </a>`
           }
     </td >
