@@ -80,7 +80,8 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             setLoad(true)
             try {
                 const apiResponse = await renderSignatureOnServer(user);
-                setForm(apiResponse)
+                // setForm(apiResponse)
+                setForm(prevForm => apiResponse ?? prevForm);
                 console.log("asdkjsdkjahdsasd",
                     user?.emailAddress,
                     apiResponse
