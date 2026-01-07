@@ -352,7 +352,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                 variant="outlined"
                                                 size="small"
                                                 sx={{
-                                                    width: "100px",
+                                                    width: "180px",
                                                     height: "40px",
                                                     marginRight: "8px",
                                                     backgroundColor: "#0b2e79ff",
@@ -369,7 +369,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                     },
                                                 }}
                                             >
-                                                Apply
+                                                Apply Signature
                                             </Button>
                                         </Stack>
                                     </>
