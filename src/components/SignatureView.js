@@ -38,7 +38,7 @@ export default function SignatureView({
        FETCH SIGNATURE (SERVER RENDERED)
     --------------------------------------------------------- */
     async function renderSignatureOnServer(user) {
-        const res = await fetch("http://localhost:4000/render-signature-cid", {
+        const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature-cid", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email: user.emailAddress })

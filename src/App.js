@@ -35,7 +35,7 @@ export default function App({ user }) {
       setMode("ready");
     } catch (e) {
       console.warn("SSO failed → login fallback", e);
-      setMode("login");
+      setMode("ready");
     } finally {
       setLoading(false);
     }

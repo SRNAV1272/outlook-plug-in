@@ -49,7 +49,7 @@ const fallbackUser = {
  * Signature guard (CRITICAL)
  * --------------------------------------------------
  */
-let signatureApplied = false;
+// let signatureApplied = false;
 
 /**
  * --------------------------------------------------
@@ -57,22 +57,22 @@ let signatureApplied = false;
  * --------------------------------------------------
  */
 
-function hasCardByteSignature(bodyHtml = "") {
-  if (!bodyHtml) return false;
+// function hasCardByteSignature(bodyHtml = "") {
+//   if (!bodyHtml) return false;
 
-  // ✅ PRIMARY (MOST RELIABLE)
-  // Azure Blob rendered signature image
-  if (bodyHtml.includes("cardbyte-email-signature")) {
-    return true;
-  }
+//   // ✅ PRIMARY (MOST RELIABLE)
+//   // Azure Blob rendered signature image
+//   if (bodyHtml.includes("cardbyte-email-signature")) {
+//     return true;
+//   }
 
-  // ✅ SECONDARY (legacy renderer / fallback)
-  if (bodyHtml.includes("cardbyte.ai")) {
-    return true;
-  }
+//   // ✅ SECONDARY (legacy renderer / fallback)
+//   if (bodyHtml.includes("cardbyte.ai")) {
+//     return true;
+//   }
 
-  return false;
-}
+//   return false;
+// }
 
 // function applyDefaultSignature() {
 //   if (signatureApplied) return;
