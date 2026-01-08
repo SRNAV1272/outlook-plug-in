@@ -117,9 +117,6 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                         alt="cardbyte"
                     />
                 </Box>
-                <Typography fontFamily={'Plus Jakarta Sans'}>
-                    {user?.displayName}
-                </Typography>
                 <Typography fontFamily={'Plus Jakarta Sans'} color="#595959" fontSize={"12px"}>
                     This is the signature set up for you by your Organisation Administrator.
                     Click apply to add the signature to your mail.
