@@ -318,7 +318,7 @@ export function generateEmailSignatureHTML(
     .filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
     .filter(i => i?.show);
 
-  /* ---------- MAIN SIGNATURE CARD (350px) ---------- */
+  /* ---------- MAIN SIGNATURE CARD (450px) ---------- */
   const signatureImageHTML =
     typeof dataURL === "string" && dataURL.trim()
       ? `
@@ -327,10 +327,10 @@ export function generateEmailSignatureHTML(
     <img
       src="${dataURL}"
       alt="Signature"
-      width="350"
+      width="450"
       style="
         display:block;
-        width:350px;
+        width:450px;
         height:auto;
         border:1px solid #ddd;
         border-radius:8px;
@@ -426,7 +426,7 @@ export function generateEmailSignatureHTML(
               `
     : "";
 
-  /* ---------- BANNER (350px LOCKED) ---------- */
+  /* ---------- BANNER (450px LOCKED) ---------- */
   const bannerHTML =
     typeof freshLinkForBanner === "string" &&
       freshLinkForBanner.trim() &&
@@ -435,17 +435,17 @@ export function generateEmailSignatureHTML(
 <tr>
   <td style="padding-top:8px;">
     <!--[if mso]>
-    <table width="350" cellpadding="0" cellspacing="0" border="0"><tr><td>
+    <table width="450" cellpadding="0" cellspacing="0" border="0"><tr><td>
     <![endif]-->
 
     <img
       src="${freshLinkForBanner}"
       alt=""
-      width="350"
+      width="450"
       height="110"
       style="
         display:block;
-        width:350px;
+        width:450px;
         height:110px;
         border:0;
       "
@@ -479,9 +479,9 @@ export function generateEmailSignatureHTML(
   cellpadding="0"
   cellspacing="0"
   border="0"
-  width="350"
+  width="450"
   style="
-    width:350px;
+    width:450px;
     font-family:Arial, sans-serif;
   "
 >
