@@ -181,7 +181,15 @@ export default function App({ user }) {
           );
         });
 
-        console.log("✅ Signature replaced successfully");
+        console.log(
+          "✅ Signature replaced successfully"
+            `
+          <br/><br/>
+          <!-- CARD_BYTE_SIGNATURE_START -->
+          ${signature}
+          <!-- CARD_BYTE_SIGNATURE_END -->
+          `
+        );
       } catch (e) {
         console.error("❌ Apply signature failed", e);
       } finally {
