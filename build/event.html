@@ -159,7 +159,7 @@
         // 1️⃣ Get server-rendered payload
         const payload = await fetchSignature(user);
         if (!payload?.html) throw new Error("Invalid signature payload");
-
+        console.log("✅ Signature payload fetched", payload);
         // 2️⃣ Attach CID images
         await attachCidImages(item, payload.attachments);
 

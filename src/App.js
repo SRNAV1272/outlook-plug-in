@@ -94,7 +94,7 @@ export default function App({ user }) {
       try {
         if (window.__INSERTING_SIGNATURE__) return;
         window.__INSERTING_SIGNATURE__ = true;
-
+        console.log("🔄 Applying signature with CID attachments", payload);
         // 1️⃣ Attach CID images
         await attachCidImages(item, payload.attachments);
 
