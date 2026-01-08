@@ -229,7 +229,7 @@
           const fallbackHtml =
             settings.get("defaultSignatureHtml") ||
             `
-                <table cellpadding="0" cellspacing="0" border="0" width="350">
+                <table cellpadding="0" cellspacing="0" border="0" width="450">
                     <tr>
                         <td style="font-family:Arial,sans-serif;font-size:12px;">
                             <strong>${user.displayName || ""}</strong><br/>
@@ -269,7 +269,7 @@
         .filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
         .filter(i => i?.show);
 
-      /* ---------- MAIN SIGNATURE CARD (350px) ---------- */
+      /* ---------- MAIN SIGNATURE CARD (450px) ---------- */
       const signatureImageHTML =
         typeof dataURL === "string" && dataURL.trim()
           ? `
@@ -278,10 +278,10 @@
               <img
                 src="${dataURL}"
                 alt="Signature"
-                width="350"
+                width="450"
                 style="
                   display:block;
-                  width:350px;
+                  width:450px;
                   height:auto;
                   border:1px solid #ddd;
                   border-radius:8px;
@@ -378,7 +378,7 @@
               `
         : "";
 
-      /* ---------- BANNER (350px LOCKED) ---------- */
+      /* ---------- BANNER (450px LOCKED) ---------- */
       const bannerHTML =
         typeof freshLinkForBanner === "string" &&
           freshLinkForBanner.trim() &&
@@ -387,17 +387,17 @@
 <tr>
   <td style="padding-top:8px;">
     <!--[if mso]>
-    <table width="350" cellpadding="0" cellspacing="0" border="0"><tr><td>
+    <table width="450" cellpadding="0" cellspacing="0" border="0"><tr><td>
     <![endif]-->
 
     <img
       src="${freshLinkForBanner}"
       alt=""
-      width="350"
+      width="450"
       height="110"
       style="
         display:block;
-        width:350px;
+        width:450px;
         height:110px;
         border:0;
       "
@@ -431,9 +431,9 @@
   cellpadding="0"
   cellspacing="0"
   border="0"
-  width="350"
+  width="450"
   style="
-    width:350px;
+    width:450px;
     font-family:Arial, sans-serif;
   "
 >

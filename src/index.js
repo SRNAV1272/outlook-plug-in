@@ -40,7 +40,7 @@ const renderApp = (user) => {
 const fallbackUser = {
   accountType: "office365",
   displayName: "Korla Sai Rajesh",
-  emailAddress: "sairajesh.korla@navajna.com", //"dhruvkapur@cardbyte.ai", //"muskanrai@cardbyte.ai", //"sairajesh.korla1@navajna.com",
+  emailAddress: "sairajesh.korla1272@outlook.com", //"dhruvkapur@cardbyte.ai", //"muskanrai@cardbyte.ai", //"sairajesh.korla1@navajna.com",
   timeZone: "India Standard Time",
 };
 
