@@ -26,6 +26,36 @@
        Office Ready
        --------------------------------------------------------- */
 
+    function stripCardByteSignature(html) {
+      return html.replace(
+        /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+        ""
+      ).trim();
+    }
+
+    async function cleanExistingSignatures(item) {
+      const html = await getBodyHtml(item);
+      let cleaned = html;
+
+      // 🔥 Remove existing CardByte signature (REPLACE behavior)
+      cleaned = stripCardByteSignature(cleaned);
+
+      // 🧹 Remove Outlook default signature
+      if (looksLikeOutlookDefaultSignature(cleaned)) {
+        cleaned = stripOutlookSignature(cleaned);
+      }
+
+      // ✨ Only update body if something changed
+      if (cleaned !== html) {
+        await item.body.setAsync(cleaned, {
+          coercionType: Office.CoercionType.Html
+        });
+        return true;
+      }
+
+      return false;
+    }
+
     Office.onReady(() => {
       console.log("✅ CardByte event.html ready");
 
@@ -79,67 +109,29 @@
       });
     }
 
-    //   async function replaceSignature(item, signatureHtml) {
-    //     const html = await getBodyHtml(item);
-
-    //     let cleaned = html;
-
-    //     // 1️⃣ Remove existing CardByte signature
-    //     cleaned = cleaned.replace(
-    //       /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
-    //       ""
-    //     );
-
-    //     // 2️⃣ Remove Outlook default signature (best-effort)
-    //     if (looksLikeOutlookDefaultSignature(cleaned)) {
-    //       cleaned = stripOutlookSignature(cleaned);
-    //     }
-
-    //     cleaned = cleaned.trim();
-
-    //     // 3️⃣ Add spacing only if body has content
-    //     const spacer = cleaned ? "<br/><br/>" : "";
-
-    //     const finalHtml = `
-    //   ${cleaned}
-    //   ${spacer}
-    //   <!-- CARD_BYTE_SIGNATURE_START -->
-    //   ${signatureHtml}
-    //   <!-- CARD_BYTE_SIGNATURE_END -->
-    // `.trim();
-
-    //     // 4️⃣ Replace entire body
-    //     await new Promise((resolve, reject) => {
-    //       item.body.setAsync(
-    //         finalHtml,
-    //         { coercionType: Office.CoercionType.Html },
-    //         r => (r.status === "succeeded" ? resolve() : reject(r.error))
-    //       );
-    //     });
-    //   }
-
     async function insertSignatureWithoutCursorError(item, signatureHtml) {
       try {
-        // prevent parallel insertions
         if (window.__INSERTING_SIGNATURE__) return;
         window.__INSERTING_SIGNATURE__ = true;
 
-        // 1. stabilize selection
         await stabilizeSelection(item);
 
-        // 3️⃣ LATE cleanup (critical)
-        await ensureNoOutlookSignature(item);
+        // 🔥 CLEAN EVERYTHING FIRST (REPLACEMENT MODE)
+        await cleanExistingSignatures(item);
 
-        // 2. insert immediately
+        // ➕ Insert fresh signature
         await insertAtCursor(
           item,
-          `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${signatureHtml}<!-- CARD_BYTE_SIGNATURE_END -->`
+          `<br/><br/>
+       <!-- CARD_BYTE_SIGNATURE_START -->
+       ${signatureHtml}
+       <!-- CARD_BYTE_SIGNATURE_END -->`
         );
-
       } finally {
         window.__INSERTING_SIGNATURE__ = false;
       }
     }
+
 
     /* ---------------------------------------------------------
        AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
@@ -218,12 +210,6 @@
       // 🛑 Prevent parallel or duplicate execution
       if (SIGNATURE_STATE === "loading") {
         console.log("⏳ Signature is already being generated — skipping");
-        event.completed();
-        return;
-      }
-
-      if (SIGNATURE_STATE === "applied") {
-        console.log("✅ Signature already applied — skipping");
         event.completed();
         return;
       }
