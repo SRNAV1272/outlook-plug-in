@@ -5,7 +5,6 @@ import DefaultTemplate from "./SignatureComponents/Assets/Images/DefaultTemplate
 import { generateEmailSignatureHTML, IconAvatar } from "./SignatureComponents/IconAvatar";
 import usernotfound from "../components/SignatureComponents/Assets/Images/usernotfound.gif"
 import signnotassigned from "../components/SignatureComponents/Assets/Images/signnotassigned.webp"
-import qrcode_default from "../components/SignatureComponents/Assets/Images/qr_code_default_logo.png"
 
 export default function SignatureView({ Office, user, apply, showSocialMediaIcons = true }) {
     const containerRef = useRef(null);
@@ -56,7 +55,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
     async function renderSignatureOnServer(user) {
         try {
 
-            const res = await fetch("https://renderer.cardbyte.ai/render-signature", {
+            const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
