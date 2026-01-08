@@ -69,54 +69,54 @@
       return Promise.resolve();
     }
 
-    // function insertAtCursor(item, html) {
-    //   return new Promise((resolve, reject) => {
-    //     item.body.setSelectedDataAsync(
-    //       html,
-    //       { coercionType: Office.CoercionType.Html },
-    //       r => (r.status === "succeeded" ? resolve() : reject(r.error))
-    //     );
-    //   });
-    // }
-
-    async function replaceSignature(item, signatureHtml) {
-      const html = await getBodyHtml(item);
-
-      let cleaned = html;
-
-      // 1️⃣ Remove existing CardByte signature
-      cleaned = cleaned.replace(
-        /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
-        ""
-      );
-
-      // 2️⃣ Remove Outlook default signature (best-effort)
-      if (looksLikeOutlookDefaultSignature(cleaned)) {
-        cleaned = stripOutlookSignature(cleaned);
-      }
-
-      cleaned = cleaned.trim();
-
-      // 3️⃣ Add spacing only if body has content
-      const spacer = cleaned ? "<br/><br/>" : "";
-
-      const finalHtml = `
-    ${cleaned}
-    ${spacer}
-    <!-- CARD_BYTE_SIGNATURE_START -->
-    ${signatureHtml}
-    <!-- CARD_BYTE_SIGNATURE_END -->
-  `.trim();
-
-      // 4️⃣ Replace entire body
-      await new Promise((resolve, reject) => {
-        item.body.setAsync(
-          finalHtml,
+    function insertAtCursor(item, html) {
+      return new Promise((resolve, reject) => {
+        item.body.setSelectedDataAsync(
+          html,
           { coercionType: Office.CoercionType.Html },
           r => (r.status === "succeeded" ? resolve() : reject(r.error))
         );
       });
     }
+
+    //   async function replaceSignature(item, signatureHtml) {
+    //     const html = await getBodyHtml(item);
+
+    //     let cleaned = html;
+
+    //     // 1️⃣ Remove existing CardByte signature
+    //     cleaned = cleaned.replace(
+    //       /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+    //       ""
+    //     );
+
+    //     // 2️⃣ Remove Outlook default signature (best-effort)
+    //     if (looksLikeOutlookDefaultSignature(cleaned)) {
+    //       cleaned = stripOutlookSignature(cleaned);
+    //     }
+
+    //     cleaned = cleaned.trim();
+
+    //     // 3️⃣ Add spacing only if body has content
+    //     const spacer = cleaned ? "<br/><br/>" : "";
+
+    //     const finalHtml = `
+    //   ${cleaned}
+    //   ${spacer}
+    //   <!-- CARD_BYTE_SIGNATURE_START -->
+    //   ${signatureHtml}
+    //   <!-- CARD_BYTE_SIGNATURE_END -->
+    // `.trim();
+
+    //     // 4️⃣ Replace entire body
+    //     await new Promise((resolve, reject) => {
+    //       item.body.setAsync(
+    //         finalHtml,
+    //         { coercionType: Office.CoercionType.Html },
+    //         r => (r.status === "succeeded" ? resolve() : reject(r.error))
+    //       );
+    //     });
+    //   }
 
     async function insertSignatureWithoutCursorError(item, signatureHtml) {
       try {
