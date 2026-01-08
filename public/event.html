@@ -5,31 +5,29 @@
   <meta charset="utf-8" />
   <title>CardByte Outlook Event</title>
 
-  <!-- Office.js -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
   <script>
     /* =========================================================
-       CARDBYTE – OUTLOOK AUTO-RUN EVENT (PRODUCTION)
+       CARDBYTE – OUTLOOK AUTO-RUN EVENT (PRODUCTION SAFE)
        ========================================================= */
 
-    let INSERTING = false;
-    let STATE = "idle"; // idle | loading | applied
+    let RUNNING = false;
 
     const SIG_START = "<!-- CARD_BYTE_SIGNATURE_START -->";
     const SIG_END = "<!-- CARD_BYTE_SIGNATURE_END -->";
 
     /* ---------------------------------------------------------
-       Office Ready
-       --------------------------------------------------------- */
+       OFFICE READY
+    --------------------------------------------------------- */
     Office.onReady(() => {
       console.log("✅ CardByte event.html ready");
-      applySignature({ completed: () => { } });
+      applySignature({ completed() { } });
     });
 
     /* ---------------------------------------------------------
-       SERVER CALL (CID READY)
-       --------------------------------------------------------- */
+       FETCH SIGNATURE (CID BASED)
+    --------------------------------------------------------- */
     async function fetchSignature(user) {
       const res = await fetch(
         "https://qa-renderer.cardbyte.ai/render-signature-cid",
@@ -39,13 +37,14 @@
           body: JSON.stringify({ email: user.emailAddress })
         }
       );
+
       if (!res.ok) throw new Error("Signature API failed");
       return res.json(); // { html, attachments }
     }
 
     /* ---------------------------------------------------------
        BODY HELPERS
-       --------------------------------------------------------- */
+    --------------------------------------------------------- */
     function getBodyHtml(item) {
       return new Promise((resolve, reject) => {
         item.body.getAsync(Office.CoercionType.Html, r =>
@@ -54,14 +53,14 @@
       });
     }
 
-    function stripExistingSignature(html) {
+    function stripOldSignature(html) {
       return html.replace(
         /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
         ""
       ).trim();
     }
 
-    async function replaceBody(item, html) {
+    function setBodyHtml(item, html) {
       return new Promise((resolve, reject) => {
         item.body.setAsync(
           html,
@@ -72,15 +71,20 @@
     }
 
     /* ---------------------------------------------------------
-       CID ATTACHMENTS
-       --------------------------------------------------------- */
+       ATTACH CID IMAGES
+    --------------------------------------------------------- */
     async function attachCidImages(item, attachments = []) {
       for (const img of attachments) {
+        console.log("🔄 Attaching CID image:", img.cid, img?.filename);
         await new Promise((resolve, reject) => {
+          console.log("🔄 Attaching CID image: inside promise", img.cid, img?.filename);
           item.addFileAttachmentFromBase64Async(
             img.base64,
             img.filename,
-            { isInline: true, contentId: img.cid },
+            {
+              isInline: true,
+              contentId: img.cid
+            },
             r => (r.status === "succeeded" ? resolve() : reject(r.error))
           );
         });
@@ -88,91 +92,54 @@
     }
 
     /* ---------------------------------------------------------
-       CURSOR SAFE INSERT (REPLACE MODE)
-       --------------------------------------------------------- */
-    async function insertSignature(item, html) {
-      if (INSERTING) return;
-      INSERTING = true;
-
-      try {
-        // 1️⃣ Clean existing body
-        const current = await getBodyHtml(item);
-        const cleaned = stripExistingSignature(current);
-        if (cleaned !== current) {
-          await replaceBody(item, cleaned);
-        }
-
-        // 2️⃣ Focus editor
-        item.body.focus();
-
-        // 3️⃣ Insert anchor
-        await new Promise((resolve, reject) => {
-          item.body.setSelectedDataAsync(
-            `<br/>${SIG_START}<span id="cb-anchor"></span>${SIG_END}`,
-            { coercionType: Office.CoercionType.Html },
-            r => (r.status === "succeeded" ? resolve() : reject(r.error))
-          );
-        });
-
-        // 4️⃣ Replace anchor with final HTML
-        await new Promise((resolve, reject) => {
-          item.body.getAsync(Office.CoercionType.Html, r => {
-            if (r.status !== "succeeded") return reject(r.error);
-            const updated = r.value.replace(
-              `<span id="cb-anchor"></span>`,
-              html
-            );
-            item.body.setAsync(
-              updated,
-              { coercionType: Office.CoercionType.Html },
-              rr => (rr.status === "succeeded" ? resolve() : reject(rr.error))
-            );
-          });
-        });
-
-      } finally {
-        INSERTING = false;
-      }
-    }
-
-    /* ---------------------------------------------------------
-       AUTO-RUN ENTRY POINT
-       --------------------------------------------------------- */
-    async function applySignature(event = { completed: () => { } }) {
-      if (STATE !== "idle") {
+       APPLY SIGNATURE (HARD REPLACE – SAFE)
+    --------------------------------------------------------- */
+    async function applySignature(event = { completed() { } }) {
+      if (RUNNING) {
         event.completed();
         return;
       }
 
-      const mailbox = Office.context.mailbox;
-      const item = mailbox?.item;
-      const user = mailbox?.userProfile;
-
-      if (!item) {
-        event.completed();
-        return;
-      }
+      RUNNING = true;
 
       try {
-        STATE = "loading";
+        const mailbox = Office.context.mailbox;
+        const item = mailbox?.item;
+        const user = mailbox?.userProfile;
 
-        // 1️⃣ Get server-rendered payload
+        if (!item) return;
+
+        // 1️⃣ Get payload from server
         const payload = await fetchSignature(user);
-        if (!payload?.html) throw new Error("Invalid signature payload");
-        console.log("✅ Signature payload fetched", payload);
-        // 2️⃣ Attach CID images
-        await attachCidImages(item, payload.attachments);
+        if (!payload?.html) throw new Error("Invalid payload");
 
-        // 3️⃣ Insert HTML
-        await insertSignature(item, payload.html);
+        console.log("✅ Signature payload fetched");
 
-        STATE = "applied";
-        console.log("✅ Signature applied");
+        // 2️⃣ Attach CID images FIRST
+        await attachCidImages(item, payload.attachments || []);
+
+        // 3️⃣ Read current body
+        const current = await getBodyHtml(item);
+        const cleaned = stripOldSignature(current);
+
+        // 4️⃣ Append signature
+        const finalHtml = `
+            ${cleaned}
+            <br/><br/>
+            ${SIG_START}
+            ${payload.html}
+            ${SIG_END}
+        `.trim();
+
+        // 5️⃣ Single write (STABLE)
+        await setBodyHtml(item, finalHtml);
+
+        console.log("✅ Signature applied successfully");
 
       } catch (err) {
         console.error("❌ Signature failed", err);
-        STATE = "idle";
       } finally {
+        RUNNING = false;
         event.completed();
       }
     }
