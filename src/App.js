@@ -40,8 +40,8 @@ export default function App({ user }) {
   }, [init]);
 
   /* ---------------------------------------------------------
-   DEFAULT SIGNATURE DETECTION / STRIP
---------------------------------------------------------- */
+     BODY READ + SIGNATURE CLEAN HELPERS
+  --------------------------------------------------------- */
 
   function getBodyHtml(item) {
     return new Promise((resolve, reject) => {
@@ -50,14 +50,6 @@ export default function App({ user }) {
         else reject(r.error);
       });
     });
-  }
-
-  function hasCardByteSignature(html) {
-    return (
-      html.includes("CARD_BYTE_SIGNATURE_START") ||
-      html.includes("CARDBYTE_SIGNATURE") ||
-      html.includes("CB_SIG_START")
-    );
   }
 
   function looksLikeOutlookDefaultSignature(html) {
@@ -86,17 +78,26 @@ export default function App({ user }) {
     return html;
   }
 
-  async function ensureNoOutlookSignature(item) {
+  function stripCardByteSignature(html) {
+    return html.replace(
+      /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+      ""
+    ).trim();
+  }
+
+  async function cleanExistingSignatures(item) {
     const html = await getBodyHtml(item);
+    let cleaned = html;
 
-    // Never touch if CardByte already exists
-    if (hasCardByteSignature(html)) return;
+    // 🔥 Remove existing CardByte signature (REPLACE)
+    cleaned = stripCardByteSignature(cleaned);
 
-    if (looksLikeOutlookDefaultSignature(html)) {
-      console.log("🧹 Removing Outlook default signature");
+    // 🧹 Remove Outlook default signature
+    if (looksLikeOutlookDefaultSignature(cleaned)) {
+      cleaned = stripOutlookSignature(cleaned);
+    }
 
-      const cleaned = stripOutlookSignature(html);
-
+    if (cleaned !== html) {
       await item.body.setAsync(cleaned, {
         coercionType: Office.CoercionType.Html
       });
@@ -149,49 +150,46 @@ export default function App({ user }) {
 
       try {
         /* =========================================
-           🔍 EARLY CHECK (before Outlook race)
+           🔒 PREVENT PARALLEL INSERTS
            ========================================= */
-
-        await ensureNoOutlookSignature(item);
-
-        const preHtml = await getBodyHtml(item);
-        if (hasCardByteSignature(preHtml)) {
-          console.log("✅ CardByte signature already present — skipping");
-          return;
-        }
+        if (window.__INSERTING_SIGNATURE__) return;
+        window.__INSERTING_SIGNATURE__ = true;
 
         /* =========================================
-           🔁 LATE CHECK (Outlook may insert late)
+           🧹 CLEAN FIRST (REPLACE MODE)
+           - Old CardByte signature
+           - Outlook default signature
            ========================================= */
-
-        await ensureNoOutlookSignature(item);
+        await cleanExistingSignatures(item);
 
         /* =========================================
-           ✏️ INSERT SIGNATURE
+           ✏️ INSERT FRESH SIGNATURE
            ========================================= */
+        await new Promise((resolve, reject) => {
+          item.body.setSelectedDataAsync(
+            `
+          <br/><br/>
+          <!-- CARD_BYTE_SIGNATURE_START -->
+          ${signature}
+          <!-- CARD_BYTE_SIGNATURE_END -->
+          `,
+            { coercionType: Office.CoercionType.Html },
+            result =>
+              result.status === Office.AsyncResultStatus.Succeeded
+                ? resolve()
+                : reject(result.error)
+          );
+        });
 
-        item.body.setSelectedDataAsync(
-          `
-        <br/><br/>
-        <!-- CARD_BYTE_SIGNATURE_START -->
-        ${signature}
-        <!-- CARD_BYTE_SIGNATURE_END -->
-        `,
-          { coercionType: Office.CoercionType.Html },
-          result => {
-            if (result.status === Office.AsyncResultStatus.Failed) {
-              console.error("Apply signature failed:", result.error);
-              alert(result.error.message);
-            } else {
-              console.log("✅ Signature applied safely");
-            }
-          }
-        );
+        console.log("✅ Signature replaced successfully");
       } catch (e) {
-        console.error("Apply signature failed", e);
+        console.error("❌ Apply signature failed", e);
+      } finally {
+        window.__INSERTING_SIGNATURE__ = false;
       }
     });
   }
+
 
   if (mode === "login") {
     return <LoginForm onLogin={handleLogin} loading={loading} error={error} />;
