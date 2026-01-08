@@ -39,6 +39,70 @@ export default function App({ user }) {
     init();
   }, [init]);
 
+  /* ---------------------------------------------------------
+   DEFAULT SIGNATURE DETECTION / STRIP
+--------------------------------------------------------- */
+
+  function getBodyHtml(item) {
+    return new Promise((resolve, reject) => {
+      item.body.getAsync(Office.CoercionType.Html, r => {
+        if (r.status === "succeeded") resolve(r.value || "");
+        else reject(r.error);
+      });
+    });
+  }
+
+  function hasCardByteSignature(html) {
+    return (
+      html.includes("CARD_BYTE_SIGNATURE_START") ||
+      html.includes("CARDBYTE_SIGNATURE") ||
+      html.includes("CB_SIG_START")
+    );
+  }
+
+  function looksLikeOutlookDefaultSignature(html) {
+    return (
+      /class="?MsoNormal"?/i.test(html) ||
+      /<meta name="Generator" content="Microsoft Outlook"/i.test(html) ||
+      /--<br\s*\/?>/i.test(html) ||
+      /Sent from (my )?iPhone/i.test(html)
+    );
+  }
+
+  function stripOutlookSignature(html) {
+    const patterns = [
+      /<div class="?MsoNormal"?.*?>/i,
+      /--<br\s*\/?>/i,
+      /Sent from (my )?iPhone/i
+    ];
+
+    for (const p of patterns) {
+      const idx = html.search(p);
+      if (idx > -1) {
+        return html.slice(0, idx).trim();
+      }
+    }
+
+    return html;
+  }
+
+  async function ensureNoOutlookSignature(item) {
+    const html = await getBodyHtml(item);
+
+    // Never touch if CardByte already exists
+    if (hasCardByteSignature(html)) return;
+
+    if (looksLikeOutlookDefaultSignature(html)) {
+      console.log("🧹 Removing Outlook default signature");
+
+      const cleaned = stripOutlookSignature(html);
+
+      await item.body.setAsync(cleaned, {
+        coercionType: Office.CoercionType.Html
+      });
+    }
+  }
+
   async function loadSignature() {
     try {
       setLoading(true);
@@ -70,33 +134,62 @@ export default function App({ user }) {
   function applySignature(signature) {
     if (!signature) return;
 
-    // ✅ Ensure Office.js is available
     if (typeof Office === "undefined") {
       console.error("Office.js not available");
       return;
     }
 
-    Office.onReady(() => {
+    Office.onReady(async () => {
       const item = Office.context?.mailbox?.item;
 
-      // ✅ Must be in compose mode
       if (!item || !item.body) {
         console.error("Not in compose mode");
         return;
       }
 
-      item.body.setSelectedDataAsync(
-        signature,
-        { coercionType: Office.CoercionType.Html },
-        (result) => {
-          if (result.status === Office.AsyncResultStatus.Failed) {
-            console.error("Apply signature failed:", result.error);
-            alert(result.error.message);
-          } else {
-            console.log("Signature applied successfully");
-          }
+      try {
+        /* =========================================
+           🔍 EARLY CHECK (before Outlook race)
+           ========================================= */
+
+        await ensureNoOutlookSignature(item);
+
+        const preHtml = await getBodyHtml(item);
+        if (hasCardByteSignature(preHtml)) {
+          console.log("✅ CardByte signature already present — skipping");
+          return;
         }
-      );
+
+        /* =========================================
+           🔁 LATE CHECK (Outlook may insert late)
+           ========================================= */
+
+        await ensureNoOutlookSignature(item);
+
+        /* =========================================
+           ✏️ INSERT SIGNATURE
+           ========================================= */
+
+        item.body.setSelectedDataAsync(
+          `
+        <br/><br/>
+        <!-- CARD_BYTE_SIGNATURE_START -->
+        ${signature}
+        <!-- CARD_BYTE_SIGNATURE_END -->
+        `,
+          { coercionType: Office.CoercionType.Html },
+          result => {
+            if (result.status === Office.AsyncResultStatus.Failed) {
+              console.error("Apply signature failed:", result.error);
+              alert(result.error.message);
+            } else {
+              console.log("✅ Signature applied safely");
+            }
+          }
+        );
+      } catch (e) {
+        console.error("Apply signature failed", e);
+      }
     });
   }
 

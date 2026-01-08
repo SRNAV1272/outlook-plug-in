@@ -20,8 +20,6 @@
             <br>
         `;
 
-    const API_URL = "https://newqa-enterprise.cardbyte.ai/email-signature/outlook/get-active";
-
     const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 
     /* ---------------------------------------------------------
@@ -89,6 +87,9 @@
         // 1. stabilize selection
         await stabilizeSelection(item);
 
+        // 3️⃣ LATE cleanup (critical)
+        await ensureNoOutlookSignature(item);
+
         // 2. insert immediately
         await insertAtCursor(
           item,
@@ -103,6 +104,73 @@
     /* ---------------------------------------------------------
        AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
        --------------------------------------------------------- */
+
+    /* ---------------------------------------------------------
+    BODY READ + DETECTION HELPERS
+    --------------------------------------------------------- */
+
+    function getBodyHtml(item) {
+      return new Promise((resolve, reject) => {
+        item.body.getAsync(Office.CoercionType.Html, r => {
+          if (r.status === "succeeded") resolve(r.value || "");
+          else reject(r.error);
+        });
+      });
+    }
+
+    function hasCardByteSignature(html) {
+      return (
+        html.includes("CARD_BYTE_SIGNATURE_START") ||
+        html.includes("CARDBYTE_SIGNATURE")
+      );
+    }
+
+    function looksLikeOutlookDefaultSignature(html) {
+      return (
+        /class="?MsoNormal"?/i.test(html) ||
+        /<meta name="Generator" content="Microsoft Outlook"/i.test(html) ||
+        /--<br\s*\/?>/i.test(html) ||
+        /Sent from (my )?iPhone/i.test(html)
+      );
+    }
+
+    function stripOutlookSignature(html) {
+      const patterns = [
+        /<div class="?MsoNormal"?.*?>/i,
+        /--<br\s*\/?>/i,
+        /Sent from (my )?iPhone/i
+      ];
+
+      for (const p of patterns) {
+        const idx = html.search(p);
+        if (idx > -1) {
+          return html.slice(0, idx).trim();
+        }
+      }
+
+      return html;
+    }
+
+    async function ensureNoOutlookSignature(item) {
+      const html = await getBodyHtml(item);
+
+      // CardByte already present → do nothing
+      if (hasCardByteSignature(html)) return false;
+
+      if (looksLikeOutlookDefaultSignature(html)) {
+        console.log("🧹 Late Outlook signature detected — removing");
+
+        const cleaned = stripOutlookSignature(html);
+
+        await item.body.setAsync(cleaned, {
+          coercionType: Office.CoercionType.Html
+        });
+
+        return true;
+      }
+
+      return false;
+    }
 
     window.applySignature = async function (event = { completed: () => { } }) {
       console.log("🚀 applySignature triggered");
@@ -161,16 +229,16 @@
           const fallbackHtml =
             settings.get("defaultSignatureHtml") ||
             `
-                                    <table cellpadding="0" cellspacing="0" border="0" width="350">
-                                        <tr>
-                                            <td style="font-family:Arial,sans-serif;font-size:12px;">
-                                                <strong>${user.displayName || ""}</strong><br/>
-                                                ${user.emailAddress || ""}<br/>
-                                                <span style="color:#999;">Sent via CardByte</span>
-                                            </td>
-                                        </tr>
-                                    </table>
-                                `.trim();
+                <table cellpadding="0" cellspacing="0" border="0" width="350">
+                    <tr>
+                        <td style="font-family:Arial,sans-serif;font-size:12px;">
+                            <strong>${user.displayName || ""}</strong><br/>
+                            ${user.emailAddress || ""}<br/>
+                            <span style="color:#999;">Sent via CardByte</span>
+                        </td>
+                    </tr>
+                </table>
+            `.trim();
 
           await insertAtCursor(item, fallbackHtml);
         } catch (fallbackErr) {
@@ -205,22 +273,23 @@
       const signatureImageHTML =
         typeof dataURL === "string" && dataURL.trim()
           ? `
-<tr>
-  <td style="padding-bottom:8px;">
-    <img
-      src="${dataURL}"
-      alt="Signature"
-      width="350"
-      style="
-        display:block;
-        width:350px;
-        height:auto;
-        border:1px solid #ddd;
-        border-radius:8px;
-      "
-    />
-  </td>
-</tr>`
+          <tr>
+            <td style="padding-bottom:8px;">
+              <img
+                src="${dataURL}"
+                alt="Signature"
+                width="350"
+                style="
+                  display:block;
+                  width:350px;
+                  height:auto;
+                  border:1px solid #ddd;
+                  border-radius:8px;
+                "
+              />
+            </td>
+          </tr>
+        `
           : "";
 
       /* ---------- SOCIAL ICONS + CTA BUTTONS ---------- */
