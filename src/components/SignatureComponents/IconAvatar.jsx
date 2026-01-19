@@ -303,7 +303,6 @@ export function generateEmailSignatureHTML(
     // 3️⃣ Keep original order
     return 0;
   });
-
   const ICON_LABEL_LIMIT = 10;
 
   const topIcons = [];
@@ -322,6 +321,23 @@ export function generateEmailSignatureHTML(
     }
   });
 
+  const totalButtons =
+    topShortButtons.length + longButtons.length;
+
+  // Case 1: exactly one labeled button
+  if (totalButtons === 1 && longButtons.length === 1) {
+    topShortButtons.push(longButtons.shift());
+  }
+
+  const topInlineCount =
+    topIcons.length + topShortButtons.length;
+
+  // Case 2: fill inline slots
+  if (topInlineCount < 3 && longButtons.length > 1) {
+    topShortButtons.push(longButtons.shift());
+  }
+
+  /* 🔥 IMPORTANT: create rows AFTER shifts */
   const chunkArray = (arr, size) => {
     const chunks = [];
     for (let i = 0; i < arr.length; i += size) {
@@ -331,49 +347,85 @@ export function generateEmailSignatureHTML(
   };
 
   const buttonRows = chunkArray(longButtons, 2);
-  const totalButtons =
-    topShortButtons.length + longButtons.length;
-
-  // If there is exactly ONE labeled button overall,
-  // push it inline (no matter its length)
-  if (totalButtons === 1 && longButtons.length === 1) {
-    topShortButtons.push(longButtons.shift());
-  }
-  const topInlineCount = topIcons.length + topShortButtons.length;
-
-  if (topInlineCount < 4 && longButtons.length > 0) {
-    topShortButtons.push(longButtons.shift());
-  }
-
 
   const renderVMLButton = link => `
-<td valign="middle" style="padding-right:8px;padding-bottom:8px;">
-  <!-- BUTTON -->
-  <table cellpadding="0" cellspacing="0" border="0" width="120"
-    style="width:120px;border-collapse:separate;"
-  >
-    <tr>
-      <td style="padding:6px 14px;">
-        <table cellpadding="0" cellspacing="0" border="0">
-          <tr>
-            <td style="padding-right:8px;">
-              <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
-            </td>
-            <td
-              style="font-family:Arial,sans-serif;font-size:12px;line-height:14px;
-                     color:#0b2e79ff;white-space:nowrap;">
-              <a href="${link.link}" target="_blank"
-                 style="color:#0b2e79ff;text-decoration:none;">
-                ${link.label}
-              </a>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</td>
-`;
+    <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
+    <table cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td>
+          <table cellpadding="0" cellspacing="0" border="0">
+            <tr>
+
+              <!-- ICON -->
+              <td valign="middle" style="padding-right:8px;">
+                <img src="${link.value}" width="22" height="22"
+                    style="display:block;border:0;" />
+              </td>
+
+              <!-- TEXT -->
+              <td valign="middle">
+                <table cellpadding="0" cellspacing="0" border="0" height="22">
+                  <tr>
+                    <td
+                      valign="middle"
+                      height="22"
+                      style="
+                        font-family:Arial,sans-serif;
+                        font-size:12px;
+                        line-height:22px;
+                        mso-line-height-rule:exactly;
+                        color:#0b2e79ff;
+                        white-space:nowrap;
+                      ">
+                      <a href="${link.link}" target="_blank"
+                        style="
+                          color:#0b2e79ff;
+                          text-decoration:none;
+                          line-height:22px;
+                          display:inline-block;
+                        ">
+                        ${link.label}
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </td>
+  `
+    
+//     `
+// <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
+//   <!-- BUTTON -->
+//   <table cellpadding="0" cellspacing="0" border="0">
+//     <tr>
+//       <td>
+//         <table cellpadding="0" cellspacing="0" border="0">
+//           <tr>
+//             <td style="padding-right:8px;">
+//               <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
+//             </td>
+//             <td
+//               valign="middle"
+//               style="font-family:Arial,sans-serif;font-size:12px;line-height:14px;
+//                      color:#0b2e79ff;white-space:nowrap;padding-bottom:8px;">
+//               <a href="${link.link}" target="_blank"
+//                  style="color:#0b2e79ff;text-decoration:none;">
+//                 ${link.label}
+//               </a>
+//             </td>
+//           </tr>
+//         </table>
+//       </td>
+//     </tr>
+//   </table>
+// </td>
+// `;
   const topInlineHTML =
     topIcons.length || topShortButtons.length
       ? `
@@ -400,20 +452,17 @@ export function generateEmailSignatureHTML(
   </td>
 </tr>`
       : "";
-  console.log("sdasd", buttonRows)
+
   const buttonRowsHTML = buttonRows.length
     ? buttonRows
       .map(
         row => `
 <tr>
   <td style="padding-top:6px;">
-  <a href="${row.link}" target="_blank"
-      style="text-decoration:none;">
     <table cellpadding="0" cellspacing="0" border="0">
       <tr>
         ${row.map(renderVMLButton).join("")}
       </tr>
-      </a>
     </table>
   </td>
 </tr>`
@@ -438,17 +487,17 @@ ${buttonRowsHTML}
       freshLinkForBanner.trim() &&
       showBanner
       ? `
-<tr>
-  <td style="padding-top:8px;">
-    <img
-      src="${freshLinkForBanner}"
-      width="350"
-      height="110"
-      style="display:block;width:350px;height:110px;border:0;"
-      alt=""
-    />
-  </td>
-</tr>`
+    <tr>
+      <td style="padding-top:8px;">
+        <img
+          src="${freshLinkForBanner}"
+          width="350"
+          height="110"
+          style="display:block;width:350px;height:110px;border:0;"
+          alt=""
+        />
+      </td>
+    </tr>`
       : "";
 
   /* ---------- DISCLAIMER ---------- */
@@ -474,6 +523,7 @@ ${buttonRowsHTML}
     </table>
 `.trim();
 }
+
 
 
 
