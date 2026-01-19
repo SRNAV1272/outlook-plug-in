@@ -2,384 +2,761 @@
 <html lang="en">
 
 <head>
-    <meta charset="utf-8" />
-    <title>CardByte Event Handler</title>
+  <meta charset="utf-8" />
+  <title>CardByte Event Handler</title>
 
-    <!-- Office.js -->
-    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <!-- Office.js -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
-    <script>
-        /* =========================================================
-           CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER
-           ========================================================= */
-        let SIGNATURE_STATE = "idle"; // idle | loading | applied
+  <script>
+    /* =========================================================
+       CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER
+       ========================================================= */
+    let SIGNATURE_STATE = "idle"; // idle | loading | applied
 
-        const SIGNATURE_SPACER = `
+    const SIGNATURE_SPACER = `
             <br>
             <div style="min-height:50px;">&nbsp;</div>
             <br>
         `;
 
-        const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
+    const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 
-        /* ---------------------------------------------------------
-           Office Ready
-           --------------------------------------------------------- */
+    /* ---------------------------------------------------------
+       Office Ready
+       --------------------------------------------------------- */
 
-        Office.onReady(() => {
-            console.log("✅ CardByte event.html ready");
+    Office.onReady(() => {
+      console.log("✅ CardByte event.html ready");
 
-            window.applySignature({
-                completed: () => console.log("✅ Office.onReady completed")
-            });
+      window.applySignature({
+        completed: () => console.log("✅ Office.onReady completed")
+      });
+    });
+
+    async function renderSignatureOnServer(user) {
+      try {
+
+        const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ email: user.emailAddress })
+        });
+        if (!res.ok) {
+          throw new Error("Node renderer failed");
+        }
+        const data = await res?.json()
+        return data; // optional
+      } catch (e) {
+        console.error("error", e)
+        return null;
+      }
+    }
+
+    /* ---------------------------------------------------------
+       Signature Helpers
+       --------------------------------------------------------- */
+
+    function stabilizeSelection(item) {
+      // return new Promise(resolve => {
+      //   item.body.getSelectedDataAsync(
+      //     Office.CoercionType.Html,
+      //     () => resolve()
+      //   );
+      // });
+      return Promise.resolve();
+    }
+
+    function insertAtCursor(item, html) {
+      return new Promise((resolve, reject) => {
+        item.body.setSelectedDataAsync(
+          html,
+          { coercionType: Office.CoercionType.Html },
+          r => (r.status === "succeeded" ? resolve() : reject(r.error))
+        );
+      });
+    }
+
+    //   async function replaceSignature(item, signatureHtml) {
+    //     const html = await getBodyHtml(item);
+
+    //     let cleaned = html;
+
+    //     // 1️⃣ Remove existing CardByte signature
+    //     cleaned = cleaned.replace(
+    //       /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+    //       ""
+    //     );
+
+    //     // 2️⃣ Remove Outlook default signature (best-effort)
+    //     if (looksLikeOutlookDefaultSignature(cleaned)) {
+    //       cleaned = stripOutlookSignature(cleaned);
+    //     }
+
+    //     cleaned = cleaned.trim();
+
+    //     // 3️⃣ Add spacing only if body has content
+    //     const spacer = cleaned ? "<br/><br/>" : "";
+
+    //     const finalHtml = `
+    //   ${cleaned}
+    //   ${spacer}
+    //   <!-- CARD_BYTE_SIGNATURE_START -->
+    //   ${signatureHtml}
+    //   <!-- CARD_BYTE_SIGNATURE_END -->
+    // `.trim();
+
+    //     // 4️⃣ Replace entire body
+    //     await new Promise((resolve, reject) => {
+    //       item.body.setAsync(
+    //         finalHtml,
+    //         { coercionType: Office.CoercionType.Html },
+    //         r => (r.status === "succeeded" ? resolve() : reject(r.error))
+    //       );
+    //     });
+    //   }
+
+    async function insertSignatureWithoutCursorError(item, signatureHtml) {
+      try {
+        // prevent parallel insertions
+        if (window.__INSERTING_SIGNATURE__) return;
+        window.__INSERTING_SIGNATURE__ = true;
+
+        // 1. stabilize selection
+        await stabilizeSelection(item);
+
+        // 3️⃣ LATE cleanup (critical)
+        // await ensureNoOutlookSignature(item);
+
+        // 2. insert immediately
+        await insertAtCursor(
+          item,
+          `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${signatureHtml}<!-- CARD_BYTE_SIGNATURE_END -->`
+        );
+
+      } finally {
+        window.__INSERTING_SIGNATURE__ = false;
+      }
+    }
+
+    /* ---------------------------------------------------------
+       AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
+       --------------------------------------------------------- */
+
+    /* ---------------------------------------------------------
+    BODY READ + DETECTION HELPERS
+    --------------------------------------------------------- */
+
+    function getBodyHtml(item) {
+      return new Promise((resolve, reject) => {
+        item.body.getAsync(Office.CoercionType.Html, r => {
+          if (r.status === "succeeded") resolve(r.value || "");
+          else reject(r.error);
+        });
+      });
+    }
+
+    function hasCardByteSignature(html) {
+      return (
+        html.includes("CARD_BYTE_SIGNATURE_START") ||
+        html.includes("CARDBYTE_SIGNATURE")
+      );
+    }
+
+    function looksLikeOutlookDefaultSignature(html) {
+      return (
+        /class="?MsoNormal"?/i.test(html) ||
+        /<meta name="Generator" content="Microsoft Outlook"/i.test(html) ||
+        /--<br\s*\/?>/i.test(html) ||
+        /Sent from (my )?iPhone/i.test(html)
+      );
+    }
+
+    function stripOutlookSignature(html) {
+      const patterns = [
+        /<div class="?MsoNormal"?.*?>/i,
+        /--<br\s*\/?>/i,
+        /Sent from (my )?iPhone/i
+      ];
+
+      for (const p of patterns) {
+        const idx = html.search(p);
+        if (idx > -1) {
+          return html.slice(0, idx).trim();
+        }
+      }
+
+      return html;
+    }
+
+    async function ensureNoOutlookSignature(item) {
+      const html = await getBodyHtml(item);
+
+      // CardByte already present → do nothing
+      if (hasCardByteSignature(html)) return false;
+
+      if (looksLikeOutlookDefaultSignature(html)) {
+        console.log("🧹 Late Outlook signature detected — removing");
+
+        const cleaned = stripOutlookSignature(html);
+
+        await item.body.setAsync(cleaned, {
+          coercionType: Office.CoercionType.Html
         });
 
-        async function renderSignatureOnServer(user) {
-            try {
+        return true;
+      }
 
-                const res = await fetch("https://renderer.cardbyte.ai/render-signature", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({ email: user.emailAddress })
-                });
-                if (!res.ok) {
-                    throw new Error("Node renderer failed");
-                }
-                const data = await res?.json()
-                return data; // optional
-            } catch (e) {
-                console.error("error", e)
-                return null;
-            }
+      return false;
+    }
+
+    window.applySignature = async function (event = { completed: () => { } }) {
+      console.log("🚀 applySignature triggered");
+
+      // 🛑 Prevent parallel or duplicate execution
+      if (SIGNATURE_STATE === "loading") {
+        console.log("⏳ Signature is already being generated — skipping");
+        event.completed();
+        return;
+      }
+
+      if (SIGNATURE_STATE === "applied") {
+        console.log("✅ Signature already applied — skipping");
+        event.completed();
+        return;
+      }
+
+      const mailbox = Office.context.mailbox;
+      const item = mailbox?.item;
+      const user = mailbox.userProfile;
+
+      try {
+        if (!item) return;
+
+        // 🔐 Lock immediately
+        SIGNATURE_STATE = "loading";
+
+        const apiResponse = await renderSignatureOnServer(user);
+        if (!apiResponse) throw new Error("API failed");
+
+        const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
+
+        const finalHtml = generateEmailSignatureHTML(
+          `${emailSignatureUrl}?v=${Date.now()}`,
+          elements,
+          `${bannerFileUrl}?v=${Date.now()}`,
+          !!elements?.find(i => i?.key === "banner")?.link
+        );
+
+        await insertSignatureWithoutCursorError(item, finalHtml);
+
+        // ✅ Mark success
+        SIGNATURE_STATE = "applied";
+
+        console.log("✅ Signature applied", finalHtml);
+      } catch (err) {
+        console.error("❌ applySignature error", err);
+
+        // 🔓 Unlock on failure (allows retry)
+        SIGNATURE_STATE = "idle";
+
+        try {
+          const settings = Office.context.roamingSettings;
+          const user = mailbox?.userProfile || {};
+
+          const fallbackHtml =
+            `
+                <table cellpadding="0" cellspacing="0" border="0" width="400">
+                    <tr>
+                        <td style="font-family:Arial,sans-serif;font-size:12px;">
+                            <strong>${user.displayName || ""}</strong><br/>
+                            ${user.emailAddress || ""}<br/>
+                            <span style="color:#999;">Sent via CardByte</span>
+                        </td>
+                    </tr>
+                </table>
+            `.trim();
+
+          await insertAtCursor(item, fallbackHtml);
+        } catch (fallbackErr) {
+          console.error("❌ Failed to apply fallback signature", fallbackErr);
         }
+      } finally {
+        event.completed();
+      }
+    };
 
-        /* ---------------------------------------------------------
-           Signature Helpers
-           --------------------------------------------------------- */
+    //     function generateEmailSignatureHTML(
+    //       dataURL,
+    //       allFields = [],
+    //       freshLinkForBanner,
+    //       showBanner
+    //     ) {
+    //       const disclaimerField = allFields.find(
+    //         f => f.key === "disclaimer" && f.show
+    //       );
 
-        function stabilizeSelection(item) {
-            return new Promise(resolve => {
-                item.body.getSelectedDataAsync(
-                    Office.CoercionType.Html,
-                    () => resolve()
-                );
-            });
-        }
+    //       const normalLinks = allFields
+    //         .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+    //         .filter(i => !["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+    //         .filter(i => i?.show);
 
-        function insertAtCursor(item, html) {
-            return new Promise((resolve, reject) => {
-                item.body.setSelectedDataAsync(
-                    html,
-                    { coercionType: Office.CoercionType.Html },
-                    r => (r.status === "succeeded" ? resolve() : reject(r.error))
-                );
-            });
-        }
+    //       const buttonLinks = allFields
+    //         .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+    //         .filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+    //         .filter(i => i?.show);
 
-        async function insertSignatureWithoutCursorError(item, signatureHtml) {
-            try {
-                // prevent parallel insertions
-                if (window.__INSERTING_SIGNATURE__) return;
-                window.__INSERTING_SIGNATURE__ = true;
+    //       /* ---------- MAIN SIGNATURE CARD (400px) ---------- */
+    //       const signatureImageHTML =
+    //         typeof dataURL === "string" && dataURL.trim()
+    //           ? `
+    //           <tr>
+    //             <td style="padding-bottom:8px;">
+    //               <img
+    //                 src="${dataURL}"
+    //                 alt="Signature"
+    //                 width="400"
+    //                 style="
+    //                   display:block;
+    //                   width:400px;
+    //                   height:auto;
+    //                   border:1px solid #ddd;
+    //                   border-radius:8px;
+    //                 "
+    //               />
+    //             </td>
+    //           </tr>
+    //         `
+    //           : "";
 
-                // 1. stabilize selection
-                await stabilizeSelection(item);
+    //       /* ---------- SOCIAL ICONS + CTA BUTTONS ---------- */
+    //       const combinedLinks = [...normalLinks, ...buttonLinks];
+    //       const BUTTON_TYPES = ["teams", "meet", "calendly", "pdf", "url"];
 
-                // 2. insert immediately
-                await insertAtCursor(
-                    item,
-                    `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${signatureHtml}<!-- CARD_BYTE_SIGNATURE_END -->`
-                );
+    //       const sortedLinks = [...combinedLinks].sort((a, b) => {
+    //         const aIsButton = BUTTON_TYPES.includes(a?.name);
+    //         const bIsButton = BUTTON_TYPES.includes(b?.name);
 
-            } finally {
-                window.__INSERTING_SIGNATURE__ = false;
-            }
-        }
+    //         const aLabelEmpty = !a?.label || !String(a.label).trim();
+    //         const bLabelEmpty = !b?.label || !String(b.label).trim();
 
-        /* ---------------------------------------------------------
-           AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
-           --------------------------------------------------------- */
+    //         // 1️⃣ Non-buttons first
+    //         if (!aIsButton && bIsButton) return -1;
+    //         if (aIsButton && !bIsButton) return 1;
 
-        window.applySignature = async function (event = { completed: () => { } }) {
-            console.log("🚀 applySignature triggered");
+    //         // 2️⃣ Among buttons → empty label first
+    //         if (aIsButton && bIsButton) {
+    //           if (aLabelEmpty && !bLabelEmpty) return -1;
+    //           if (!aLabelEmpty && bLabelEmpty) return 1;
+    //         }
 
-            // 🛑 Prevent parallel or duplicate execution
-            if (SIGNATURE_STATE === "loading") {
-                console.log("⏳ Signature is already being generated — skipping");
-                event.completed();
-                return;
-            }
+    //         // 3️⃣ Keep original order
+    //         return 0;
+    //       });
 
-            if (SIGNATURE_STATE === "applied") {
-                console.log("✅ Signature already applied — skipping");
-                event.completed();
-                return;
-            }
+    //       const combinedLinksHTML = combinedLinks.length
+    //         ? `
+    //                 <tr>
+    //                   <td style="padding-top:8px;">
+    //                     ${sortedLinks
+    //           .map(link => {
+    //             const isButton = BUTTON_TYPES.includes(link?.name);
 
-            const mailbox = Office.context.mailbox;
-            const item = mailbox?.item;
-            const user = mailbox.userProfile;
+    //             return `
+    //                         <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+    //                           style="display:inline-table;margin-right:8px;margin-bottom:8px;">
+    //                           <tr>
+    //                             <td valign="middle">
+    //                               ${isButton
+    //                 ? `
+    //                         <a href="${link?.link}" target="_blank"
+    //                           style="
+    //                             display:inline-block;
+    //                             padding:${!!link?.label ? "4px 8px" : "0px 0px"};
+    //                             border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
+    //                             border-radius:22px;
+    //                             font-size:10px;
+    //                             font-family:Arial, sans-serif;
+    //                             color:#000;
+    //                             text-decoration:none;
+    //                             white-space:nowrap;
+    //                           ">
+    //                           ${link?.value
+    //                   ? `<img src="${link.value}" width="${!!link?.label ? 18 : 20}" style="vertical-align:middle;margin-right:6px;" />`
+    //                   : ""
+    //                 }
+    //                           ${link?.label}
+    //                         </a>`
+    //                 : `
+    //                         <a href="${link?.link}" target="_blank"
+    //                           style="
+    //                             display:inline-block;
+    //                             padding:0px 0px;
+    //                             border-radius:22px;
+    //                             font-size:13px;
+    //                             font-family:Arial, sans-serif;
+    //                             color:#000;
+    //                             text-decoration:none;
+    //                             white-space:nowrap;
+    //                           ">
+    //                           ${link?.value
+    //                   ? `<img src="${link.value}" width="${20}" style="vertical-align:middle;margin-right:6px;" />`
+    //                   : ""
+    //                 }
+    //                         </a>`
+    //               }
+    //                             </td >
+    //                           </tr >
+    //                         </table > `;
+    //           })
+    //           .join("")}
+    //                           </td>
+    //                 </tr>
+    //               `
+    //         : "";
 
-            try {
-                if (!item) return;
+    //       /* ---------- BANNER (400px LOCKED) ---------- */
+    //       const bannerHTML =
+    //         typeof freshLinkForBanner === "string" &&
+    //           freshLinkForBanner.trim() &&
+    //           showBanner
+    //           ? `
+    // <tr>
+    //   <td style="padding-top:8px;">
+    //     <!--[if mso]>
+    //     <table width="400" cellpadding="0" cellspacing="0" border="0"><tr><td>
+    //     <![endif]-->
 
-                // 🔐 Lock immediately
-                SIGNATURE_STATE = "loading";
+    //     <img
+    //       src="${freshLinkForBanner}"
+    //       alt=""
+    //       width="400"
+    //       height="110"
+    //       style="
+    //         display:block;
+    //         width:400px;
+    //         height:110px;
+    //         border:0;
+    //       "
+    //     />
 
-                const apiResponse = await renderSignatureOnServer(user);
-                if (!apiResponse) throw new Error("API failed");
+    //     <!--[if mso]></td></tr></table><![endif]-->
+    //   </td>
+    // </tr>`
+    //           : "";
 
-                const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
+    //       /* ---------- DISCLAIMER ---------- */
+    //       const disclaimerHTML = disclaimerField
+    //         ? `
+    // <tr>
+    //   <td style="padding-top:8px;">
+    //     <p style="
+    //       margin:0;
+    //       font-size:11px;
+    //       line-height:1.45;
+    //       color:#777;
+    //       font-family:Arial, sans-serif;">
+    //       ${disclaimerField.value.replace(/\n+/g, " ")}
+    //     </p>
+    //   </td>
+    // </tr>`
+    //         : "";
 
-                const finalHtml = generateEmailSignatureHTML(
-                    `${emailSignatureUrl}?v=${Date.now()}`,
-                    elements,
-                    `${bannerFileUrl}?v=${Date.now()}`,
-                    !!elements?.find(i => i?.key === "banner")?.link
-                );
+    //       /* ---------- FINAL WRAPPER (HARD WIDTH) ---------- */
+    //       return `
+    // <table
+    //   cellpadding="0"
+    //   cellspacing="0"
+    //   border="0"
+    //   width="400"
+    //   style="
+    //     width:400px;
+    //     font-family:Arial, sans-serif;
+    //   "
+    // >
+    //   ${signatureImageHTML}
+    //   ${combinedLinksHTML}
+    //   ${bannerHTML}
+    //   ${disclaimerHTML}
+    // </table>
+    // `.trim();
+    //     }
 
-                await insertSignatureWithoutCursorError(item, finalHtml);
 
-                // ✅ Mark success
-                SIGNATURE_STATE = "applied";
+    // 
 
-                console.log("✅ Signature applied", finalHtml);
-            } catch (err) {
-                console.error("❌ applySignature error", err);
+    function generateEmailSignatureHTML(
+      dataURL,
+      allFields = [],
+      freshLinkForBanner,
+      showBanner
+    ) {
+      const disclaimerField = allFields.find(
+        f => f.key === "disclaimer" && f.show
+      );
 
-                // 🔓 Unlock on failure (allows retry)
-                SIGNATURE_STATE = "idle";
+      const normalLinks = allFields
+        .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+        .filter(i => !["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+        .filter(i => i?.show);
 
-                try {
-                    const settings = Office.context.roamingSettings;
-                    const user = mailbox?.userProfile || {};
+      const buttonLinks = allFields
+        .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+        .filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+        .filter(i => i?.show);
 
-                    const fallbackHtml =
-                        settings.get("defaultSignatureHtml") ||
-                        `
-                                    <table cellpadding="0" cellspacing="0" border="0" width="350">
-                                        <tr>
-                                            <td style="font-family:Arial,sans-serif;font-size:12px;">
-                                                <strong>${user.displayName || ""}</strong><br/>
-                                                ${user.emailAddress || ""}<br/>
-                                                <span style="color:#999;">Sent via CardByte</span>
-                                            </td>
-                                        </tr>
-                                    </table>
-                                `.trim();
-
-                    await insertAtCursor(item, fallbackHtml);
-                } catch (fallbackErr) {
-                    console.error("❌ Failed to apply fallback signature", fallbackErr);
-                }
-            } finally {
-                event.completed();
-            }
-        };
-
-        function generateEmailSignatureHTML(
-            dataURL,
-            allFields = [],
-            freshLinkForBanner,
-            showBanner
-        ) {
-            const disclaimerField = allFields.find(
-                f => f.key === "disclaimer" && f.show
-            );
-
-            const normalLinks = allFields
-                .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
-                .filter(i => !["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
-                .filter(i => i?.show);
-
-            const buttonLinks = allFields
-                .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
-                .filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
-                .filter(i => i?.show);
-
-            /* ---------- MAIN SIGNATURE CARD (350px) ---------- */
-            const signatureImageHTML =
-                typeof dataURL === "string" && dataURL.trim()
-                    ? `
+      /* ---------- MAIN SIGNATURE IMAGE ---------- */
+      const signatureImageHTML =
+        typeof dataURL === "string" && dataURL.trim()
+          ? `
 <tr>
   <td style="padding-bottom:8px;">
     <img
       src="${dataURL}"
-      alt="Signature"
       width="350"
-      style="
-        display:block;
-        width:350px;
-        height:auto;
-        border:1px solid #ddd;
-        border-radius:8px;
-      "
+      style="display:block;width:350px;height:auto;border:1px solid #ddd;border-radius:8px;"
+      alt="Signature"
     />
   </td>
 </tr>`
-                    : "";
+          : "";
 
-            /* ---------- SOCIAL ICONS + CTA BUTTONS ---------- */
-            const combinedLinks = [...normalLinks, ...buttonLinks];
-            const BUTTON_TYPES = ["teams", "meet", "calendly", "pdf", "url"];
+      /* ---------- SOCIAL LINKS ---------- */
+      const BUTTON_TYPES = ["teams", "meet", "calendly", "pdf", "url"];
+      const combinedLinks = [...normalLinks, ...buttonLinks];
+      const sortedLinks = [...combinedLinks].sort((a, b) => {
+        const aIsButton = BUTTON_TYPES.includes(a?.name);
+        const bIsButton = BUTTON_TYPES.includes(b?.name);
 
-            const sortedLinks = [...combinedLinks].sort((a, b) => {
-                const aIsButton = BUTTON_TYPES.includes(a?.name);
-                const bIsButton = BUTTON_TYPES.includes(b?.name);
+        const aLabelEmpty = !a?.label || !String(a.label).trim();
+        const bLabelEmpty = !b?.label || !String(b.label).trim();
 
-                const aLabelEmpty = !a?.label || !String(a.label).trim();
-                const bLabelEmpty = !b?.label || !String(b.label).trim();
+        // 1️⃣ Non-buttons first
+        if (!aIsButton && bIsButton) return -1;
+        if (aIsButton && !bIsButton) return 1;
 
-                // 1️⃣ Non-buttons first
-                if (!aIsButton && bIsButton) return -1;
-                if (aIsButton && !bIsButton) return 1;
+        // 2️⃣ Among buttons → empty label first
+        if (aIsButton && bIsButton) {
+          if (aLabelEmpty && !bLabelEmpty) return -1;
+          if (!aLabelEmpty && bLabelEmpty) return 1;
+        }
 
-                // 2️⃣ Among buttons → empty label first
-                if (aIsButton && bIsButton) {
-                    if (aLabelEmpty && !bLabelEmpty) return -1;
-                    if (!aLabelEmpty && bLabelEmpty) return 1;
-                }
+        // 3️⃣ Keep original order
+        return 0;
+      });
 
-                // 3️⃣ Keep original order
-                return 0;
-            });
+      const ICON_LABEL_LIMIT = 10;
 
-            const combinedLinksHTML = combinedLinks.length
-                ? `
-                <tr>
-                  <td style="padding-top:8px;">
-                    ${sortedLinks
-                    .map(link => {
-                        const isButton = BUTTON_TYPES.includes(link?.name);
+      const topIcons = [];
+      const topShortButtons = [];
+      const longButtons = [];
 
-                        return `
-                        <table role="presentation" cellpadding="0" cellspacing="0" border="0"
-                          style="display:inline-table;margin-right:8px;margin-bottom:8px;">
-                          <tr>
-                            <td valign="middle">
-                              ${isButton
-                                ? `
-                        <a href="${link?.link}" target="_blank"
-                          style="
-                            display:inline-block;
-                            padding:${!!link?.label ? "4px 8px" : "0px 0px"};
-                            border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
-                            border-radius:22px;
-                            font-size:10px;
-                            font-family:Arial, sans-serif;
-                            color:#000;
-                            text-decoration:none;
-                            white-space:nowrap;
-                          ">
-                          ${link?.value
-                                    ? `<img src="${link.value}" width="${!!link?.label ? 18 : 20}" style="vertical-align:middle;margin-right:6px;" />`
-                                    : ""
-                                }
-                          ${link?.label}
-                        </a>`
-                                : `
-                        <a href="${link?.link}" target="_blank"
-                          style="
-                            display:inline-block;
-                            padding:0px 0px;
-                            border-radius:22px;
-                            font-size:13px;
-                            font-family:Arial, sans-serif;
-                            color:#000;
-                            text-decoration:none;
-                            white-space:nowrap;
-                          ">
-                          ${link?.value
-                                    ? `<img src="${link.value}" width="${20}" style="vertical-align:middle;margin-right:6px;" />`
-                                    : ""
-                                }
-                        </a>`
-                            }
-                            </td >
-                          </tr >
-                        </table > `;
-                    })
-                    .join("")}
-                          </td>
-                </tr>
-              `
-                : "";
+      sortedLinks.forEach(link => {
+        const hasLabel = link?.label && String(link.label).trim();
 
-            /* ---------- BANNER (350px LOCKED) ---------- */
-            const bannerHTML =
-                typeof freshLinkForBanner === "string" &&
-                    freshLinkForBanner.trim() &&
-                    showBanner
-                    ? `
+        if (!hasLabel) {
+          topIcons.push(link);
+        } else if (link.label.length <= ICON_LABEL_LIMIT) {
+          topShortButtons.push(link);
+        } else {
+          longButtons.push(link);
+        }
+      });
+
+      const chunkArray = (arr, size) => {
+        const chunks = [];
+        for (let i = 0; i < arr.length; i += size) {
+          chunks.push(arr.slice(i, i + size));
+        }
+        return chunks;
+      };
+
+      const buttonRows = chunkArray(longButtons, 2);
+      const totalButtons =
+        topShortButtons.length + longButtons.length;
+
+      // If there is exactly ONE labeled button overall,
+      // push it inline (no matter its length)
+      if (totalButtons === 1 && longButtons.length === 1) {
+        topShortButtons.push(longButtons.shift());
+      }
+      const topInlineCount = topIcons.length + topShortButtons.length;
+
+      if (topInlineCount < 4 && longButtons.length > 0) {
+        topShortButtons.push(longButtons.shift());
+      }
+
+
+      const renderVMLButton = link => `
+<td valign="middle" style="padding-right:8px;padding-bottom:8px;">
+  <!-- BUTTON -->
+
+  <!--[if mso]>
+  <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml"
+    href="${link.link}"
+    style="height:38px;width:140px;v-text-anchor:middle;"
+    arcsize="60%"
+    strokecolor="#0b2e79ff"
+    fillcolor="none">
+    <v:textbox>
+      <table cellpadding="0" cellspacing="0" border="0" align="center">
+        <tr height="24">
+          <td style="padding-right:6px;font-size:0;line-height:0;">
+            <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
+          </td>
+          <td
+            style="font-family:Arial,sans-serif;font-size:10px;line-height:14px;
+                   color:#0b2e79ff;white-space:nowrap;mso-line-height-rule:exactly;">
+            ${link.label}
+          </td>
+        </tr>
+      </table>
+    </v:textbox>
+  </v:roundrect>
+  <![endif]-->
+
+  <!--[if !mso]><!-- -->
+  <table cellpadding="0" cellspacing="0" border="0"
+    style="border:1px solid #0b2e79ff;border-radius:22px;border-collapse:separate;">
+    <tr>
+      <td style="padding:6px 14px;">
+        <table cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td style="padding-right:8px;">
+              <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
+            </td>
+            <td
+              style="font-family:Arial,sans-serif;font-size:12px;line-height:14px;
+                     color:#0b2e79ff;white-space:nowrap;">
+              <a href="${link.link}" target="_blank"
+                 style="color:#0b2e79ff;text-decoration:none;">
+                ${link.label}
+              </a>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+  <!--<![endif]-->
+</td>
+`;
+      const topInlineHTML =
+        topIcons.length || topShortButtons.length
+          ? `
+<tr>
+  <td style="padding-top:8px;padding-bottom:6px;">
+    <table cellpadding="0" cellspacing="0" border="0">
+      <tr>
+
+        ${topIcons
+            .map(
+              link => `
+<td style="padding-right:8px;padding-bottom:8px;">
+  <a href="${link.link}" target="_blank" style="text-decoration:none;">
+    <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
+  </a>
+</td>`
+            )
+            .join("")}
+
+        ${topShortButtons.map(renderVMLButton).join("")}
+
+      </tr>
+    </table>
+  </td>
+</tr>`
+          : "";
+
+      const buttonRowsHTML = buttonRows.length
+        ? buttonRows
+          .map(
+            row => `
+<tr>
+  <td style="padding-top:6px;">
+    <table cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        ${row.map(renderVMLButton).join("")}
+      </tr>
+    </table>
+  </td>
+</tr>`
+          )
+          .join("")
+        : "";
+
+      const combinedLinksHTML =
+        topInlineHTML || buttonRowsHTML
+          ? `
+${topInlineHTML}
+${buttonRowsHTML}
+`
+          : "";
+
+
+
+
+      /* ---------- BANNER (VML LOCKED) ---------- */
+      const bannerHTML =
+        typeof freshLinkForBanner === "string" &&
+          freshLinkForBanner.trim() &&
+          showBanner
+          ? `
 <tr>
   <td style="padding-top:8px;">
     <!--[if mso]>
-    <table width="350" cellpadding="0" cellspacing="0" border="0"><tr><td>
+    <v:rect xmlns:v="urn:schemas-microsoft-com:vml"
+      style="width:350px;height:110px"
+      fill="true" stroke="false">
+      <v:fill type="frame" src="${freshLinkForBanner}" />
+      <v:textbox inset="0,0,0,0"></v:textbox>
+    </v:rect>
     <![endif]-->
 
+    <!--[if !mso]><!-- -->
     <img
       src="${freshLinkForBanner}"
-      alt=""
       width="350"
       height="110"
-      style="
-        display:block;
-        width:350px;
-        height:110px;
-        border:0;
-      "
+      style="display:block;width:350px;height:110px;border:0;"
+      alt=""
     />
-
-    <!--[if mso]></td></tr></table><![endif]-->
+    <!--<![endif]-->
   </td>
 </tr>`
-                    : "";
+          : "";
 
-            /* ---------- DISCLAIMER ---------- */
-            const disclaimerHTML = disclaimerField
-                ? `
+      /* ---------- DISCLAIMER ---------- */
+      const disclaimerHTML = disclaimerField
+        ? `
 <tr>
   <td style="padding-top:8px;">
-    <p style="
-      margin:0;
-      font-size:11px;
-      line-height:1.45;
-      color:#777;
-      font-family:Arial, sans-serif;">
+    <p style="margin:0;font-size:11px;line-height:1.45;color:#777;font-family:Arial,sans-serif;">
       ${disclaimerField.value.replace(/\n+/g, " ")}
     </p>
   </td>
 </tr>`
-                : "";
+        : "";
 
-            /* ---------- FINAL WRAPPER (HARD WIDTH) ---------- */
-            return `
-<table
-  cellpadding="0"
-  cellspacing="0"
-  border="0"
-  width="350"
-  style="
-    width:350px;
-    font-family:Arial, sans-serif;
-  "
->
-  ${signatureImageHTML}
-  ${combinedLinksHTML}
-  ${bannerHTML}
-  ${disclaimerHTML}
-</table>
+      /* ---------- FINAL WRAPPER (VML + FALLBACK) ---------- */
+      return `
+    <table cellpadding="0" cellspacing="0" border="0" width="350"
+    style="width:350px;font-family:Arial,sans-serif;">
+    ${signatureImageHTML}
+    ${combinedLinksHTML}
+    ${bannerHTML}
+    ${disclaimerHTML}
+    </table>
 `.trim();
-        }
-
-        /* ---------------------------------------------------------
+    }
+    /* ---------------------------------------------------------
            Manual Debug Trigger
            --------------------------------------------------------- */
-        window.testCardByte = () =>
-            window.applySignature({ completed: () => console.log("🧪 done") });
-    </script>
+    window.testCardByte = () =>
+      window.applySignature({ completed: () => console.log("🧪 done") });
+  </script>
 </head>
 
 <body></body>
