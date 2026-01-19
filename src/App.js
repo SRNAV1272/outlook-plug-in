@@ -170,7 +170,7 @@ export default function App({ user }) {
            ✏️ INSERT SIGNATURE
            ========================================= */
 
-        item.body.setAsync(
+        item.body.setSelectedDataAsync(
           `
         <br/><br/>
         <!-- CARD_BYTE_SIGNATURE_START -->
