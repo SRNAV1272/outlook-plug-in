@@ -349,34 +349,9 @@ export function generateEmailSignatureHTML(
   const renderVMLButton = link => `
 <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
   <!-- BUTTON -->
-
-  <!--[if mso]>
-  <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml"
-    href="${link.link}"
-    style="height:38px;width:140px;v-text-anchor:middle;"
-    arcsize="60%"
-    strokecolor="#0b2e79ff"
-    fillcolor="none">
-    <v:textbox>
-      <table cellpadding="0" cellspacing="0" border="0" align="center">
-          <tr height="24">
-            <td style="padding-right:6px;font-size:0;line-height:0;">
-              <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
-            </td>
-            <td
-              style="font-family:Arial,sans-serif;font-size:10px;line-height:14px;
-                    color:#0b2e79ff;white-space:nowrap;mso-line-height-rule:exactly;">
-              ${link.label}
-            </td>
-          </tr>
-      </table>
-    </v:textbox>
-  </v:roundrect>
-  <![endif]-->
-
-  <!--[if !mso]><!-- -->
-  <table cellpadding="0" cellspacing="0" border="0"
-    style="border:1px solid #0b2e79ff;border-radius:22px;border-collapse:separate;">
+  <table cellpadding="0" cellspacing="0" border="0" width="120"
+    style="width:120px;border-collapse:separate;"
+  >
     <tr>
       <td style="padding:6px 14px;">
         <table cellpadding="0" cellspacing="0" border="0">
@@ -397,7 +372,6 @@ export function generateEmailSignatureHTML(
       </td>
     </tr>
   </table>
-  <!--<![endif]-->
 </td>
 `;
   const topInlineHTML =
@@ -466,16 +440,6 @@ ${buttonRowsHTML}
       ? `
 <tr>
   <td style="padding-top:8px;">
-    <!--[if mso]>
-    <v:rect xmlns:v="urn:schemas-microsoft-com:vml"
-      style="width:350px;height:110px"
-      fill="true" stroke="false">
-      <v:fill type="frame" src="${freshLinkForBanner}" />
-      <v:textbox inset="0,0,0,0"></v:textbox>
-    </v:rect>
-    <![endif]-->
-
-    <!--[if !mso]><!-- -->
     <img
       src="${freshLinkForBanner}"
       width="350"
@@ -483,7 +447,6 @@ ${buttonRowsHTML}
       style="display:block;width:350px;height:110px;border:0;"
       alt=""
     />
-    <!--<![endif]-->
   </td>
 </tr>`
       : "";
