@@ -128,7 +128,7 @@
         await stabilizeSelection(item);
 
         // 3️⃣ LATE cleanup (critical)
-        await ensureNoOutlookSignature(item);
+        // await ensureNoOutlookSignature(item);
 
         // 2. insert immediately
         await insertAtCursor(
@@ -486,7 +486,7 @@
     //     }
 
 
-    export function generateEmailSignatureHTML(
+    function generateEmailSignatureHTML(
       dataURL,
       allFields = [],
       freshLinkForBanner,
