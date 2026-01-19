@@ -432,16 +432,16 @@ export function generateEmailSignatureHTML(
       .map(
         row => `
 <tr>
-<a href="${row.link}" target="_blank"
-    style="text-decoration:none;">
   <td style="padding-top:6px;">
+  <a href="${row.link}" target="_blank"
+      style="text-decoration:none;">
     <table cellpadding="0" cellspacing="0" border="0">
       <tr>
         ${row.map(renderVMLButton).join("")}
       </tr>
+      </a>
     </table>
   </td>
-      </a>
 </tr>`
       )
       .join("")
