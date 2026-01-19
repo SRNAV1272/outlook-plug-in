@@ -37,7 +37,7 @@
     async function renderSignatureOnServer(user) {
       try {
 
-        const res = await fetch("https://renderer.cardbyte.ai/render-signature", {
+        const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
@@ -289,7 +289,204 @@
       }
     };
 
-    function generateEmailSignatureHTML(
+    //     function generateEmailSignatureHTML(
+    //       dataURL,
+    //       allFields = [],
+    //       freshLinkForBanner,
+    //       showBanner
+    //     ) {
+    //       const disclaimerField = allFields.find(
+    //         f => f.key === "disclaimer" && f.show
+    //       );
+
+    //       const normalLinks = allFields
+    //         .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+    //         .filter(i => !["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+    //         .filter(i => i?.show);
+
+    //       const buttonLinks = allFields
+    //         .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+    //         .filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
+    //         .filter(i => i?.show);
+
+    //       /* ---------- MAIN SIGNATURE CARD (400px) ---------- */
+    //       const signatureImageHTML =
+    //         typeof dataURL === "string" && dataURL.trim()
+    //           ? `
+    //           <tr>
+    //             <td style="padding-bottom:8px;">
+    //               <img
+    //                 src="${dataURL}"
+    //                 alt="Signature"
+    //                 width="400"
+    //                 style="
+    //                   display:block;
+    //                   width:400px;
+    //                   height:auto;
+    //                   border:1px solid #ddd;
+    //                   border-radius:8px;
+    //                 "
+    //               />
+    //             </td>
+    //           </tr>
+    //         `
+    //           : "";
+
+    //       /* ---------- SOCIAL ICONS + CTA BUTTONS ---------- */
+    //       const combinedLinks = [...normalLinks, ...buttonLinks];
+    //       const BUTTON_TYPES = ["teams", "meet", "calendly", "pdf", "url"];
+
+    //       const sortedLinks = [...combinedLinks].sort((a, b) => {
+    //         const aIsButton = BUTTON_TYPES.includes(a?.name);
+    //         const bIsButton = BUTTON_TYPES.includes(b?.name);
+
+    //         const aLabelEmpty = !a?.label || !String(a.label).trim();
+    //         const bLabelEmpty = !b?.label || !String(b.label).trim();
+
+    //         // 1️⃣ Non-buttons first
+    //         if (!aIsButton && bIsButton) return -1;
+    //         if (aIsButton && !bIsButton) return 1;
+
+    //         // 2️⃣ Among buttons → empty label first
+    //         if (aIsButton && bIsButton) {
+    //           if (aLabelEmpty && !bLabelEmpty) return -1;
+    //           if (!aLabelEmpty && bLabelEmpty) return 1;
+    //         }
+
+    //         // 3️⃣ Keep original order
+    //         return 0;
+    //       });
+
+    //       const combinedLinksHTML = combinedLinks.length
+    //         ? `
+    //                 <tr>
+    //                   <td style="padding-top:8px;">
+    //                     ${sortedLinks
+    //           .map(link => {
+    //             const isButton = BUTTON_TYPES.includes(link?.name);
+
+    //             return `
+    //                         <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+    //                           style="display:inline-table;margin-right:8px;margin-bottom:8px;">
+    //                           <tr>
+    //                             <td valign="middle">
+    //                               ${isButton
+    //                 ? `
+    //                         <a href="${link?.link}" target="_blank"
+    //                           style="
+    //                             display:inline-block;
+    //                             padding:${!!link?.label ? "4px 8px" : "0px 0px"};
+    //                             border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
+    //                             border-radius:22px;
+    //                             font-size:10px;
+    //                             font-family:Arial, sans-serif;
+    //                             color:#000;
+    //                             text-decoration:none;
+    //                             white-space:nowrap;
+    //                           ">
+    //                           ${link?.value
+    //                   ? `<img src="${link.value}" width="${!!link?.label ? 18 : 20}" style="vertical-align:middle;margin-right:6px;" />`
+    //                   : ""
+    //                 }
+    //                           ${link?.label}
+    //                         </a>`
+    //                 : `
+    //                         <a href="${link?.link}" target="_blank"
+    //                           style="
+    //                             display:inline-block;
+    //                             padding:0px 0px;
+    //                             border-radius:22px;
+    //                             font-size:13px;
+    //                             font-family:Arial, sans-serif;
+    //                             color:#000;
+    //                             text-decoration:none;
+    //                             white-space:nowrap;
+    //                           ">
+    //                           ${link?.value
+    //                   ? `<img src="${link.value}" width="${20}" style="vertical-align:middle;margin-right:6px;" />`
+    //                   : ""
+    //                 }
+    //                         </a>`
+    //               }
+    //                             </td >
+    //                           </tr >
+    //                         </table > `;
+    //           })
+    //           .join("")}
+    //                           </td>
+    //                 </tr>
+    //               `
+    //         : "";
+
+    //       /* ---------- BANNER (400px LOCKED) ---------- */
+    //       const bannerHTML =
+    //         typeof freshLinkForBanner === "string" &&
+    //           freshLinkForBanner.trim() &&
+    //           showBanner
+    //           ? `
+    // <tr>
+    //   <td style="padding-top:8px;">
+    //     <!--[if mso]>
+    //     <table width="400" cellpadding="0" cellspacing="0" border="0"><tr><td>
+    //     <![endif]-->
+
+    //     <img
+    //       src="${freshLinkForBanner}"
+    //       alt=""
+    //       width="400"
+    //       height="110"
+    //       style="
+    //         display:block;
+    //         width:400px;
+    //         height:110px;
+    //         border:0;
+    //       "
+    //     />
+
+    //     <!--[if mso]></td></tr></table><![endif]-->
+    //   </td>
+    // </tr>`
+    //           : "";
+
+    //       /* ---------- DISCLAIMER ---------- */
+    //       const disclaimerHTML = disclaimerField
+    //         ? `
+    // <tr>
+    //   <td style="padding-top:8px;">
+    //     <p style="
+    //       margin:0;
+    //       font-size:11px;
+    //       line-height:1.45;
+    //       color:#777;
+    //       font-family:Arial, sans-serif;">
+    //       ${disclaimerField.value.replace(/\n+/g, " ")}
+    //     </p>
+    //   </td>
+    // </tr>`
+    //         : "";
+
+    //       /* ---------- FINAL WRAPPER (HARD WIDTH) ---------- */
+    //       return `
+    // <table
+    //   cellpadding="0"
+    //   cellspacing="0"
+    //   border="0"
+    //   width="400"
+    //   style="
+    //     width:400px;
+    //     font-family:Arial, sans-serif;
+    //   "
+    // >
+    //   ${signatureImageHTML}
+    //   ${combinedLinksHTML}
+    //   ${bannerHTML}
+    //   ${disclaimerHTML}
+    // </table>
+    // `.trim();
+    //     }
+
+
+    export function generateEmailSignatureHTML(
       dataURL,
       allFields = [],
       freshLinkForBanner,
@@ -309,33 +506,25 @@
         .filter(i => ["teams", "meet", "calendly", "pdf", "url"].includes(i?.name))
         .filter(i => i?.show);
 
-      /* ---------- MAIN SIGNATURE CARD (400px) ---------- */
+      /* ---------- MAIN SIGNATURE IMAGE ---------- */
       const signatureImageHTML =
         typeof dataURL === "string" && dataURL.trim()
           ? `
-          <tr>
-            <td style="padding-bottom:8px;">
-              <img
-                src="${dataURL}"
-                alt="Signature"
-                width="400"
-                style="
-                  display:block;
-                  width:400px;
-                  height:auto;
-                  border:1px solid #ddd;
-                  border-radius:8px;
-                "
-              />
-            </td>
-          </tr>
-        `
+<tr>
+  <td style="padding-bottom:8px;">
+    <img
+      src="${dataURL}"
+      width="350"
+      style="display:block;width:350px;height:auto;border:1px solid #ddd;border-radius:8px;"
+      alt="Signature"
+    />
+  </td>
+</tr>`
           : "";
 
-      /* ---------- SOCIAL ICONS + CTA BUTTONS ---------- */
-      const combinedLinks = [...normalLinks, ...buttonLinks];
+      /* ---------- SOCIAL LINKS ---------- */
       const BUTTON_TYPES = ["teams", "meet", "calendly", "pdf", "url"];
-
+      const combinedLinks = [...normalLinks, ...buttonLinks];
       const sortedLinks = [...combinedLinks].sort((a, b) => {
         const aIsButton = BUTTON_TYPES.includes(a?.name);
         const bIsButton = BUTTON_TYPES.includes(b?.name);
@@ -357,68 +546,122 @@
         return 0;
       });
 
+      //   const combinedLinksHTML = combinedLinks.length
+      //     ? `
+      // <tr>
+      //   <td style="padding-top:8px;">
+      //     ${sortedLinks
+      //       .map(link => {
+      //         const isButton = BUTTON_TYPES.includes(link?.name) && !!link?.label;
+      //         return `
+      //           <a 
+      //             href="${link?.link}" target="_blank"
+      //             style="
+      //               color:#0b2e79ff;
+      //               text-decoration:none;
+      //               white-space:nowrap;
+      //             "
+      //           >
+      //             <table cellpadding="0" cellspacing="0" border="0"
+      //               style="display:inline-table;margin-right:8px;margin-bottom:8px;">
+      //               <tr>
+      //                 <td>
+      //                   <table cellpadding="0" cellspacing="0" border="0">
+      //                     <tr
+      //                     style="
+      //                       display:inline-block;
+      //                       padding:"4px 8px";
+      //                     "
+      //                     >
+      //                       <td valign="middle" style="padding-right:6px;">
+      //                         <img
+      //                           src="${link.value}"
+      //                           width="22"
+      //                           height="22"
+      //                           style="display:block;border:0;"
+      //                         />
+      //                       </td>
+      //                       <td valign="middle"
+      //                         style="
+      //                           font-family:Arial,sans-serif;
+      //                           font-size:10px;
+      //                           color:#0b2e79ff;
+      //                           line-height:12px;
+      //                           white-space:nowrap;
+      //                           text-decoration:none;
+      //                         ">
+      //                         <span style="text-decoration:none;color:#0b2e79ff;">
+      //                           ${link?.label || ""}
+      //                         </span>
+      //                       </td>
+      //                     </tr>
+      //                   </table>
+      //                 </td>
+      //               </tr>
+      //             </table>
+      //           </a>
+      //           `;
+      //       })
+      //       .join("")}
+      //             </td>
+      //           </tr>`
+      //     : "";
       const combinedLinksHTML = combinedLinks.length
         ? `
-                <tr>
-                  <td style="padding-top:8px;">
-                    ${sortedLinks
+<tr>
+  <td style="padding-top:8px;">
+    ${sortedLinks
           .map(link => {
-            const isButton = BUTTON_TYPES.includes(link?.name);
+            const isButton = BUTTON_TYPES.includes(link?.name) && !!link?.label;
 
             return `
-                        <table role="presentation" cellpadding="0" cellspacing="0" border="0"
-                          style="display:inline-table;margin-right:8px;margin-bottom:8px;">
-                          <tr>
-                            <td valign="middle">
-                              ${isButton
-                ? `
-                        <a href="${link?.link}" target="_blank"
-                          style="
-                            display:inline-block;
-                            padding:${!!link?.label ? "4px 8px" : "0px 0px"};
-                            border: ${!!link?.label ? "1px solid #0b2e79ff" : ""};
-                            border-radius:22px;
-                            font-size:10px;
-                            font-family:Arial, sans-serif;
-                            color:#000;
-                            text-decoration:none;
-                            white-space:nowrap;
-                          ">
-                          ${link?.value
-                  ? `<img src="${link.value}" width="${!!link?.label ? 18 : 20}" style="vertical-align:middle;margin-right:6px;" />`
-                  : ""
-                }
-                          ${link?.label}
-                        </a>`
-                : `
-                        <a href="${link?.link}" target="_blank"
-                          style="
-                            display:inline-block;
-                            padding:0px 0px;
-                            border-radius:22px;
-                            font-size:13px;
-                            font-family:Arial, sans-serif;
-                            color:#000;
-                            text-decoration:none;
-                            white-space:nowrap;
-                          ">
-                          ${link?.value
-                  ? `<img src="${link.value}" width="${20}" style="vertical-align:middle;margin-right:6px;" />`
-                  : ""
-                }
-                        </a>`
-              }
-                            </td >
-                          </tr >
-                        </table > `;
+<a href="${link?.link}" target="_blank" style="text-decoration:none;">
+  <table cellpadding="0" cellspacing="0" border="0"
+    style="display:inline-table;margin-right:8px;margin-bottom:8px;">
+    <tr>
+      <!-- BORDER GOES HERE -->
+      <td
+        style="
+          border:${isButton ? "1px solid #0b2e79ff" : 'none'};
+          border-radius:22px;
+          padding:${isButton ? "4px 8px" : "0px 0px"};
+        "
+      >
+        <table cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td valign="middle" style="padding-right:6px;">
+              <img
+                src="${link.value}"
+                width="22"
+                height="22"
+                style="display:block;border:0;"
+              />
+            </td>
+            <td valign="middle"
+              style="
+                font-family:Arial,sans-serif;
+                font-size:10px;
+                color:#0b2e79ff;
+                line-height:12px;
+                mso-line-height-rule:exactly;
+                white-space:nowrap;
+              ">
+              ${link?.label}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</a>`;
           })
           .join("")}
-                          </td>
-                </tr>
-              `
+  </td>
+</tr>`
         : "";
 
-      /* ---------- BANNER (400px LOCKED) ---------- */
+
+      /* ---------- BANNER (VML LOCKED) ---------- */
       const bannerHTML =
         typeof freshLinkForBanner === "string" &&
           freshLinkForBanner.trim() &&
@@ -427,23 +670,23 @@
 <tr>
   <td style="padding-top:8px;">
     <!--[if mso]>
-    <table width="400" cellpadding="0" cellspacing="0" border="0"><tr><td>
+    <v:rect xmlns:v="urn:schemas-microsoft-com:vml"
+      style="width:350px;height:110px"
+      fill="true" stroke="false">
+      <v:fill type="frame" src="${freshLinkForBanner}" />
+      <v:textbox inset="0,0,0,0"></v:textbox>
+    </v:rect>
     <![endif]-->
 
+    <!--[if !mso]><!-- -->
     <img
       src="${freshLinkForBanner}"
-      alt=""
-      width="400"
+      width="350"
       height="110"
-      style="
-        display:block;
-        width:400px;
-        height:110px;
-        border:0;
-      "
+      style="display:block;width:350px;height:110px;border:0;"
+      alt=""
     />
-
-    <!--[if mso]></td></tr></table><![endif]-->
+    <!--<![endif]-->
   </td>
 </tr>`
           : "";
@@ -453,41 +696,40 @@
         ? `
 <tr>
   <td style="padding-top:8px;">
-    <p style="
-      margin:0;
-      font-size:11px;
-      line-height:1.45;
-      color:#777;
-      font-family:Arial, sans-serif;">
+    <p style="margin:0;font-size:11px;line-height:1.45;color:#777;font-family:Arial,sans-serif;">
       ${disclaimerField.value.replace(/\n+/g, " ")}
     </p>
   </td>
 </tr>`
         : "";
 
-      /* ---------- FINAL WRAPPER (HARD WIDTH) ---------- */
+      /* ---------- FINAL WRAPPER (VML + FALLBACK) ---------- */
       return `
-<table
-  cellpadding="0"
-  cellspacing="0"
-  border="0"
-  width="400"
-  style="
-    width:400px;
-    font-family:Arial, sans-serif;
-  "
->
+<!--[if mso]>
+<v:rect xmlns:v="urn:schemas-microsoft-com:vml"
+  style="width:350px"
+  fill="true" stroke="false">
+<v:textbox inset="0,0,0,0">
+<![endif]-->
+
+<table cellpadding="0" cellspacing="0" border="0" width="350"
+  style="width:350px;font-family:Arial,sans-serif;">
   ${signatureImageHTML}
   ${combinedLinksHTML}
   ${bannerHTML}
   ${disclaimerHTML}
 </table>
+
+<!--[if mso]>
+</v:textbox>
+</v:rect>
+<![endif]-->
 `.trim();
     }
 
     /* ---------------------------------------------------------
-       Manual Debug Trigger
-       --------------------------------------------------------- */
+           Manual Debug Trigger
+           --------------------------------------------------------- */
     window.testCardByte = () =>
       window.applySignature({ completed: () => console.log("🧪 done") });
   </script>

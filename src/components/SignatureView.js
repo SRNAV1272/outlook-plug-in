@@ -55,7 +55,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
     async function renderSignatureOnServer(user) {
         try {
 
-            const res = await fetch("https://renderer.cardbyte.ai/render-signature", {
+            const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
@@ -79,17 +79,9 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             setLoad(true)
             try {
                 const apiResponse = await renderSignatureOnServer(user);
-                // setForm(apiResponse)
                 setForm(prevForm => apiResponse ?? prevForm);
-                console.log("asdkjsdkjahdsasd",
-                    user?.emailAddress,
-                    apiResponse
-                )
             } catch (e) {
                 console.error(e)
-                console.log("asdkjsdkjahdsasd",
-                    e?.response?.data?.message
-                )
                 setError(e?.response?.data?.message)
             } finally {
                 setLoad(false)
@@ -305,7 +297,6 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                                         columnGap: 5
                                                                     }}
                                                                 >
-                                                                    {console.log("field.value", field)}
                                                                     <img
                                                                         src={field?.value}
                                                                         width="25"
@@ -317,7 +308,6 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                     </Stack>
                                                 </Box>
                                             </Box>
-                                            {console.log("form?.bannerFileUrl", !!form?.bannerFileUrl, containerRef?.current?.offsetWidth)}
                                             {
                                                 (!!form?.bannerFileUrl &&
                                                     <Box
