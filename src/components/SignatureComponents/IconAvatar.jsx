@@ -59,7 +59,7 @@ export function generateEmailSignatureHTML(
   freshLinkForBanner,
   showBanner
 ) {
-  const CONTAINER_WIDTH = 370;
+  const CONTAINER_WIDTH = 600;
   const ICON_SIZE = 25;
 
   /* ---------- DISCLAIMER ---------- */
@@ -83,7 +83,7 @@ export function generateEmailSignatureHTML(
   <td style="padding-bottom:8px;">
     <img
       src="${dataURL}"
-      width="${CONTAINER_WIDTH}"
+      width="${CONTAINER_WIDTH*0.5}"
       style="display:block;border:1px solid #ddd;border-radius:8px;"
       alt="Signature"
     />
