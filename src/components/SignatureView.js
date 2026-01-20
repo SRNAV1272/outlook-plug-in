@@ -27,24 +27,24 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             const settings = Office.context.roamingSettings;
             // settings.set("defaultSignatureHtml", html)
 
-            const type = "text/html";
-            const blob = new Blob([html], { type });
-            // eslint-disable-next-line no-undef
-            const clipboardItem = new ClipboardItem({
-                [type]: blob,
-                "text/plain": new Blob([html], { type: "text/plain" })
-            });
-
-            await navigator.clipboard.write([clipboardItem]);
-            // toast.success("Signature copied! Now paste directly into Gmail/Outlook.");
-            // settings.saveAsync((result) => {
-            //     if (result.status === Office.AsyncResultStatus.Succeeded) {
-            //         console.log("✅ Signature saved");
-            //     } else {
-            //         console.error("❌ Failed to save", result.error);
-            //     }
+            // const type = "text/html";
+            // const blob = new Blob([html], { type });
+            // // eslint-disable-next-line no-undef
+            // const clipboardItem = new ClipboardItem({
+            //     [type]: blob,
+            //     "text/plain": new Blob([html], { type: "text/plain" })
             // });
-            // apply(html)
+
+            // await navigator.clipboard.write([clipboardItem]);
+            // toast.success("Signature copied! Now paste directly into Gmail/Outlook.");
+            settings.saveAsync((result) => {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    console.log("✅ Signature saved");
+                } else {
+                    console.error("❌ Failed to save", result.error);
+                }
+            });
+            apply(html)
             // toast?.success("Signature copied! Now paste directly into Gmail/Outlook.");
 
         } catch (error) {
