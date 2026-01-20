@@ -358,7 +358,7 @@ export function generateEmailSignatureHTML(
 
               <!-- ICON -->
               <td valign="middle" style="padding-right:8px;">
-                <img src="${link.value}" width="22" height="22"
+                <img src="${link.value}" width="32" height="32"
                     style="display:block;border:0;" />
               </td>
 
@@ -437,11 +437,11 @@ export function generateEmailSignatureHTML(
         ${topIcons
         .map(
           link => `
-<td style="padding-right:8px;padding-bottom:8px;">
-  <a href="${link.link}" target="_blank" style="text-decoration:none;">
-    <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
-  </a>
-</td>`
+        <td style="padding-right:8px;padding-bottom:8px;">
+          <a href="${link.link}" target="_blank" style="text-decoration:none;">
+            <img src="${link.value}" width="32" height="32" style="display:block;border:0;" />
+          </a>
+        </td>`
         )
         .join("")}
 
@@ -535,7 +535,7 @@ ${buttonRowsHTML}
   /* ---------- FINAL WRAPPER (VML + FALLBACK) ---------- */
   return `
     <table cellpadding="0" cellspacing="0" border="0" width="350"
-    style="width:350px;font-family:Arial,sans-serif;">
+    style="width:500px;font-family:Arial,sans-serif;">
     ${signatureImageHTML}
     ${combinedLinksHTML}
     ${bannerHTML}
