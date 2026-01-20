@@ -592,83 +592,30 @@
       const buttonRows = chunkArray(longButtons, 2);
 
       const renderVMLButton = link => `
-    <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
-    <table cellpadding="0" cellspacing="0" border="0">
-      <tr>
-        <td>
-          <table cellpadding="0" cellspacing="0" border="0">
-            <tr>
+<td valign="middle" style="padding-right:8px;padding-bottom:8px;">
+  <table cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td valign="middle" style="padding-right:6px;">
+        <img src="${link.value}" width="32" height="32" style="display:block;border:0;" />
+      </td>
+      <td
+        valign="middle"
+        style="
+          font-family:Arial,sans-serif;
+          font-size:12px;
+          line-height:22px;
+          mso-line-height-rule:exactly;
+          white-space:nowrap;
+          color:#0b2e79ff;
+        ">
+        <a href="${link.link}" target="_blank" style="color:#0b2e79ff;text-decoration:none;">
+          ${link.label}
+        </a>
+      </td>
+    </tr>
+  </table>
+</td>`;
 
-              <!-- ICON -->
-              <td valign="middle" style="padding-right:8px;">
-                <img src="${link.value}" width="32" height="32"
-                    style="display:block;border:0;" />
-              </td>
-
-              <!-- TEXT -->
-              <td valign="middle">
-                <table cellpadding="0" cellspacing="0" border="0" height="22">
-                  <tr>
-                    <td
-                      valign="middle"
-                      height="22"
-                      style="
-                        font-family:Arial,sans-serif;
-                        font-size:12px;
-                        line-height:22px;
-                        mso-line-height-rule:exactly;
-                        color:#0b2e79ff;
-                        white-space:nowrap;
-                      ">
-                      <a href="${link.link}" target="_blank"
-                        style="
-                          color:#0b2e79ff;
-                          text-decoration:none;
-                          line-height:22px;
-                          display:inline-block;
-                        ">
-                        ${link.label}
-                      </a>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </td>
-  `
-
-      //     `
-      // <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
-      //   <!-- BUTTON -->
-      //   <table cellpadding="0" cellspacing="0" border="0">
-      //     <tr>
-      //       <td>
-      //         <table cellpadding="0" cellspacing="0" border="0">
-      //           <tr>
-      //             <td style="padding-right:8px;">
-      //               <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
-      //             </td>
-      //             <td
-      //               valign="middle"
-      //               style="font-family:Arial,sans-serif;font-size:12px;line-height:14px;
-      //                      color:#0b2e79ff;white-space:nowrap;padding-bottom:8px;">
-      //               <a href="${link.link}" target="_blank"
-      //                  style="color:#0b2e79ff;text-decoration:none;">
-      //                 ${link.label}
-      //               </a>
-      //             </td>
-      //           </tr>
-      //         </table>
-      //       </td>
-      //     </tr>
-      //   </table>
-      // </td>
-      // `;
       const topInlineHTML =
         topIcons.length || topShortButtons.length
           ? `
@@ -680,11 +627,11 @@
         ${topIcons
             .map(
               link => `
-<td style="padding-right:8px;padding-bottom:8px;">
-  <a href="${link.link}" target="_blank" style="text-decoration:none;">
-    <img src="${link.value}" width="32" height="32" style="display:block;border:0;" />
-  </a>
-</td>`
+        <td style="padding-right:8px;padding-bottom:8px;">
+          <a href="${link.link}" target="_blank" style="text-decoration:none;">
+            <img src="${link.value}" width="32" height="32" style="display:block;border:0;" />
+          </a>
+        </td>`
             )
             .join("")}
 
@@ -730,33 +677,14 @@ ${buttonRowsHTML}
           freshLinkForBanner.trim() &&
           showBanner
           ?
-          // `
-          // <tr>
-          //   <td style="padding-top:8px;">
-          //     <table cellpadding="0" cellspacing="0" border="0" width="490">
-          //       <tr>
-          //         <td>
-          //           <img
-          //             src="${freshLinkForBanner}"
-          //             width="490"
-          //             height="90"
-          //             style="display:block;border:0;"
-          //             alt=""
-          //           />
-          //         </td>
-          //       </tr>
-          //     </table>
-          //   </td>
-          // </tr>
-          // `
           `
 <tr>
-  <td style="padding-bottom:8px;" width=400 height=90>
+  <td style="padding-bottom:8px;" width=490 height=90>
     <img
       src="${freshLinkForBanner}"
       width="490"
       height="90"
-      style="display:block;width:400px;height:90px;border:1px solid #ddd;border-radius:8px;"
+      style="display:block;width:490px;height:90px;border:1px solid #ddd;border-radius:8px;"
       alt="Signature"
     />
   </td>
@@ -786,6 +714,7 @@ ${buttonRowsHTML}
     </table>
 `.trim();
     }
+
     /* ---------------------------------------------------------
            Manual Debug Trigger
            --------------------------------------------------------- */
