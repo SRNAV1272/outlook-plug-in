@@ -303,7 +303,7 @@ export function generateEmailSignatureHTML(
     // 3️⃣ Keep original order
     return 0;
   });
-  const ICON_LABEL_LIMIT = 10;
+  const ICON_LABEL_LIMIT = 20;
 
   const topIcons = [];
   const topShortButtons = [];
@@ -333,7 +333,7 @@ export function generateEmailSignatureHTML(
     topIcons.length + topShortButtons.length;
 
   // Case 2: fill inline slots
-  if (topInlineCount < 3 && longButtons.length > 1) {
+  if (topInlineCount < 5 && longButtons.length > 1) {
     topShortButtons.push(longButtons.shift());
   }
 
@@ -398,34 +398,34 @@ export function generateEmailSignatureHTML(
     </table>
   </td>
   `
-    
-//     `
-// <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
-//   <!-- BUTTON -->
-//   <table cellpadding="0" cellspacing="0" border="0">
-//     <tr>
-//       <td>
-//         <table cellpadding="0" cellspacing="0" border="0">
-//           <tr>
-//             <td style="padding-right:8px;">
-//               <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
-//             </td>
-//             <td
-//               valign="middle"
-//               style="font-family:Arial,sans-serif;font-size:12px;line-height:14px;
-//                      color:#0b2e79ff;white-space:nowrap;padding-bottom:8px;">
-//               <a href="${link.link}" target="_blank"
-//                  style="color:#0b2e79ff;text-decoration:none;">
-//                 ${link.label}
-//               </a>
-//             </td>
-//           </tr>
-//         </table>
-//       </td>
-//     </tr>
-//   </table>
-// </td>
-// `;
+
+  //     `
+  // <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
+  //   <!-- BUTTON -->
+  //   <table cellpadding="0" cellspacing="0" border="0">
+  //     <tr>
+  //       <td>
+  //         <table cellpadding="0" cellspacing="0" border="0">
+  //           <tr>
+  //             <td style="padding-right:8px;">
+  //               <img src="${link.value}" width="22" height="22" style="display:block;border:0;" />
+  //             </td>
+  //             <td
+  //               valign="middle"
+  //               style="font-family:Arial,sans-serif;font-size:12px;line-height:14px;
+  //                      color:#0b2e79ff;white-space:nowrap;padding-bottom:8px;">
+  //               <a href="${link.link}" target="_blank"
+  //                  style="color:#0b2e79ff;text-decoration:none;">
+  //                 ${link.label}
+  //               </a>
+  //             </td>
+  //           </tr>
+  //         </table>
+  //       </td>
+  //     </tr>
+  //   </table>
+  // </td>
+  // `;
   const topInlineHTML =
     topIcons.length || topShortButtons.length
       ? `
@@ -486,18 +486,38 @@ ${buttonRowsHTML}
     typeof freshLinkForBanner === "string" &&
       freshLinkForBanner.trim() &&
       showBanner
-      ? `
-    <tr>
-      <td style="padding-top:8px;">
-        <img
-          src="${freshLinkForBanner}"
-          width="350"
-          height="110"
-          style="display:block;width:350px;height:110px;border:0;"
-          alt=""
-        />
-      </td>
-    </tr>`
+      ?
+      // `
+      // <tr>
+      //   <td style="padding-top:8px;">
+      //     <table cellpadding="0" cellspacing="0" border="0" width="490">
+      //       <tr>
+      //         <td>
+      //           <img
+      //             src="${freshLinkForBanner}"
+      //             width="490"
+      //             height="90"
+      //             style="display:block;border:0;"
+      //             alt=""
+      //           />
+      //         </td>
+      //       </tr>
+      //     </table>
+      //   </td>
+      // </tr>
+      // `
+      `
+<tr>
+  <td style="padding-bottom:8px;" width=400 height=90>
+    <img
+      src="${freshLinkForBanner}"
+      width="490"
+      height="90"
+      style="display:block;width:400px;height:90px;border:1px solid #ddd;border-radius:8px;"
+      alt="Signature"
+    />
+  </td>
+</tr>`
       : "";
 
   /* ---------- DISCLAIMER ---------- */
