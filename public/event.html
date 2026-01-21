@@ -253,7 +253,7 @@
         await insertSignatureWithoutCursorError(item, finalHtml);
 
         // ✅ Mark success
-        SIGNATURE_STATE = "applied";
+        SIGNATURE_STATE = "idle";
 
         console.log("✅ Signature applied", finalHtml);
       } catch (err) {
