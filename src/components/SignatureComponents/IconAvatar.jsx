@@ -83,7 +83,7 @@ export function generateEmailSignatureHTML(
   <td style="padding-bottom:8px;">
     <img
       src="${dataURL}"
-      width="${CONTAINER_WIDTH*0.5}"
+      width="${CONTAINER_WIDTH*0.7}"
       style="display:block;border:1px solid #ddd;border-radius:8px;"
       alt="Signature"
     />
