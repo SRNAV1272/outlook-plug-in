@@ -109,7 +109,6 @@ export function generateEmailSignatureHTML(
       style="
         padding-right:8px;
         padding-bottom:8px;
-        mso-padding-alt:0;
       "
     >
       <a
