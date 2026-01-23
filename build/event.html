@@ -526,18 +526,40 @@
           : "";
 
       /* ---------- ICON ONLY RENDERER ---------- */
+      // const renderIcon = link => `
+      //   <td style="padding-right:8px;padding-bottom:8px;">
+      //     <a href="${link.link}" target="_blank" style="text-decoration:none;">
+      //       <img
+      //         src="${link.value}"
+      //         width="${ICON_SIZE}"
+      //         height="${ICON_SIZE}"
+      //         style="display:block;border:0;"
+      //         alt=""
+      //       />
+      //     </a>
+      //   </td>`;
       const renderIcon = link => `
-<td style="padding-right:8px;padding-bottom:8px;">
-  <a href="${link.link}" target="_blank" style="text-decoration:none;">
-    <img
-      src="${link.value}"
-      width="${ICON_SIZE}"
-      height="${ICON_SIZE}"
-      style="display:block;border:0;"
-      alt=""
-    />
-  </a>
-</td>`;
+            <td
+              style="
+                padding-right:8px;
+                padding-bottom:8px;
+                mso-padding-alt:0;
+              "
+            >
+              <a
+                href="${link.link}"
+                style="display:inline-block;text-decoration:none;"
+              >
+                <img
+                  src="${link.value}"
+                  width="${ICON_SIZE}"
+                  height="${ICON_SIZE}"
+                  style="display:block;border:0;outline:none;text-decoration:none;"
+                  alt=""
+                />
+              </a>
+            </td>
+        `;
 
       /* ---------- BUTTON RENDERER ---------- */
       const renderButton = link => `
