@@ -83,7 +83,7 @@ export function generateEmailSignatureHTML(
   <td style="padding-bottom:8px;">
     <img
       src="${dataURL}"
-      width="${CONTAINER_WIDTH*0.7}"
+      width="${CONTAINER_WIDTH * 0.7}"
       style="display:block;border:1px solid #ddd;border-radius:8px;"
       alt="Signature"
     />
@@ -92,18 +92,41 @@ export function generateEmailSignatureHTML(
       : "";
 
   /* ---------- ICON ONLY RENDERER ---------- */
+  //   const renderIcon = link => `
+  // <td style="padding-right:8px;padding-bottom:8px;">
+  //   <a href="${link.link}" target="_blank" style="text-decoration:none;">
+  //     <img
+  //       src="${link.value}"
+  //       width="${ICON_SIZE}"
+  //       height="${ICON_SIZE}"
+  //       style="display:block;border:0;"
+  //       alt=""
+  //     />
+  //   </a>
+  // </td>`;
   const renderIcon = link => `
-<td style="padding-right:8px;padding-bottom:8px;">
-  <a href="${link.link}" target="_blank" style="text-decoration:none;">
-    <img
-      src="${link.value}"
-      width="${ICON_SIZE}"
-      height="${ICON_SIZE}"
-      style="display:block;border:0;"
-      alt=""
-    />
-  </a>
-</td>`;
+    <td
+      style="
+        padding-right:8px;
+        padding-bottom:8px;
+        mso-padding-alt:0;
+      "
+    >
+      <a
+        href="${link.link}"
+        style="display:inline-block;text-decoration:none;"
+      >
+        <img
+          src="${link.value}"
+          width="${ICON_SIZE}"
+          height="${ICON_SIZE}"
+          style="display:block;border:0;outline:none;text-decoration:none;"
+          alt=""
+        />
+      </a>
+    </td>
+    `;
+
 
   /* ---------- BUTTON RENDERER ---------- */
   const renderButton = link => `
@@ -223,6 +246,27 @@ export function generateEmailSignatureHTML(
   ${buttonRowsHTML}
   ${bannerHTML}
   ${disclaimerHTML}
+  <tr>
+  <td style="padding-top:6px;">
+  <table cellpadding="0" cellspacing="0" border="0">
+<tr>
+<td
+  rowspan="1"
+  colspan="2"
+  align="left"
+  valign="middle"
+>
+  <span style="
+    font-family: Lucida Sans Unicode;
+    font-size: 16px;
+    font-weight: bold;
+    color: #1A73E8;
+    text-decoration: underline;
+  ">
+    John Doe Lucida Sans Unicode
+  </span>
+</td>
+</tr>
 </table>
 `.trim();
 }
