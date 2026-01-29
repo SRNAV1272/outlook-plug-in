@@ -271,31 +271,31 @@ export function IconAvatar(
 // }
 
 export function generateEmailSignatureHTML(
-    dataURL,
-    allFields = [],
-    freshLinkForBanner,
-    showBanner
+  dataURL,
+  allFields = [],
+  freshLinkForBanner,
+  showBanner
 ) {
-    const CONTAINER_WIDTH = 600;
-    const ICON_SIZE = 25;
+  const CONTAINER_WIDTH = 600;
+  const ICON_SIZE = 25;
 
-    /* ---------- DISCLAIMER ---------- */
-    const disclaimerField = allFields.find(
-        f => f.key === "disclaimer" && f.show
-    );
+  /* ---------- DISCLAIMER ---------- */
+  const disclaimerField = allFields.find(
+    f => f.key === "disclaimer" && f.show
+  );
 
-    /* ---------- SOCIAL LINKS ---------- */
-    const socialLinks = allFields
-        .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
-        .filter(i => i?.show);
+  /* ---------- SOCIAL LINKS ---------- */
+  const socialLinks = allFields
+    .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
+    .filter(i => i?.show);
 
-    const iconOnlyLinks = socialLinks.filter(i => !i?.label);
-    const buttonLinks = socialLinks.filter(i => i?.label);
+  const iconOnlyLinks = socialLinks.filter(i => !i?.label);
+  const buttonLinks = socialLinks.filter(i => i?.label);
 
-    /* ---------- SIGNATURE IMAGE ---------- */
-    const signatureImageHTML =
-        typeof dataURL === "string" && !!dataURL.trim()
-            ? `
+  /* ---------- SIGNATURE IMAGE ---------- */
+  const signatureImageHTML =
+    typeof dataURL === "string" && !!dataURL.trim()
+      ? `
 <tr>
   <td style="padding-bottom:8px;">
     <img
@@ -305,10 +305,10 @@ export function generateEmailSignatureHTML(
     />
   </td>
 </tr>`
-            : "";
+      : "";
 
-    /* ---------- ICON ONLY RENDERER ---------- */
-    const renderIcon = link => `
+  /* ---------- ICON ONLY RENDERER ---------- */
+  const renderIcon = link => `
     <td
       style="
         padding-right:8px;
@@ -331,8 +331,8 @@ export function generateEmailSignatureHTML(
     `;
 
 
-    /* ---------- BUTTON RENDERER ---------- */
-    const renderButton = link => `
+  /* ---------- BUTTON RENDERER ---------- */
+  const renderButton = link => `
 <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
   <table cellpadding="0" cellspacing="0" border="0">
     <tr>
@@ -364,13 +364,13 @@ export function generateEmailSignatureHTML(
   </table>
 </td>`;
 
-    /* ---------- TOP ROW (icons + max 2 buttons) ---------- */
-    const topButtons = buttonLinks.slice(0, 2);
-    const remainingButtons = buttonLinks.slice(2);
+  /* ---------- TOP ROW (icons + max 2 buttons) ---------- */
+  const topButtons = buttonLinks.slice(0, 2);
+  const remainingButtons = buttonLinks.slice(2);
 
-    const topRowHTML =
-        iconOnlyLinks.length || topButtons.length
-            ? `
+  const topRowHTML =
+    iconOnlyLinks.length || topButtons.length
+      ? `
 <tr>
   <td style="padding-top:8px;padding-bottom:6px;">
     <table cellpadding="0" cellspacing="0" border="0">
@@ -381,16 +381,16 @@ export function generateEmailSignatureHTML(
     </table>
   </td>
 </tr>`
-            : "";
+      : "";
 
-    /* ---------- REMAINING BUTTON ROWS (2 PER ROW) ---------- */
-    const chunkArray = (arr, size) =>
-        arr.reduce((acc, _, i) =>
-            i % size ? acc : [...acc, arr.slice(i, i + size)], []);
+  /* ---------- REMAINING BUTTON ROWS (2 PER ROW) ---------- */
+  const chunkArray = (arr, size) =>
+    arr.reduce((acc, _, i) =>
+      i % size ? acc : [...acc, arr.slice(i, i + size)], []);
 
-    const buttonRowsHTML = chunkArray(remainingButtons, 2)
-        .map(
-            row => `
+  const buttonRowsHTML = chunkArray(remainingButtons, 2)
+    .map(
+      row => `
 <tr>
   <td style="padding-top:6px;">
     <table cellpadding="0" cellspacing="0" border="0">
@@ -400,14 +400,14 @@ export function generateEmailSignatureHTML(
     </table>
   </td>
 </tr>`
-        )
-        .join("");
+    )
+    .join("");
 
-    /* ---------- BANNER (SAME AS SIGNATURE) ---------- */
-    const bannerHTML =
-        typeof freshLinkForBanner === "string" &&
-            !!freshLinkForBanner.trim()
-            ? `
+  /* ---------- BANNER (SAME AS SIGNATURE) ---------- */
+  const bannerHTML =
+    typeof freshLinkForBanner === "string" &&
+      !!freshLinkForBanner.trim() && freshLinkForBanner !== "null"
+      ? `
 <tr>
   <td style="padding-top:8px;padding-bottom:8px;">
     <img
@@ -417,11 +417,11 @@ export function generateEmailSignatureHTML(
     />
   </td>
 </tr>`
-            : "";
-
-    /* ---------- DISCLAIMER ---------- */
-    const disclaimerHTML = disclaimerField
-        ? `
+      : "";
+  console.log("asdashdakjshdksa", bannerHTML, freshLinkForBanner.trim())
+  /* ---------- DISCLAIMER ---------- */
+  const disclaimerHTML = disclaimerField
+    ? `
 <tr>
   <td style="padding-top:8px;">
     <p style="
@@ -434,10 +434,10 @@ export function generateEmailSignatureHTML(
     </p>
   </td>
 </tr>`
-        : "";
+    : "";
 
-    /* ---------- FINAL HTML (RESPONSIVE) ---------- */
-    return `
+  /* ---------- FINAL HTML (RESPONSIVE) ---------- */
+  return `
 <table cellpadding="0" cellspacing="0" border="0"
   style="width:100%;max-width:${CONTAINER_WIDTH}px;font-family:Arial,sans-serif;">
   ${signatureImageHTML}
