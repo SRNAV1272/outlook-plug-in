@@ -300,14 +300,15 @@ export function generateEmailSignatureHTML(
   <td style="padding-bottom:8px;">
     <img
       src="${dataURL}"
-      width="${CONTAINER_WIDTH * 0.7}"
-      style="display:block;border:1px solid #ddd;border-radius:8px;"
+      style="display:block;width:100%;max-width:${CONTAINER_WIDTH}px;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;"
       alt="Signature"
     />
   </td>
 </tr>`
       : "";
+
   console.log("sdjhajdshadshkjasd", signatureImageHTML, freshLinkForBanner)
+
   /* ---------- ICON ONLY RENDERER ---------- */
   const renderIcon = link => `
     <td
@@ -404,7 +405,7 @@ export function generateEmailSignatureHTML(
     )
     .join("");
 
-  /* ---------- BANNER (TRULY RESPONSIVE) ---------- */
+  /* ---------- BANNER (SAME AS SIGNATURE) ---------- */
   const bannerHTML =
     typeof freshLinkForBanner === "string" &&
       freshLinkForBanner.trim()
@@ -413,8 +414,7 @@ export function generateEmailSignatureHTML(
   <td style="padding-top:8px;padding-bottom:8px;">
     <img
       src="${freshLinkForBanner}"
-      width="${CONTAINER_WIDTH}"
-      style="display:block;width:100%;max-width:100%;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;"
+      style="display:block;width:100%;max-width:${CONTAINER_WIDTH}px;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;"
       alt="Banner"
     />
   </td>
@@ -438,11 +438,10 @@ export function generateEmailSignatureHTML(
 </tr>`
     : "";
 
-  /* ---------- FINAL HTML ---------- */
+  /* ---------- FINAL HTML (RESPONSIVE) ---------- */
   return `
 <table cellpadding="0" cellspacing="0" border="0"
-  width="${CONTAINER_WIDTH}"
-  style="width:${CONTAINER_WIDTH}px;font-family:Arial,sans-serif;">
+  style="width:100%;max-width:${CONTAINER_WIDTH}px;font-family:Arial,sans-serif;">
   ${signatureImageHTML}
   ${topRowHTML}
   ${buttonRowsHTML}
@@ -451,10 +450,3 @@ export function generateEmailSignatureHTML(
 </table>
 `.trim();
 }
-
-
-
-
-
-
-
