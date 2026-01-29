@@ -244,9 +244,9 @@
         const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
 
         const finalHtml = generateEmailSignatureHTML(
-          `${emailSignatureUrl}?v=${Date.now()}`,
+          `${emailSignatureUrl}`,
           elements,
-          `${bannerFileUrl}?v=${Date.now()}`,
+          `${bannerFileUrl}`,
           !!elements?.find(i => i?.key === "banner")?.link
         );
 
