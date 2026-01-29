@@ -16,8 +16,8 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
     const [load, setLoad] = useState(false)
     const applyHTML = async () => {
         try {
-            const freshLink = `${form?.emailSignatureUrl}?v=${Date.now()}`
-            const freshLinkForBanner = `${form?.bannerFileUrl}?v=${Date.now()}`
+            const freshLink = `${form?.emailSignatureUrl}`
+            const freshLinkForBanner = `${form?.bannerFileUrl}`
             const html = generateEmailSignatureHTML(
                 freshLink,
                 form?.elements,
@@ -123,7 +123,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                 {
                     load ?
                         <Paper
-                            elevation={5}
+                            // elevation={5}
                             sx={{
                                 p: 1,
                                 borderRadius: 8,
@@ -208,6 +208,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                             <Box
                                                 component={Paper}
                                                 ref={containerRef}
+                                                elevation={0}
                                                 sx={{
                                                     width: "100%",
                                                     maxWidth: 800,
@@ -312,7 +313,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                 (!!form?.bannerFileUrl &&
                                                     <Box
                                                         width={containerRef?.current ? containerRef?.current.offsetWidth : '100%'}
-                                                        height={containerRef?.current ? containerRef?.current.offsetWidth * 0.30 : '30%'}
+                                                        // height={containerRef?.current ? containerRef?.current.offsetWidth * 0.30 : '30%'}
                                                         mt={1}
                                                         overflow="hidden"
                                                     >
@@ -320,7 +321,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                             src={!!form?.bannerFileUrl ? form?.bannerFileUrl : form?.bannerFileUrl}
                                                             style={{
                                                                 width: "100%",
-                                                                height: "100%",
+                                                                height: "auto",
                                                                 // objectFit: "contain",   // ✅ preserves aspect ratio
                                                                 display: "block",
                                                                 borderRadius: "8px"
