@@ -276,7 +276,7 @@ export function generateEmailSignatureHTML(
   freshLinkForBanner,
   showBanner
 ) {
-  const CONTAINER_WIDTH = 600;
+  const CONTAINER_WIDTH = 400;
   const ICON_SIZE = 25;
 
   /* ---------- DISCLAIMER ---------- */
