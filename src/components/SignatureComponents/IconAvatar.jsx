@@ -307,7 +307,7 @@ export function generateEmailSignatureHTML(
   </td>
 </tr>`
       : "";
-
+  console.log("sdjhajdshadshkjasd", signatureImageHTML, freshLinkForBanner)
   /* ---------- ICON ONLY RENDERER ---------- */
   const renderIcon = link => `
     <td
@@ -404,18 +404,17 @@ export function generateEmailSignatureHTML(
     )
     .join("");
 
-  /* ---------- BANNER (FIXED FOR CLARITY) ---------- */
+  /* ---------- BANNER (TRULY RESPONSIVE) ---------- */
   const bannerHTML =
     typeof freshLinkForBanner === "string" &&
-      freshLinkForBanner.trim() &&
-      showBanner
+      freshLinkForBanner.trim()
       ? `
 <tr>
   <td style="padding-top:8px;padding-bottom:8px;">
     <img
       src="${freshLinkForBanner}"
       width="${CONTAINER_WIDTH}"
-      style="display:block;max-width:${CONTAINER_WIDTH}px;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;"
+      style="display:block;width:100%;max-width:100%;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;"
       alt="Banner"
     />
   </td>
