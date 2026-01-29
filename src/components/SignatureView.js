@@ -16,8 +16,8 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
     const [load, setLoad] = useState(false)
     const applyHTML = async () => {
         try {
-            const freshLink = `${form?.emailSignatureUrl}`
-            const freshLinkForBanner = `${form?.bannerFileUrl}`
+            const freshLink = form?.emailSignatureUrl === null ? "" : `${form?.emailSignatureUrl}?v=${Date.now()}`
+            const freshLinkForBanner = form?.bannerFileUrl === null ? "" : `${form?.bannerFileUrl}?v=${Date.now()}`
             const html = generateEmailSignatureHTML(
                 freshLink,
                 form?.elements,
