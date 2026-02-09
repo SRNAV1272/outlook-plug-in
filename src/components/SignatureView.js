@@ -16,14 +16,15 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
     const [load, setLoad] = useState(false)
     const applyHTML = async () => {
         try {
-            const freshLink = `${form?.emailSignatureUrl}`
-            const freshLinkForBanner = `${form?.bannerFileUrl}`
-            const html = generateEmailSignatureHTML(
-                freshLink,
-                form?.elements,
-                freshLinkForBanner,
-                !!form?.elements?.find(i => i?.key === "banner")?.link
-            );
+            // const freshLink = `${form?.emailSignatureUrl}`
+            // const freshLinkForBanner = `${form?.bannerFileUrl}`
+            // const html = generateEmailSignatureHTML(
+            //     freshLink,
+            //     form?.elements,
+            //     freshLinkForBanner,
+            //     !!form?.elements?.find(i => i?.key === "banner")?.link
+            // );
+            console.log("sdajsdkjsagdjasgd", form?.finalHtml)
             const settings = Office.context.roamingSettings;
             // settings.set("defaultSignatureHtml", html)
 
@@ -44,7 +45,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                     console.error("❌ Failed to save", result.error);
                 }
             });
-            apply(html)
+            apply(form?.finalHtml)
             // toast?.success("Signature copied! Now paste directly into Gmail/Outlook.");
 
         } catch (error) {
