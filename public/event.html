@@ -304,8 +304,18 @@
             "
             ></tr></table>
         `
-  
+
         const wrappedHtml = wrapForOutlook(html);
+
+        // Check if content exceeds safe limit (usually ~10KB)
+        const MAX_CHUNK_SIZE = 8000; // Conservative limit
+        const htmlString = wrappedHtml.toString();
+
+        if (htmlString.length > MAX_CHUNK_SIZE) {
+          console.warn(`HTML size ${htmlString.length} bytes exceeds safe limit. Using chunked approach.`);
+          insertInChunks(item, htmlString, resolve, reject);
+          return;
+        }
 
         // ✅ Modern Outlook (Mailbox ≥1.10)
         if (item.body.appendOnSendAsync) {
@@ -358,6 +368,63 @@
           }
         );
       });
+    }
+    function insertInChunks(item, htmlString, resolve, reject) {
+      const CHUNK_SIZE = 7000; // Smaller chunks for safety
+
+      // Split HTML into smaller chunks at reasonable breakpoints
+      const chunks = [];
+      let start = 0;
+
+      while (start < htmlString.length) {
+        // Try to break at tag boundaries for cleaner insertion
+        let end = Math.min(start + CHUNK_SIZE, htmlString.length);
+
+        // Look for a closing tag to break at
+        if (end < htmlString.length) {
+          const slice = htmlString.substring(end - 50, end + 50);
+          const tagMatch = slice.match(/<\/[^>]+>/);
+          if (tagMatch) {
+            const matchIndex = slice.indexOf(tagMatch[0]);
+            end = end - 50 + matchIndex + tagMatch[0].length;
+          }
+        }
+
+        chunks.push(htmlString.substring(start, end));
+        start = end;
+      }
+
+      // Insert chunks sequentially
+      let currentChunk = 0;
+
+      function insertNextChunk() {
+        if (currentChunk >= chunks.length) {
+          console.log("✅ All chunks inserted successfully");
+          resolve();
+          return;
+        }
+
+        const chunk = chunks[currentChunk];
+        console.log(`Inserting chunk ${currentChunk + 1}/${chunks.length} (${chunk.length} bytes)`);
+
+        item.body.setSelectedDataAsync(
+          chunk,
+          { coercionType: Office.CoercionType.Html },
+          (result) => {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+              currentChunk++;
+
+              // Small delay between chunks to prevent race conditions
+              setTimeout(insertNextChunk, 100);
+            } else {
+              console.error(`Failed to insert chunk ${currentChunk + 1}:`, result.error);
+              reject(result.error);
+            }
+          }
+        );
+      }
+
+      insertNextChunk();
     }
 
     function wrapForOutlook(innerHtml) {
