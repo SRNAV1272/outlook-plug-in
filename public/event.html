@@ -79,6 +79,232 @@
 
     function insertAtCursor(item, html) {
       return new Promise((resolve, reject) => {
+        html = `
+        <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border-spacing:0;margin:0 0;padding:0 0;font-family:Arial,Helvetica,sans-serif;background-color:#ffffff"><tr
+            style="
+                padding:0px;
+                border:none;
+                margin:0;
+            "
+            ><td
+                
+                rowspan="2"
+                width="150"
+                height=""
+                style="
+                    padding:2px;
+                    vertical-align:middle;
+                    text-align:center;
+                    border:none;
+                    margin:0 0;;
+                "
+            >
+                            <img
+                                src="
+        data:image/gif;base64,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
+    "
+                                width="80"
+                                height="80"
+                                style="display:inline-block;border:2px solid #d1d5db;border-radius:8px;text-align:center;"
+                            /></td><td
+                
+                
+                width=""
+                height=""
+                style="
+                    padding:0px;
+                    vertical-align:bottom;
+                    text-align:left;
+                    border:none;
+                    margin:0 0;;
+                "
+            ><p style="font-family:Arial, Helvetica, sans-serif;font-size:16px;color:#2d6cd2;line-height:1;font-weight:bold;margin:0;padding:0;padding-right:5px;padding-left:5px;text-align:left">
+                            John A. Smith
+                        </p></td></tr><tr
+            style="
+                padding:0px;
+                border:none;
+                margin:0;
+            "
+            ><td
+                
+                
+                width=""
+                height=""
+                style="
+                    padding:0px;
+                    vertical-align:top;
+                    text-align:left;
+                    border:none;
+                    margin:0 0;;
+                "
+            ><p style="font-family:Arial, Helvetica, sans-serif;font-size:14px;color:#134181;line-height:1;font-weight:bold;margin:0;padding:0;padding-right:5px;padding-left:5px;text-align:left">
+                            Senior Marketing Manager
+                        </p></td></tr><tr
+            style="
+                padding:0px;
+                border:none;
+                margin:0;
+            "
+            ><td
+                
+                
+                width="100"
+                height=""
+                style="
+                    padding:0px;
+                    vertical-align:top;
+                    text-align:left;
+                    border:none;
+                    margin:0 0;;
+                "
+            >
+                                    <table cellpadding="0" cellspacing="0" border="0"
+                                        style="border-collapse:collapse;margin:0 0;">
+                                        <tr>
+                                
+                                        <td style="margin:0;padding:0;padding-right:6px;padding-left:6px;vertical-align:middle;white-space:wrap;word-wrap:break-word;">
+                                            <span style="font-family:Rockwell, Courier Bold, Courier, Georgia, Times, Times New Roman, serif;font-size:13px;color:#ce2c2c;font-weight:bold;line-height:1.3;word-wrap:break-word;overflow-wrap:break-word;word-break:break-word;">
+                                                Tel:
+                                            </span>
+                                        </td>
+                                    
+                                    <td style="margin:0;padding:0;padding-right:10px;vertical-align:middle;word-wrap:break-word;">
+                                        <span style="font-family:Rockwell, Courier Bold, Courier, Georgia, Times, Times New Roman, serif;font-size:13px;color:#ce2c2c;font-weight:bold;line-height:1.3;word-wrap:break-word;overflow-wrap:break-word;word-break:break-word;">
+                                            +91 7024899020
+                                        </span>
+                                    </td>
+                                
+                                        </tr>
+                                    </table>
+                                </td><td
+                
+                
+                width=""
+                height=""
+                style="
+                    padding:0px;
+                    vertical-align:top;
+                    text-align:left;
+                    border:none;
+                    margin:0 0;;
+                "
+            >
+                                    <table cellpadding="0" cellspacing="0" border="0"
+                                        style="border-collapse:collapse;margin:0 0;">
+                                        <tr>
+                                
+                                        <td style="margin:0;padding:0;padding-right:6px;padding-left:6px;vertical-align:middle;white-space:wrap;word-wrap:break-word;">
+                                            <span style="font-family:Arial, Helvetica, sans-serif;font-size:13px;color:#000000;line-height:1.3;word-wrap:break-word;overflow-wrap:break-word;word-break:break-word;">
+                                                Mobile:
+                                            </span>
+                                        </td>
+                                    
+                                    <td style="margin:0;padding:0;padding-right:10px;vertical-align:middle;word-wrap:break-word;">
+                                        <span style="font-family:Arial, Helvetica, sans-serif;font-size:13px;color:#000000;line-height:1.3;word-wrap:break-word;overflow-wrap:break-word;word-break:break-word;">
+                                            +91 7024899020
+                                        </span>
+                                    </td>
+                                
+                                        </tr>
+                                    </table>
+                                </td></tr><tr
+            style="
+                padding:0px;
+                border:none;
+                margin:0;
+            "
+            ><td
+                
+                
+                width=""
+                height=""
+                style="
+                    padding:0px;
+                    vertical-align:top;
+                    text-align:left;
+                    border:none;
+                    margin:0 0;;
+                "
+            >
+                                    <table cellpadding="0" cellspacing="0" border="0"
+                                        style="border-collapse:collapse;margin:0 0;">
+                                        <tr>
+                                
+                                        <td style="margin:0;padding:0;padding-right:6px;padding-left:6px;vertical-align:middle;white-space:wrap;word-wrap:break-word;">
+                                            <span style="font-family:Arial, Helvetica, sans-serif;font-size:13px;color:#000000;line-height:1.3;word-wrap:break-word;overflow-wrap:break-word;word-break:break-word;">
+                                                Web:
+                                            </span>
+                                        </td>
+                                    
+                                    <td style="margin:0;padding:0;padding-right:10px;vertical-align:middle;word-wrap:break-word;">
+                                        <span style="font-family:Arial, Helvetica, sans-serif;font-size:13px;color:#000000;line-height:1.3;word-wrap:break-word;overflow-wrap:break-word;word-break:break-word;">
+                                            www.acme.com
+                                        </span>
+                                    </td>
+                                
+                                        </tr>
+                                    </table>
+                                </td><td
+                colspan="2"
+                
+                width=""
+                height=""
+                style="
+                    padding:0px;
+                    vertical-align:top;
+                    text-align:left;
+                    border:none;
+                    margin:0 0;;
+                "
+            ><table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0;padding:0;"><tr></tr></table>
+                                    <table cellpadding="0" cellspacing="0" border="0"
+                                        style="border-collapse:collapse;margin:0 0;">
+                                        <tr>
+                                
+                                        <td style="margin:0;padding:0;padding-right:6px;padding-left:6px;vertical-align:middle;white-space:wrap;word-wrap:break-word;">
+                                            <span style="font-family:Arial, Helvetica, sans-serif;font-size:13px;color:#000000;line-height:1.3;word-wrap:break-word;overflow-wrap:break-word;word-break:break-word;">
+                                                Email:
+                                            </span>
+                                        </td>
+                                    
+                                    <td style="margin:0;padding:0;padding-right:10px;vertical-align:middle;word-wrap:break-word;">
+                                        <span style="font-family:Arial, Helvetica, sans-serif;font-size:13px;color:#000000;line-height:1.3;word-wrap:break-word;overflow-wrap:break-word;word-break:break-word;">
+                                            john.smith@acme.com
+                                        </span>
+                                    </td>
+                                
+                                        </tr>
+                                    </table>
+                                </td></tr><tr
+            style="
+                padding:0px;
+                border:none;
+                margin:0;
+            "
+            ><td
+                colspan="2"
+                
+                width="300"
+                height=""
+                style="
+                    padding:2px;
+                    vertical-align:top;
+                    text-align:left;
+                    border:none;
+                    margin:0 0;;
+                "
+            ><p style="font-family:Arial, Helvetica, sans-serif;font-size:11px;color:#666;line-height:1.4;font-style:italic;margin:0;padding:0;margin:0;font-style:italic">
+                            This email and any attachments are confidential and may be privileged. If you are not the intended recipient, please delete it and notify us immediately.
+                        </p></td></tr><tr
+            style="
+                padding:0px;
+                border:none;
+                margin:0;
+            "
+            ></tr></table>
+        `
+
         const wrappedHtml = wrapForOutlook(html);
         const htmlString = wrappedHtml.toString();
 
@@ -91,13 +317,14 @@
           return;
         }
 
-        // Original insertion logic for normal sizes
+        // ✅ Modern Outlook (Mailbox ≥1.10)
         if (item.body.appendOnSendAsync) {
           item.body.appendOnSendAsync(
             wrappedHtml,
             { coercionType: Office.CoercionType.Html },
             (result) => {
               if (result.status === Office.AsyncResultStatus.Succeeded) {
+                console.log("✅ Signature appended using appendOnSendAsync");
                 resolve();
               } else {
                 console.error("appendOnSendAsync failed:", result.error);
@@ -108,12 +335,14 @@
           return;
         }
 
+        // ✅ Legacy fallback (insert at cursor)
         if (item.body.setSelectedDataAsync) {
           item.body.setSelectedDataAsync(
             wrappedHtml,
             { coercionType: Office.CoercionType.Html },
             (result) => {
               if (result.status === Office.AsyncResultStatus.Succeeded) {
+                console.log("✅ Signature inserted using setSelectedDataAsync");
                 resolve();
               } else {
                 console.error("setSelectedDataAsync failed:", result.error);
@@ -124,11 +353,13 @@
           return;
         }
 
+        // 🧩 Absolute fallback for old clients
         item.body.setAsync(
           wrappedHtml,
           { coercionType: Office.CoercionType.Html },
           (result) => {
             if (result.status === Office.AsyncResultStatus.Succeeded) {
+              console.log("✅ Signature set using setAsync");
               resolve();
             } else {
               console.error("setAsync failed:", result.error);
@@ -136,7 +367,10 @@
             }
           }
         );
+
       });
+      // });
+
     }
 
     function insertHtmlWithTagPreservation(item, htmlString, resolve, reject) {
