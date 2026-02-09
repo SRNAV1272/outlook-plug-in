@@ -417,16 +417,33 @@
 
         // 3️⃣ LATE cleanup (critical)
         // await ensureNoOutlookSignature(item);
-        
+
         // 2. insert immediately
+        const wrappedHtml = wrapForOutlook(signatureHtml);
         await insertAtCursor(
           item,
-          `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${signatureHtml}<!-- CARD_BYTE_SIGNATURE_END -->`
+          `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`
         );
 
       } finally {
         window.__INSERTING_SIGNATURE__ = false;
       }
+    }
+
+    function wrapForOutlook(innerHtml) {
+      return `
+        <div style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
+          <table cellpadding="0" cellspacing="0" border="0" style="font-family: inherit; font-size: inherit; color: inherit;">
+            <tbody>
+              <tr>
+                <td style="padding: 0; margin: 0;">
+                              ${innerHtml}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      `;
     }
 
     /* ---------------------------------------------------------
