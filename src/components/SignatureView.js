@@ -2,42 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { Box, Button, Grid, Paper, Skeleton, Stack, Typography } from "@mui/material";
 import { toast } from "react-toastify";
 import DefaultTemplate from "./SignatureComponents/Assets/Images/DefaultTemplate.svg"
-import { generateEmailSignatureHTML, IconAvatar } from "./SignatureComponents/IconAvatar";
 import usernotfound from "../components/SignatureComponents/Assets/Images/usernotfound.gif"
 import signnotassigned from "../components/SignatureComponents/Assets/Images/signnotassigned.webp"
 
-export default function SignatureView({ Office, user, apply, showSocialMediaIcons = true }) {
-    const containerRef = useRef(null);
-    const [form, setForm] = useState({
-        elements: []
-    })
+export default function SignatureView({ Office, user, apply }) {
+    const [form, setForm] = useState(null)
     const [error, setError] = useState("")
     // Responsive scaling
     const [load, setLoad] = useState(false)
     const applyHTML = async () => {
         try {
-            // const freshLink = `${form?.emailSignatureUrl}`
-            // const freshLinkForBanner = `${form?.bannerFileUrl}`
-            // const html = generateEmailSignatureHTML(
-            //     freshLink,
-            //     form?.elements,
-            //     freshLinkForBanner,
-            //     !!form?.elements?.find(i => i?.key === "banner")?.link
-            // );
-            console.log("sdajsdkjsagdjasgd", form?.finalHtml)
             const settings = Office.context.roamingSettings;
-            // settings.set("defaultSignatureHtml", html)
-
-            // const type = "text/html";
-            // const blob = new Blob([html], { type });
-            // // eslint-disable-next-line no-undef
-            // const clipboardItem = new ClipboardItem({
-            //     [type]: blob,
-            //     "text/plain": new Blob([html], { type: "text/plain" })
-            // });
-
-            // await navigator.clipboard.write([clipboardItem]);
-            // toast.success("Signature copied! Now paste directly into Gmail/Outlook.");
             settings.saveAsync((result) => {
                 if (result.status === Office.AsyncResultStatus.Succeeded) {
                     console.log("✅ Signature saved");
@@ -45,29 +20,196 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                     console.error("❌ Failed to save", result.error);
                 }
             });
-            apply(form?.finalHtml)
-            // toast?.success("Signature copied! Now paste directly into Gmail/Outlook.");
+            apply(form)
 
         } catch (error) {
             toast.error(error?.response?.data?.message || error.message || "Failed to save email signature, please try again later.")
             console.error("Error while saving email signature:", error);
         }
     }
-    async function renderSignatureOnServer(user) {
+    const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk="
+    const AES_IV = "3YapeNfJDung7TXxeKXn4g=="
+    async function handleAesDecrypt(encryptedText, generatedKey) {
+        try {
+            if (!encryptedText) return "";
+
+            // Check which key we're using
+            const keyToUse = generatedKey || AES_KEY;
+            // Decode and validate the key
+            let keyBuffer;
+            try {
+                keyBuffer = base64ToArrayBuffer(keyToUse);
+            } catch (e) {
+                console.error("Failed to decode key as base64:", e);
+                return encryptedText;
+            }
+
+            // Validate key length
+            if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
+
+                // If the generatedKey is invalid, try falling back to default
+                if (generatedKey && generatedKey !== AES_KEY) {
+                    return handleAesDecrypt(encryptedText, AES_KEY);
+                }
+
+                return encryptedText;
+            }
+
+            // Validate IV
+            const ivBuffer = base64ToArrayBuffer(AES_IV);
+            if (ivBuffer.byteLength !== 16) {
+                return encryptedText;
+            }
+
+            const key = await crypto.subtle.importKey(
+                "raw",
+                keyBuffer,
+                { name: "AES-CBC" },
+                false,
+                ["decrypt"]
+            );
+
+            // Decode encrypted text
+            let encryptedBuffer;
+            try {
+                encryptedBuffer = base64ToArrayBuffer(encryptedText);
+            } catch (e) {
+                return encryptedText;
+            }
+
+            // Check if encrypted data length is valid for AES-CBC
+            if (encryptedBuffer.byteLength % 16 !== 0) {
+                console.error(`❌ Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes (not multiple of 16)`);
+                return encryptedText;
+            }
+
+            const decryptedBuffer = await crypto.subtle.decrypt(
+                {
+                    name: "AES-CBC",
+                    iv: ivBuffer,
+                },
+                key,
+                encryptedBuffer
+            );
+
+            const result = new TextDecoder().decode(decryptedBuffer);
+
+            return result;
+        } catch (err) {
+
+            // If we have a generatedKey that failed, try with default key
+            if (generatedKey && generatedKey !== AES_KEY && err.message.includes("key data")) {
+                try {
+                    return await handleAesDecrypt(encryptedText, AES_KEY);
+                } catch (fallbackError) {
+                    console.error("Fallback also failed:", fallbackError.message);
+                }
+            }
+
+            return encryptedText; // Return original if decryption fails
+        }
+    }
+    // Helper function
+    function base64ToArrayBuffer(base64) {
+        // Handle URL-safe base64 if needed
+        let base64Data = base64.replace(/-/g, '+').replace(/_/g, '/');
+
+        // Add padding if necessary
+        const padding = base64Data.length % 4;
+        if (padding) {
+            base64Data += '='.repeat(4 - padding);
+        }
+
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+    async function encryptEmail(email = "") {
         try {
 
-            const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
+            if (!email || email.trim() === "") {
+                console.warn("Warning: Empty email provided");
+                return "";
+            }
+
+            // Test key and IV decoding
+            const keyBuffer = base64ToArrayBuffer(AES_KEY);
+            const ivBuffer = base64ToArrayBuffer(AES_IV);
+
+            if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
+                console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`);
+                return "";
+            }
+
+            if (ivBuffer.byteLength !== 16) {
+                console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`);
+                return "";
+            }
+
+            // Import key
+            const key = await crypto.subtle.importKey(
+                "raw",
+                keyBuffer,
+                { name: "AES-CBC" },
+                false,
+                ["encrypt"]
+            );
+
+            // Prepare data
+            const encoder = new TextEncoder();
+            const data = encoder.encode(email);
+
+            // Encrypt
+            const encrypted = await crypto.subtle.encrypt(
+                {
+                    name: "AES-CBC",
+                    iv: ivBuffer
                 },
-                body: JSON.stringify({ email: user.emailAddress })
+                key,
+                data
+            );
+
+            // Convert to base64
+            const encryptedBytes = new Uint8Array(encrypted);
+            let binaryString = "";
+            for (let i = 0; i < encryptedBytes.length; i++) {
+                binaryString += String.fromCharCode(encryptedBytes[i]);
+            }
+
+            const base64Result = btoa(binaryString);
+
+            // Verify it's valid base64
+            try {
+                atob(base64Result);
+            } catch (e) {
+                console.error("✗ Result is NOT valid base64:", e);
+            }
+            return base64Result;
+
+        } catch (err) {
+            return "";
+        }
+    }
+
+    async function renderSignatureOnServer(user) {
+        try {
+            const encryptedMail = await encryptEmail(user)
+            const res = await fetch("https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", {
+                method: "GET",
+                headers: {
+                    "username": encryptedMail
+                }
             });
+
             if (!res.ok) {
                 throw new Error("Node renderer failed");
             }
-            const data = await res?.json()
-            return data; // optional
+            const data = await res?.text()
+            const decryptedData = await handleAesDecrypt(data)
+            return JSON.parse(decryptedData)?.html; // optional
         } catch (e) {
             console.error("error", e)
             return null;
@@ -79,7 +221,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
             if (!user?.emailAddress) return;
             setLoad(true)
             try {
-                const apiResponse = await renderSignatureOnServer(user);
+                const apiResponse = await renderSignatureOnServer(user?.emailAddress);
                 setForm(prevForm => apiResponse ?? prevForm);
             } catch (e) {
                 console.error(e)
@@ -183,7 +325,7 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                             }}
                         >
                             {
-                                form?.elements?.length === 0 ?
+                                form === null ?
                                     < Box
                                         display="flex"
                                         flexDirection="column"
@@ -203,134 +345,19 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                         </Box>
                                     </Box>
                                     :
-                                    <>
-                                        {/* Konva Preview Stage */}
-                                        <Box width={'100%'}>
-                                            <Box
-                                                component={Paper}
-                                                ref={containerRef}
-                                                elevation={0}
-                                                sx={{
-                                                    width: "100%",
-                                                    maxWidth: 800,
-                                                    borderRadius: 2,
-                                                    margin: "auto",
+                                    <div
+                                        style={{
+                                            background: '#fff',
+                                            border: '1px solid #e5e7eb',
+                                            borderRadius: '8px',
+                                            padding: '16px',
+                                            display: 'inline-block',
+                                            minWidth: '100%'
+                                        }}
+                                    >
+                                        {/* Render simplified preview */}
+                                        <div dangerouslySetInnerHTML={{ __html: form }} />
 
-                                                    // 🚫 no scrollbars, just clip anything extra
-                                                    overflow: "hidden",
-                                                    // (optional extra safety – hide scrollbars in browsers that still show them)
-                                                    "&::-webkit-scrollbar": {
-                                                        display: "none",
-                                                    },
-                                                    scrollbarWidth: "none",      // Firefox
-                                                    msOverflowStyle: "none",     // IE/Edge
-                                                }}
-                                            >
-                                                <img
-                                                    src={`${form?.emailSignatureUrl}?v=${Date.now()}`}
-                                                    alt="Email Signature"
-                                                    style={{
-                                                        width: "100%",          // ✅ fit width of Paper
-                                                        height: "auto",         // ✅ maintain aspect ratio
-                                                        maxHeight: "100%",      // ✅ never overflow vertically
-                                                        display: "block",
-                                                        objectFit: "contain",   // ✅ contain inside box
-                                                    }}
-                                                />
-                                            </Box>
-                                            <Box
-                                                sx={{
-                                                    // height: show ? "200px" : "10px",    // adjust height as needed
-                                                    overflow: "hidden",
-                                                    transition: "height 0.35s ease",
-                                                    display: showSocialMediaIcons ? 'block' : 'none',
-                                                    width: '100%'
-                                                }}
-                                            >
-                                                <Box display={'flex'} justifyContent={'space-between'} alignItems={'center'} p={1}>
-                                                    <Stack direction={'row'} flexWrap={'wrap'} columnGap={1} rowGap={1}>
-                                                        {form?.elements
-                                                            ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                                            ?.filter(i => !["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
-                                                            ?.filter(i => i?.show)
-                                                            ?.map(field => (
-                                                                <a
-                                                                    href={`${field?.link}`} rel="noreferrer" target="_blank"
-                                                                    style={{
-                                                                        // border: "1px solid #0b2e79ff",
-                                                                        padding: "5px 5px",
-                                                                        borderRadius: "20px",
-                                                                    }}
-                                                                >
-                                                                    <IconAvatar
-                                                                        key={field.key}
-                                                                        image={field?.value}
-                                                                        size={25}
-                                                                    />
-                                                                </a>
-                                                            ))}
-                                                        {form?.elements
-                                                            ?.filter(i => i?.key.toLowerCase()?.startsWith("social"))
-                                                            ?.filter(i => ["teams", "meet", "calendly", "pdf", "url"]?.includes(i?.name))
-                                                            ?.filter(i => i?.show)
-                                                            // 🔽 EMPTY FIRST
-                                                            ?.sort((a, b) => {
-                                                                const aEmpty = !(a?.label);
-                                                                const bEmpty = !(b?.label);
-                                                                return Number(bEmpty) - Number(aEmpty);
-                                                            })
-                                                            ?.map(field => (
-                                                                <a
-                                                                    href={`${field?.link}`}
-                                                                    target="_blank"
-                                                                    rel="noreferrer"
-                                                                    style={{
-                                                                        background: "#fff",
-                                                                        padding: "5px 10px",
-                                                                        borderRadius: "20px",
-                                                                        border: !!field?.label ? "1px solid #0b2e79ff" : "none",
-                                                                        color: "#0b2e79ff",
-                                                                        fontFamily: "Plus Jakarta Sans",
-                                                                        fontSize: "14px",
-                                                                        fontWeight: 500,
-                                                                        textDecoration: "none",
-                                                                        display: "flex",
-                                                                        alignItems: 'center',
-                                                                        columnGap: 5
-                                                                    }}
-                                                                >
-                                                                    <img
-                                                                        src={field?.value}
-                                                                        width="25"
-                                                                        alt="cardbyte"
-                                                                    />
-                                                                    {field?.label}
-                                                                </a>
-                                                            ))}
-                                                    </Stack>
-                                                </Box>
-                                            </Box>
-                                            {
-                                                (!!form?.bannerFileUrl &&
-                                                    <Box
-                                                        width={containerRef?.current ? containerRef?.current.offsetWidth : '100%'}
-                                                        // height={containerRef?.current ? containerRef?.current.offsetWidth * 0.30 : '30%'}
-                                                        mt={1}
-                                                        overflow="hidden"
-                                                    >
-                                                        <img
-                                                            src={!!form?.bannerFileUrl ? form?.bannerFileUrl : form?.bannerFileUrl}
-                                                            style={{
-                                                                width: "100%",
-                                                                height: "auto",
-                                                                // objectFit: "contain",   // ✅ preserves aspect ratio
-                                                                display: "block",
-                                                                borderRadius: "8px"
-                                                            }}
-                                                        />
-                                                    </Box>)
-                                            }
-                                        </Box>
                                         <Stack
                                             mt={1}
                                             display={"flex"}
@@ -361,11 +388,11 @@ export default function SignatureView({ Office, user, apply, showSocialMediaIcon
                                                 Apply Signature
                                             </Button>
                                         </Stack>
-                                    </>
+                                    </div>
                             }
                         </Paper>
                 }
             </Grid>
-        </Grid >
+        </Grid>
     );
 }
