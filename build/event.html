@@ -28,7 +28,10 @@
 
     Office.onReady(() => {
       window.applySignature({
-        completed: () => console.log("✅ Office.onReady completed")
+        completed: async () => {
+          // const encryptedMail = await encryptEmail("sairajesh.korla1272@outlook.com")
+          console.log("✅ Office.onReady completed")
+        }
       });
     });
 
@@ -203,6 +206,7 @@
       try {
 
         const encryptedMail = await encryptEmail(user)
+        console.log("Asdkjsadkahsdkjsad", encryptedMail, user)
         const res = await fetch("https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", {
           method: "GET",
           headers: {
@@ -382,7 +386,7 @@
         // 🔐 Lock immediately
         SIGNATURE_STATE = "loading";
 
-        const apiResponse = await renderSignatureOnServer(user);
+        const apiResponse = await renderSignatureOnServer(user?.emailAddress);
         if (!apiResponse) throw new Error("API failed");
         console.log("asdahskjdhsajdhaskd", apiResponse)
         await insertSignatureWithoutCursorError(item, apiResponse);
