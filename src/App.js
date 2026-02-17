@@ -131,6 +131,23 @@ export default function App({ user }) {
     }
   }
 
+
+  function wrapForOutlook(innerHtml) {
+    return `
+        <div style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
+          <table cellpadding="0" cellspacing="0" border="0" style="font-family: inherit; font-size: inherit; color: inherit;">
+            <tbody>
+              <tr>
+                <td style="padding: 0; margin: 0;">
+                  ${innerHtml}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      `;
+  }
+
   function applySignature(signature) {
     if (!signature) return;
 
@@ -138,6 +155,8 @@ export default function App({ user }) {
       console.error("Office.js not available");
       return;
     }
+
+    signature = wrapForOutlook(signature)
 
     Office.onReady(async () => {
       const item = Office.context?.mailbox?.item;
