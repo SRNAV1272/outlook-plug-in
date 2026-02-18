@@ -226,6 +226,11 @@
      */
     function compressBase64Image(dataUrl, maxWidth = 300, quality = 0.7) {
       return new Promise((resolve) => {
+        // Skip GIFs — canvas loses animation and converts to static image
+        if (dataUrl.startsWith("data:image/gif")) {
+          resolve(dataUrl);
+          return;
+        }
         const img = new Image();
         img.onload = () => {
           try {
@@ -787,7 +792,7 @@
        AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
        --------------------------------------------------------- */
 
-    window.applySignature = async function (event = { completed: () => {} }) {
+    window.applySignature = async function (event = { completed: () => { } }) {
       if (SIGNATURE_STATE === "loading") {
         console.log("[CardByte] Already loading — skipping");
         event.completed();
