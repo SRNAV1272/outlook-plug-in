@@ -35,7 +35,6 @@ export default function App({ user }) {
   }, [])
 
   useEffect(() => {
-    // console.log("sdkjahdskjashdkjasd", )
     init();
   }, [init]);
 
@@ -52,6 +51,19 @@ export default function App({ user }) {
     });
   }
 
+  function bodySetAsync(item, html) {
+    return new Promise((resolve, reject) => {
+      item.body.setAsync(
+        html,
+        { coercionType: Office.CoercionType.Html },
+        (r) => {
+          if (r.status === "succeeded") resolve();
+          else reject(r.error);
+        }
+      );
+    });
+  }
+
   function hasCardByteSignature(html) {
     return (
       html.includes("CARD_BYTE_SIGNATURE_START") ||
@@ -60,46 +72,180 @@ export default function App({ user }) {
     );
   }
 
-  function looksLikeOutlookDefaultSignature(html) {
-    return (
-      /class="?MsoNormal"?/i.test(html) ||
-      /<meta name="Generator" content="Microsoft Outlook"/i.test(html) ||
-      /--<br\s*\/?>/i.test(html) ||
-      /Sent from (my )?iPhone/i.test(html)
-    );
-  }
-
-  function stripOutlookSignature(html) {
+  /**
+   * Detects default/built-in signatures from Outlook, mobile clients,
+   * and other email providers.
+   */
+  function looksLikeDefaultSignature(html) {
     const patterns = [
-      /<div class="?MsoNormal"?.*?>/i,
-      /--<br\s*\/?>/i,
-      /Sent from (my )?iPhone/i
+      // Outlook desktop / OWA default signatures
+      /class="?MsoNormal"?/i,
+      /<meta name="Generator" content="Microsoft/i,
+      /id="?Signature"?/i,
+      /id="?ms-outlook-mobile-signature"?/i,
+      /class="?OutlookMessageHeader"?/i,
+
+      // Common "-- " separator (RFC 3676 sig delimiter)
+      /--\s*<br\s*\/?>/i,
+      /^--\s*$/m,
+
+      // Mobile default signatures
+      /Sent from (my )?(iPhone|iPad|Galaxy|Samsung|Android|Outlook|Mail)/i,
+      /Get Outlook for (iOS|Android)/i,
+      /Sent from Yahoo Mail/i,
+      /Sent via the Samsung/i,
+
+      // Gmail default
+      /class="?gmail_signature"?/i,
+
+      // Apple Mail
+      /class="?AppleMailSignature"?/i,
+
+      // Thunderbird
+      /class="?moz-signature"?/i,
     ];
 
-    for (const p of patterns) {
-      const idx = html.search(p);
+    return patterns.some((p) => p.test(html));
+  }
+
+  /**
+   * Strips any detected default signature from the body HTML.
+   * Tries multiple strategies to find the signature boundary.
+   */
+  function stripDefaultSignature(html) {
+    // Strategy 1: Known container elements (most reliable — remove the element)
+    const containerPatterns = [
+      // Outlook mobile signature div
+      /<div[^>]*id="?ms-outlook-mobile-signature"?[^>]*>[\s\S]*?<\/div>/gi,
+      // Gmail signature
+      /<div[^>]*class="?gmail_signature"?[^>]*>[\s\S]*?<\/div>/gi,
+      // Apple Mail signature
+      /<div[^>]*class="?AppleMailSignature"?[^>]*>[\s\S]*?<\/div>/gi,
+      // Thunderbird signature
+      /<div[^>]*class="?moz-signature"?[^>]*>[\s\S]*?<\/div>/gi,
+      // Generic "Signature" id block
+      /<div[^>]*id="?Signature"?[^>]*>[\s\S]*?<\/div>/gi,
+      // "Get Outlook for iOS/Android" promo line
+      /<div[^>]*>.*?Get Outlook for (iOS|Android).*?<\/div>/gi,
+    ];
+
+    let cleaned = html;
+    for (const p of containerPatterns) {
+      cleaned = cleaned.replace(p, "");
+    }
+
+    // If container removal changed something, we're done
+    if (cleaned.length < html.length) {
+      console.log("[CardByte] Removed default signature via container pattern");
+      return cleaned.trim();
+    }
+
+    // Strategy 2: Truncate from known text markers (cut everything after)
+    const truncatePatterns = [
+      /--\s*<br\s*\/?>/i,
+      /Sent from (my )?(iPhone|iPad|Galaxy|Samsung|Android|Outlook|Mail)/i,
+      /Get Outlook for (iOS|Android)/i,
+      /Sent from Yahoo Mail/i,
+      /Sent via the Samsung/i,
+    ];
+
+    for (const p of truncatePatterns) {
+      const idx = cleaned.search(p);
       if (idx > -1) {
-        return html.slice(0, idx).trim();
+        console.log("[CardByte] Removed default signature via text marker truncation");
+        return cleaned.slice(0, idx).trim();
       }
     }
 
-    return html;
+    // Strategy 3: MsoNormal heuristic — only on fresh compose (minimal body text)
+    const bodyTextOnly = cleaned.replace(/<[^>]*>/g, "").trim();
+    if (bodyTextOnly.length < 200) {
+      const msoIdx = cleaned.search(/<div[^>]*class="?MsoNormal"?/i);
+      if (msoIdx > -1) {
+        console.log("[CardByte] Removed MsoNormal signature block from fresh compose");
+        return cleaned.slice(0, msoIdx).trim();
+      }
+    }
+
+    return cleaned;
   }
 
-  async function ensureNoOutlookSignature(item) {
-    const html = await getBodyHtml(item);
+  /**
+   * Disables Outlook's built-in client signature if the API supports it.
+   */
+  async function disableClientSignature(item) {
+    try {
+      if (typeof item.body?.setSignatureAsync === "function") {
+        await new Promise((resolve, reject) => {
+          item.body.setSignatureAsync(
+            "",
+            { coercionType: Office.CoercionType.Html },
+            (r) => {
+              if (r.status === "succeeded") resolve();
+              else reject(r.error);
+            }
+          );
+        });
+        console.log("[CardByte] ✅ Cleared Outlook client signature slot via setSignatureAsync");
+        return true;
+      }
+    } catch (e) {
+      console.warn("[CardByte] Could not clear client signature slot:", e.message);
+    }
 
-    // Never touch if CardByte already exists
-    if (hasCardByteSignature(html)) return;
+    try {
+      if (typeof item.disableClientSignatureAsync === "function") {
+        await new Promise((resolve, reject) => {
+          item.disableClientSignatureAsync((r) => {
+            if (r.status === "succeeded") resolve();
+            else reject(r.error);
+          });
+        });
+        console.log("[CardByte] ✅ Disabled client signature via disableClientSignatureAsync");
+        return true;
+      }
+    } catch (e) {
+      console.warn("[CardByte] disableClientSignatureAsync not available:", e.message);
+    }
 
-    if (looksLikeOutlookDefaultSignature(html)) {
-      console.log("🧹 Removing Outlook default signature");
+    return false;
+  }
 
-      const cleaned = stripOutlookSignature(html);
+  /**
+   * Ensures no default/Outlook/mobile signature is present in the body.
+   * Called BEFORE inserting the CardByte signature.
+   */
+  async function ensureNoDefaultSignature(item) {
+    try {
+      // Step 1: Try to disable the Outlook client signature mechanism
+      await disableClientSignature(item);
 
-      await item.body.setAsync(cleaned, {
-        coercionType: Office.CoercionType.Html
-      });
+      // Step 2: Read the current body and strip any existing default signature
+      const html = await getBodyHtml(item);
+
+      // Never touch if CardByte already exists
+      if (hasCardByteSignature(html)) {
+        console.log("[CardByte] CardByte signature already present — skipping default removal");
+        return false;
+      }
+
+      if (looksLikeDefaultSignature(html)) {
+        console.log("🧹 Removing default signature");
+        const cleaned = stripDefaultSignature(html);
+
+        // Only rewrite body if something was actually removed
+        if (cleaned.length < html.length) {
+          await bodySetAsync(item, cleaned);
+          console.log("[CardByte] ✅ Default signature removed from body");
+          return true;
+        }
+      }
+
+      console.log("[CardByte] No default signature detected");
+      return false;
+    } catch (e) {
+      console.warn("[CardByte] ensureNoDefaultSignature error (non-fatal):", e.message);
+      return false;
     }
   }
 
@@ -152,7 +298,7 @@ export default function App({ user }) {
            🔍 EARLY CHECK (before Outlook race)
            ========================================= */
 
-        await ensureNoOutlookSignature(item);
+        await ensureNoDefaultSignature(item);
 
         const preHtml = await getBodyHtml(item);
         if (hasCardByteSignature(preHtml)) {
@@ -164,7 +310,7 @@ export default function App({ user }) {
            🔁 LATE CHECK (Outlook may insert late)
            ========================================= */
 
-        await ensureNoOutlookSignature(item);
+        await ensureNoDefaultSignature(item);
 
         /* =========================================
            ✏️ INSERT SIGNATURE
