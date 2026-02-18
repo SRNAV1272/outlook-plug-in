@@ -23,27 +23,58 @@
     const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 
     /* ---------------------------------------------------------
+       Config
+       --------------------------------------------------------- */
+    const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
+    const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
+
+    const MAX_SAFE_HTML_SIZE = 500_000; // ~500 KB
+
+    /* ---------------------------------------------------------
        Office Ready
        --------------------------------------------------------- */
 
     Office.onReady(() => {
       window.applySignature({
         completed: async () => {
-          // const encryptedMail = await encryptEmail("sairajesh.korla1272@outlook.com")
-          console.log("✅ Office.onReady completed")
+          console.log("✅ Office.onReady completed");
         }
       });
     });
 
-    const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk="
-    const AES_IV = "3YapeNfJDung7TXxeKXn4g=="
+    /* ---------------------------------------------------------
+       AES Encryption / Decryption Helpers
+       --------------------------------------------------------- */
+
+    function base64ToArrayBuffer(base64) {
+      let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
+      const padding = base64Data.length % 4;
+      if (padding) {
+        base64Data += "=".repeat(4 - padding);
+      }
+      const binaryString = atob(base64Data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+
+    function arrayBufferToBase64(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binaryString = "";
+      for (let i = 0; i < bytes.length; i++) {
+        binaryString += String.fromCharCode(bytes[i]);
+      }
+      return btoa(binaryString);
+    }
+
     async function handleAesDecrypt(encryptedText, generatedKey) {
       try {
         if (!encryptedText) return "";
 
-        // Check which key we're using
         const keyToUse = generatedKey || AES_KEY;
-        // Decode and validate the key
+
         let keyBuffer;
         try {
           keyBuffer = base64ToArrayBuffer(keyToUse);
@@ -52,18 +83,13 @@
           return encryptedText;
         }
 
-        // Validate key length
         if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
-
-          // If the generatedKey is invalid, try falling back to default
           if (generatedKey && generatedKey !== AES_KEY) {
             return handleAesDecrypt(encryptedText, AES_KEY);
           }
-
           return encryptedText;
         }
 
-        // Validate IV
         const ivBuffer = base64ToArrayBuffer(AES_IV);
         if (ivBuffer.byteLength !== 16) {
           return encryptedText;
@@ -77,7 +103,6 @@
           ["decrypt"]
         );
 
-        // Decode encrypted text
         let encryptedBuffer;
         try {
           encryptedBuffer = base64ToArrayBuffer(encryptedText);
@@ -85,27 +110,19 @@
           return encryptedText;
         }
 
-        // Check if encrypted data length is valid for AES-CBC
         if (encryptedBuffer.byteLength % 16 !== 0) {
-          console.error(`❌ Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes (not multiple of 16)`);
+          console.error(`❌ Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes`);
           return encryptedText;
         }
 
         const decryptedBuffer = await crypto.subtle.decrypt(
-          {
-            name: "AES-CBC",
-            iv: ivBuffer,
-          },
+          { name: "AES-CBC", iv: ivBuffer },
           key,
           encryptedBuffer
         );
 
-        const result = new TextDecoder().decode(decryptedBuffer);
-
-        return result;
+        return new TextDecoder().decode(decryptedBuffer);
       } catch (err) {
-
-        // If we have a generatedKey that failed, try with default key
         if (generatedKey && generatedKey !== AES_KEY && err.message.includes("key data")) {
           try {
             return await handleAesDecrypt(encryptedText, AES_KEY);
@@ -113,37 +130,17 @@
             console.error("Fallback also failed:", fallbackError.message);
           }
         }
-
-        return encryptedText; // Return original if decryption fails
+        return encryptedText;
       }
     }
-    // Helper function
-    function base64ToArrayBuffer(base64) {
-      // Handle URL-safe base64 if needed
-      let base64Data = base64.replace(/-/g, '+').replace(/_/g, '/');
 
-      // Add padding if necessary
-      const padding = base64Data.length % 4;
-      if (padding) {
-        base64Data += '='.repeat(4 - padding);
-      }
-
-      const binaryString = atob(base64Data);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      return bytes.buffer;
-    }
     async function encryptEmail(email = "") {
       try {
-
         if (!email || email.trim() === "") {
           console.warn("Warning: Empty email provided");
           return "";
         }
 
-        // Test key and IV decoding
         const keyBuffer = base64ToArrayBuffer(AES_KEY);
         const ivBuffer = base64ToArrayBuffer(AES_IV);
 
@@ -157,7 +154,6 @@
           return "";
         }
 
-        // Import key
         const key = await crypto.subtle.importKey(
           "raw",
           keyBuffer,
@@ -166,114 +162,310 @@
           ["encrypt"]
         );
 
-        // Prepare data
-        const encoder = new TextEncoder();
-        const data = encoder.encode(email);
+        const data = new TextEncoder().encode(email);
 
-        // Encrypt
         const encrypted = await crypto.subtle.encrypt(
-          {
-            name: "AES-CBC",
-            iv: ivBuffer
-          },
+          { name: "AES-CBC", iv: ivBuffer },
           key,
           data
         );
 
-        // Convert to base64
-        const encryptedBytes = new Uint8Array(encrypted);
-        let binaryString = "";
-        for (let i = 0; i < encryptedBytes.length; i++) {
-          binaryString += String.fromCharCode(encryptedBytes[i]);
-        }
+        const base64Result = arrayBufferToBase64(encrypted);
 
-        const base64Result = btoa(binaryString);
-
-        // Verify it's valid base64
         try {
           atob(base64Result);
         } catch (e) {
           console.error("✗ Result is NOT valid base64:", e);
         }
-        return base64Result;
 
+        return base64Result;
       } catch (err) {
+        console.error("Encryption error:", err);
         return "";
       }
     }
 
+    /* ---------------------------------------------------------
+       Server API
+       --------------------------------------------------------- */
+
     async function renderSignatureOnServer(user) {
       try {
+        const encryptedMail = await encryptEmail(user);
+        console.log("[CardByte] Fetching signature for:", user);
 
-        const encryptedMail = await encryptEmail(user)
-        console.log("Asdkjsadkahsdkjsad", encryptedMail, user)
-        const res = await fetch("https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", {
-          method: "GET",
-          headers: {
-            "username": encryptedMail
+        const res = await fetch(
+          "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+          {
+            method: "GET",
+            headers: {
+              username: encryptedMail
+            }
           }
-        });
+        );
+
         if (!res.ok) {
-          throw new Error("Node renderer failed");
+          throw new Error(`Server responded with ${res.status}`);
         }
-        const data = await res?.text()
-        const decryptedData = await handleAesDecrypt(data)
-        return JSON.parse(decryptedData)?.html; // optional
+
+        const data = await res.text();
+        const decryptedData = await handleAesDecrypt(data);
+        return JSON.parse(decryptedData)?.html;
       } catch (e) {
-        console.error("error", e)
+        console.error("[CardByte] renderSignatureOnServer error:", e);
         return null;
       }
     }
 
     /* ---------------------------------------------------------
-       Signature Helpers
+       Image Processing Helpers
        --------------------------------------------------------- */
 
-    function stabilizeSelection(item) {
-      // return new Promise(resolve => {
-      //   item.body.getSelectedDataAsync(
-      //     Office.CoercionType.Html,
-      //     () => resolve()
-      //   );
-      // });
-      return Promise.resolve();
+    /**
+     * Compresses a single base64 data URL image via Canvas.
+     */
+    function compressBase64Image(dataUrl, maxWidth = 300, quality = 0.7) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const canvas = document.createElement("canvas");
+            let width = img.width;
+            let height = img.height;
+
+            if (width > maxWidth) {
+              height = Math.round((height * maxWidth) / width);
+              width = maxWidth;
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0, width, height);
+
+            let result = canvas.toDataURL("image/jpeg", quality);
+            if (result.length >= dataUrl.length) {
+              result = canvas.toDataURL("image/png");
+            }
+            if (result.length >= dataUrl.length) {
+              resolve(dataUrl);
+              return;
+            }
+
+            console.log(
+              `[CardByte] Compressed: ${(dataUrl.length / 1024).toFixed(0)}KB → ${(result.length / 1024).toFixed(0)}KB`
+            );
+            resolve(result);
+          } catch (e) {
+            console.warn("[CardByte] Canvas compression failed:", e);
+            resolve(dataUrl);
+          }
+        };
+        img.onerror = () => resolve(dataUrl);
+        img.src = dataUrl;
+      });
     }
 
-    function insertAtCursor(item, html) {
+    /**
+     * Compresses all base64 images in the HTML via Canvas.
+     */
+    async function compressImagesInHtml(html) {
+      const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
+      const matches = [];
+      let match;
+
+      while ((match = regex.exec(html)) !== null) {
+        matches.push({ fullMatch: match[0], dataUrl: match[1] });
+      }
+
+      if (matches.length === 0) return html;
+
+      console.log(`[CardByte] Compressing ${matches.length} base64 image(s)`);
+
+      let result = html;
+      for (const m of matches) {
+        const compressed = await compressBase64Image(m.dataUrl);
+        if (compressed !== m.dataUrl) {
+          result = result.replace(m.dataUrl, compressed);
+        }
+      }
+
+      return result;
+    }
+
+    /**
+     * Extracts base64 images → cid: references.
+     */
+    function extractBase64Images(html) {
+      const images = [];
+      let index = 0;
+
+      const cleanedHtml = html.replace(
+        /src\s*=\s*"data:(image\/([^;]+));base64,([^"]+)"/gi,
+        (_match, mimeType, extension, base64Data) => {
+          const cid = `cardbyte_img_${index}`;
+          const safeExt = extension.replace(/[^a-z0-9]/gi, "") || "png";
+          const fileName = `${cid}.${safeExt}`;
+          images.push({ cid, fileName, mimeType, base64Data });
+          index++;
+          return `src="cid:${cid}"`;
+        }
+      );
+
+      return { cleanedHtml, images };
+    }
+
+    /**
+     * Strips all base64 images entirely, replacing with [image] placeholder.
+     */
+    function stripBase64Images(html) {
+      return html.replace(
+        /<img[^>]*src\s*=\s*"data:image\/[^"]*"[^>]*\/?>/gi,
+        '<span style="color:#999;font-size:11px;">[image]</span>'
+      );
+    }
+
+    /**
+     * Adds a single base64 image as an inline CID attachment.
+     */
+    function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
       return new Promise((resolve, reject) => {
-        item.body.setAsync(
-          html,
-          { coercionType: Office.CoercionType.Html },
-          r => (r.status === "succeeded" ? resolve() : reject(r.error))
+        if (typeof item.addFileAttachmentFromBase64Async !== "function") {
+          console.warn("[CardByte] addFileAttachmentFromBase64Async not available");
+          resolve(false);
+          return;
+        }
+
+        item.addFileAttachmentFromBase64Async(
+          base64Data,
+          fileName,
+          { isInline: true, contentId: cid },
+          (result) => {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+              resolve(true);
+            } else {
+              console.error(`[CardByte] Attach failed ${cid}:`, result.error);
+              reject(result.error);
+            }
+          }
         );
       });
     }
 
+    /* ---------------------------------------------------------
+       Body Insertion Methods
+       --------------------------------------------------------- */
 
-    async function insertSignatureWithoutCursorError(item, signatureHtml) {
-      try {
-        // prevent parallel insertions
-        if (window.__INSERTING_SIGNATURE__) return;
-        window.__INSERTING_SIGNATURE__ = true;
-        // 1. stabilize selection
-        await stabilizeSelection(item);
-
-        // 3️⃣ LATE cleanup (critical)
-        // await ensureNoOutlookSignature(item);
-
-        // 2. insert immediately
-        const wrappedHtml = wrapForOutlook(signatureHtml);
-        await insertAtCursor(
-          item,
-          `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`
+    /**
+     * Method A: body.setAsync — replaces entire body (has size limits)
+     */
+    function bodySetAsync(item, html) {
+      return new Promise((resolve, reject) => {
+        item.body.setAsync(
+          html,
+          { coercionType: Office.CoercionType.Html },
+          (r) => {
+            if (r.status === "succeeded") resolve();
+            else reject(r.error);
+          }
         );
-
-      } catch (err) {
-        console.error("sadjahsdkasd", err)
-      } finally {
-        window.__INSERTING_SIGNATURE__ = false;
-      }
+      });
     }
+
+    /**
+     * Method B: body.prependAsync — prepends to body (may handle larger payloads)
+     * Available in Mailbox requirement set 1.1+
+     */
+    function bodyPrependAsync(item, html) {
+      return new Promise((resolve, reject) => {
+        if (typeof item.body.prependAsync !== "function") {
+          reject(new Error("prependAsync not available"));
+          return;
+        }
+        item.body.prependAsync(
+          html,
+          { coercionType: Office.CoercionType.Html },
+          (r) => {
+            if (r.status === "succeeded") resolve();
+            else reject(r.error);
+          }
+        );
+      });
+    }
+
+    /**
+     * Method C: body.setSelectedDataAsync — inserts at cursor position
+     * Can sometimes bypass setAsync size limits.
+     */
+    function bodySetSelectedDataAsync(item, html) {
+      return new Promise((resolve, reject) => {
+        if (typeof item.body.setSelectedDataAsync !== "function") {
+          reject(new Error("setSelectedDataAsync not available"));
+          return;
+        }
+        item.body.setSelectedDataAsync(
+          html,
+          { coercionType: Office.CoercionType.Html },
+          (r) => {
+            if (r.status === "succeeded") resolve();
+            else reject(r.error);
+          }
+        );
+      });
+    }
+
+    /**
+     * Method D: body.setSignatureAsync — specifically designed for signatures
+     * Available in Mailbox requirement set 1.10+
+     */
+    function bodySetSignatureAsync(item, html) {
+      return new Promise((resolve, reject) => {
+        if (typeof item.body.setSignatureAsync !== "function") {
+          reject(new Error("setSignatureAsync not available"));
+          return;
+        }
+        item.body.setSignatureAsync(
+          html,
+          { coercionType: Office.CoercionType.Html },
+          (r) => {
+            if (r.status === "succeeded") resolve();
+            else reject(r.error);
+          }
+        );
+      });
+    }
+
+    /**
+     * Tries multiple insertion methods in order of preference.
+     * Returns { success: boolean, method: string }
+     */
+    async function tryInsertHtml(item, html, label = "") {
+      const methods = [
+        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+        { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
+      ];
+
+      for (const m of methods) {
+        try {
+          console.log(`[CardByte] ${label} Trying ${m.name}...`);
+          await m.fn();
+          console.log(`[CardByte] ✅ ${m.name} succeeded`);
+          return { success: true, method: m.name };
+        } catch (err) {
+          const msg = err?.message || err?.code || JSON.stringify(err);
+          console.warn(`[CardByte] ${m.name} failed: ${msg}`);
+        }
+      }
+
+      return { success: false, method: "none" };
+    }
+
+    /* ---------------------------------------------------------
+       Outlook Wrapper
+       --------------------------------------------------------- */
 
     function wrapForOutlook(innerHtml) {
       return `
@@ -291,17 +483,109 @@
       `;
     }
 
-    /* ---------------------------------------------------------
-       AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
-       --------------------------------------------------------- */
+    function stabilizeSelection(_item) {
+      return Promise.resolve();
+    }
 
     /* ---------------------------------------------------------
-    BODY READ + DETECTION HELPERS
-    --------------------------------------------------------- */
+       Main Insertion — Multi-Strategy
+       --------------------------------------------------------- */
+
+    /**
+     * Tier 1: Insert full HTML as-is (small signatures)
+     * Tier 2: Compress images, then insert
+     * Tier 3: Extract images as CID attachments, insert light HTML
+     * Tier 4: Strip images completely, insert text-only
+     *
+     * Each tier tries ALL insertion methods (setSignatureAsync,
+     * setSelectedDataAsync, prependAsync, setAsync) before
+     * falling through to the next tier.
+     */
+    async function insertSignatureWithoutCursorError(item, signatureHtml) {
+      try {
+        if (window.__INSERTING_SIGNATURE__) return;
+        window.__INSERTING_SIGNATURE__ = true;
+
+        await stabilizeSelection(item);
+
+        const wrappedHtml = wrapForOutlook(signatureHtml);
+        const fullHtml = `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
+
+        const sizeKB = (fullHtml.length / 1024).toFixed(1);
+        console.log(`[CardByte] ── Insertion start ── HTML size: ${sizeKB} KB`);
+
+        // ── Tier 1: Direct insert ──
+        {
+          console.log("[CardByte] Tier 1: Direct insert");
+          const result = await tryInsertHtml(item, fullHtml, "Tier1");
+          if (result.success) return;
+        }
+
+        // ── Tier 2: Compress images, then insert ──
+        {
+          console.log("[CardByte] Tier 2: Compress images");
+          try {
+            const compressed = await compressImagesInHtml(fullHtml);
+            console.log(`[CardByte] Compressed size: ${(compressed.length / 1024).toFixed(1)} KB`);
+            const result = await tryInsertHtml(item, compressed, "Tier2");
+            if (result.success) return;
+          } catch (e) {
+            console.warn("[CardByte] Tier 2 compression error:", e.message);
+          }
+        }
+
+        // ── Tier 3: CID inline attachments ──
+        {
+          console.log("[CardByte] Tier 3: CID inline attachments");
+          try {
+            const { cleanedHtml, images } = extractBase64Images(fullHtml);
+            console.log(`[CardByte] HTML without images: ${(cleanedHtml.length / 1024).toFixed(1)} KB, images: ${images.length}`);
+
+            const result = await tryInsertHtml(item, cleanedHtml, "Tier3");
+            if (result.success) {
+              let attached = 0;
+              for (const img of images) {
+                try {
+                  await addInlineImageAttachment(item, img);
+                  attached++;
+                } catch (e) {
+                  console.warn(`[CardByte] Image attach failed: ${img.cid}`);
+                }
+              }
+              console.log(`[CardByte] Attached ${attached}/${images.length} images`);
+              return;
+            }
+          } catch (e) {
+            console.warn("[CardByte] Tier 3 error:", e.message);
+          }
+        }
+
+        // ── Tier 4: Strip all images ──
+        {
+          console.log("[CardByte] Tier 4: Strip images (last resort)");
+          const stripped = stripBase64Images(fullHtml);
+          console.log(`[CardByte] Stripped size: ${(stripped.length / 1024).toFixed(1)} KB`);
+          const result = await tryInsertHtml(item, stripped, "Tier4");
+          if (result.success) return;
+        }
+
+        throw new Error("All 4 tiers × all insertion methods failed");
+
+      } catch (err) {
+        console.error("[CardByte] insertSignature TOTAL FAILURE:", err);
+        throw err;
+      } finally {
+        window.__INSERTING_SIGNATURE__ = false;
+      }
+    }
+
+    /* ---------------------------------------------------------
+       Body Read + Detection Helpers
+       --------------------------------------------------------- */
 
     function getBodyHtml(item) {
       return new Promise((resolve, reject) => {
-        item.body.getAsync(Office.CoercionType.Html, r => {
+        item.body.getAsync(Office.CoercionType.Html, (r) => {
           if (r.status === "succeeded") resolve(r.value || "");
           else reject(r.error);
         });
@@ -344,31 +628,30 @@
     async function ensureNoOutlookSignature(item) {
       const html = await getBodyHtml(item);
 
-      // CardByte already present → do nothing
       if (hasCardByteSignature(html)) return false;
 
       if (looksLikeOutlookDefaultSignature(html)) {
-
         const cleaned = stripOutlookSignature(html);
-
-        await item.body.setAsync(cleaned, {
-          coercionType: Office.CoercionType.Html
-        });
-
+        await bodySetAsync(item, cleaned);
         return true;
       }
 
       return false;
     }
 
-    window.applySignature = async function (event = { completed: () => { } }) {
-      // 🛑 Prevent parallel or duplicate execution
+    /* ---------------------------------------------------------
+       AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
+       --------------------------------------------------------- */
+
+    window.applySignature = async function (event = { completed: () => {} }) {
       if (SIGNATURE_STATE === "loading") {
+        console.log("[CardByte] Already loading — skipping");
         event.completed();
         return;
       }
 
       if (SIGNATURE_STATE === "applied") {
+        console.log("[CardByte] Already applied — skipping");
         event.completed();
         return;
       }
@@ -378,58 +661,146 @@
       const user = mailbox?.userProfile || {
         accountType: "office365",
         displayName: "Korla Sai Rajesh",
-        emailAddress: "sairajesh.korla1272@outlook.com", //"riya00907@outlook.com",//,"sairajesh.korla1272@outlook.com", //"dhruvkapur@cardbyte.ai", //"muskanrai@cardbyte.ai", //"sairajesh.korla1@navajna.com",
-        timeZone: "India Standard Time",
+        emailAddress: "sairajesh.korla1272@outlook.com",
+        timeZone: "India Standard Time"
       };
 
       try {
-        if (!item) return;
+        if (!item) {
+          console.warn("[CardByte] No mail item found");
+          event.completed();
+          return;
+        }
 
-        // 🔐 Lock immediately
         SIGNATURE_STATE = "loading";
 
+        console.log("[CardByte] ════════════════════════════════════");
+        console.log("[CardByte] Starting signature flow");
+        console.log("[CardByte] User:", user?.emailAddress);
+        console.log("[CardByte] Platform:", Office?.context?.platform || "unknown");
+        console.log("[CardByte] Host:", Office?.context?.host || "unknown");
+
+        // Check API surface
+        console.log("[CardByte] API check: setSignatureAsync =", typeof item.body?.setSignatureAsync);
+        console.log("[CardByte] API check: prependAsync =", typeof item.body?.prependAsync);
+        console.log("[CardByte] API check: setSelectedDataAsync =", typeof item.body?.setSelectedDataAsync);
+        console.log("[CardByte] API check: setAsync =", typeof item.body?.setAsync);
+        console.log("[CardByte] API check: addFileAttachmentFromBase64Async =", typeof item.addFileAttachmentFromBase64Async);
+
+        // Fetch signature
         const apiResponse = await renderSignatureOnServer(user?.emailAddress);
-        if (!apiResponse) throw new Error("API failed");
-        console.log("asdahskjdhsajdhaskd", apiResponse)
+
+        if (!apiResponse) {
+          throw new Error("API returned empty or null response");
+        }
+
+        const sizeKB = (apiResponse.length / 1024).toFixed(1);
+        const base64Count = (apiResponse.match(/data:image\/[^;]+;base64,/gi) || []).length;
+        console.log(`[CardByte] API response: ${sizeKB} KB, ${base64Count} base64 image(s)`);
+
+        // Insert
         await insertSignatureWithoutCursorError(item, apiResponse);
 
-        // ✅ Mark success
         SIGNATURE_STATE = "idle";
+        console.log("[CardByte] ✅ Signature applied successfully");
+        console.log("[CardByte] ════════════════════════════════════");
 
       } catch (err) {
-        // 🔓 Unlock on failure (allows retry)
         SIGNATURE_STATE = "idle";
-        console.error("sadjahsdkasd", err)
+        console.error("[CardByte] ❌ applySignature failed:", err.message || err);
+        console.error("[CardByte] Stack:", err.stack || "N/A");
+
         try {
-          const settings = Office.context.roamingSettings;
-          const user = mailbox?.userProfile || {};
+          const userProfile = mailbox?.userProfile || {};
 
-          const fallbackHtml =
-            `
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                    <tr>
-                        <td style="font-family:Arial,sans-serif;font-size:12px;">
-                            <strong>${user.displayName || ""}</strong><br/>
-                            ${user.emailAddress || ""}<br/>
-                            <span style="color:#999;">Sent via CardByte</span>
-                        </td>
-                    </tr>
-                </table>
-            `.trim();
+          const fallbackHtml = `
+            <table cellpadding="0" cellspacing="0" border="0" width="400">
+              <tr>
+                <td style="font-family:Arial,sans-serif;font-size:12px;">
+                  <strong>${userProfile.displayName || ""}</strong><br/>
+                  ${userProfile.emailAddress || ""}<br/>
+                  <span style="color:#999;">Sent via CardByte</span>
+                </td>
+              </tr>
+            </table>
+          `.trim();
 
-          await insertAtCursor(item, fallbackHtml);
+          // Even fallback uses tryInsertHtml for robustness
+          const item = mailbox?.item;
+          if (item) {
+            const fbResult = await tryInsertHtml(item, fallbackHtml, "Fallback");
+            if (fbResult.success) {
+              console.log("[CardByte] Fallback applied via", fbResult.method);
+            } else {
+              console.error("[CardByte] ❌ Fallback also failed entirely");
+            }
+          }
         } catch (fallbackErr) {
-          console.error("❌ Failed to apply fallback signature", fallbackErr);
+          console.error("[CardByte] ❌ Fallback error:", fallbackErr);
         }
       } finally {
         event.completed();
       }
     };
+
     /* ---------------------------------------------------------
-           Manual Debug Trigger
-           --------------------------------------------------------- */
+       Debug Helpers
+       --------------------------------------------------------- */
+
     window.testCardByte = () =>
       window.applySignature({ completed: () => console.log("🧪 done") });
+
+    /**
+     * Run from console: window.debugSignatureSize()
+     * Outputs detailed diagnostics about the signature and available APIs.
+     */
+    window.debugSignatureSize = async function () {
+      const mailbox = Office?.context?.mailbox;
+      const item = mailbox?.item;
+      const user = mailbox?.userProfile?.emailAddress || "sairajesh.korla1272@outlook.com";
+
+      console.log("[Debug] ════════════════════════════════════");
+      console.log("[Debug] Platform:", Office?.context?.platform || "unknown");
+      console.log("[Debug] Host:", Office?.context?.host || "unknown");
+
+      if (item) {
+        console.log("[Debug] setSignatureAsync:", typeof item.body?.setSignatureAsync);
+        console.log("[Debug] prependAsync:", typeof item.body?.prependAsync);
+        console.log("[Debug] setSelectedDataAsync:", typeof item.body?.setSelectedDataAsync);
+        console.log("[Debug] setAsync:", typeof item.body?.setAsync);
+        console.log("[Debug] addFileAttachmentFromBase64Async:", typeof item.addFileAttachmentFromBase64Async);
+      }
+
+      console.log("[Debug] Fetching signature...");
+      const html = await renderSignatureOnServer(user);
+
+      if (!html) {
+        console.error("[Debug] No HTML returned");
+        return;
+      }
+
+      const totalKB = (html.length / 1024).toFixed(1);
+      const base64Matches = html.match(/data:image\/[^;]+;base64,[^"]+/gi) || [];
+      const totalBase64KB = (base64Matches.reduce((s, m) => s + m.length, 0) / 1024).toFixed(1);
+
+      console.log(`[Debug] Total HTML: ${totalKB} KB`);
+      console.log(`[Debug] Base64 images: ${base64Matches.length} (${totalBase64KB} KB total)`);
+      base64Matches.forEach((m, i) => console.log(`  Image ${i}: ${(m.length / 1024).toFixed(1)} KB`));
+
+      const { cleanedHtml } = extractBase64Images(html);
+      console.log(`[Debug] HTML without images: ${(cleanedHtml.length / 1024).toFixed(1)} KB`);
+      console.log(`[Debug] Limit: ${(MAX_SAFE_HTML_SIZE / 1024).toFixed(0)} KB`);
+      console.log(`[Debug] Over limit: ${html.length > MAX_SAFE_HTML_SIZE}`);
+      console.log("[Debug] ════════════════════════════════════");
+
+      return {
+        totalKB,
+        imageCount: base64Matches.length,
+        imageTotalKB: totalBase64KB,
+        htmlWithoutImagesKB: (cleanedHtml.length / 1024).toFixed(1),
+        overLimit: html.length > MAX_SAFE_HTML_SIZE
+      };
+    };
   </script>
 </head>
 
