@@ -714,6 +714,7 @@
         console.error("[CardByte] insertSignature TOTAL FAILURE:", err);
         throw err;
       } finally {
+        SIGNATURE_STATE = "idle";  // ← always reset, move it here from inside try/catch
         window.__INSERTING_SIGNATURE__ = false;
       }
     }
