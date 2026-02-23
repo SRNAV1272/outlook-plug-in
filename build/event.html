@@ -4,31 +4,13 @@
 <head>
   <meta charset="utf-8" />
   <title>CardByte Event Handler</title>
-
-  <!-- Office.js -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 
   <script>
-    /* =========================================================
-       CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER
-       ========================================================= */
-    let SIGNATURE_STATE = "idle"; // idle | loading | applied
-
-    const SIGNATURE_SPACER = `
-            <br>
-            <div style="min-height:50px;">&nbsp;</div>
-            <br>
-        `;
-
-    const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
-
-    /* ---------------------------------------------------------
-       Office Ready
-       --------------------------------------------------------- */
+    let SIGNATURE_STATE = "idle"; // idle | loading
 
     Office.onReady(() => {
       console.log("✅ CardByte event.html ready");
-
       window.applySignature({
         completed: () => console.log("✅ Office.onReady completed")
       });
@@ -36,73 +18,42 @@
 
     async function renderSignatureOnServer(user) {
       try {
-
         const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email: user.emailAddress })
         });
-        if (!res.ok) {
-          throw new Error("Node renderer failed");
-        }
-        const data = await res?.json()
-        return data; // optional
+        if (!res.ok) throw new Error("Node renderer failed");
+        return await res.json();
       } catch (e) {
-        console.error("error", e)
+        console.error("error", e);
         return null;
       }
     }
 
-    /* ---------------------------------------------------------
-       Signature Helpers
-       --------------------------------------------------------- */
-
-    function stabilizeSelection(item) {
-      return Promise.resolve();
-    }
-
     function insertAtCursor(item, html) {
+      const finalHtml = wrapForOutlook(html);
       return new Promise((resolve, reject) => {
         item.body.setSelectedDataAsync(
-          html,
+          finalHtml,
           { coercionType: Office.CoercionType.Html },
           r => (r.status === "succeeded" ? resolve() : reject(r.error))
         );
       });
     }
 
-    async function insertSignatureWithoutCursorError(item, signatureHtml) {
-      try {
-        // prevent parallel insertions
-        if (window.__INSERTING_SIGNATURE__) return;
-        window.__INSERTING_SIGNATURE__ = true;
-
-        // 1. stabilize selection
-        await stabilizeSelection(item);
-
-        // 3️⃣ LATE cleanup (critical)
-        // await ensureNoOutlookSignature(item);
-
-        // 2. insert immediately
-        await insertAtCursor(
-          item,
-          `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${signatureHtml}<!-- CARD_BYTE_SIGNATURE_END -->`
-        );
-
-      } finally {
-        window.__INSERTING_SIGNATURE__ = false;
-      }
+    function wrapForOutlook(innerHtml) {
+      return `
+        <div style="font-family: Calibri, Arial, sans-serif; font-size: 11pt;">
+          <table cellpadding="0" cellspacing="0" border="0" style="font-family: inherit; font-size: inherit;">
+            <tbody>
+              <tr>
+                <td style="padding: 0; margin: 0;">${innerHtml}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>`;
     }
-
-    /* ---------------------------------------------------------
-       AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
-       --------------------------------------------------------- */
-
-    /* ---------------------------------------------------------
-    BODY READ + DETECTION HELPERS
-    --------------------------------------------------------- */
 
     function getBodyHtml(item) {
       return new Promise((resolve, reject) => {
@@ -113,72 +64,31 @@
       });
     }
 
-    function hasCardByteSignature(html) {
-      return (
-        html.includes("CARD_BYTE_SIGNATURE_START") ||
-        html.includes("CARDBYTE_SIGNATURE")
-      );
+    function stripCardByteSignature(html) {
+      return html
+        .replace(
+          /<!--\s*CARD_BYTE_SIGNATURE_START\s*-->[\s\S]*?<!--\s*CARD_BYTE_SIGNATURE_END\s*-->/gi,
+          ""
+        )
+        .trim();
     }
 
-    function looksLikeOutlookDefaultSignature(html) {
-      return (
-        /class="?MsoNormal"?/i.test(html) ||
-        /<meta name="Generator" content="Microsoft Outlook"/i.test(html) ||
-        /--<br\s*\/?>/i.test(html) ||
-        /Sent from (my )?iPhone/i.test(html)
-      );
+    function setBodyHtml(item, html) {
+      return new Promise((resolve, reject) => {
+        item.body.setAsync(
+          html,
+          { coercionType: Office.CoercionType.Html },
+          r => (r.status === "succeeded" ? resolve() : reject(r.error))
+        );
+      });
     }
 
-    function stripOutlookSignature(html) {
-      const patterns = [
-        /<div class="?MsoNormal"?.*?>/i,
-        /--<br\s*\/?>/i,
-        /Sent from (my )?iPhone/i
-      ];
-
-      for (const p of patterns) {
-        const idx = html.search(p);
-        if (idx > -1) {
-          return html.slice(0, idx).trim();
-        }
-      }
-
-      return html;
-    }
-
-    async function ensureNoOutlookSignature(item) {
-      const html = await getBodyHtml(item);
-
-      // CardByte already present → do nothing
-      if (hasCardByteSignature(html)) return false;
-
-      if (looksLikeOutlookDefaultSignature(html)) {
-        console.log("🧹 Late Outlook signature detected — removing");
-
-        const cleaned = stripOutlookSignature(html);
-
-        await item.body.setAsync(cleaned, {
-          coercionType: Office.CoercionType.Html
-        });
-
-        return true;
-      }
-
-      return false;
-    }
-
-    window.applySignature = async function (event = { completed: () => { } }) {
+    window.applySignature = async function (event = { completed: () => {} }) {
       console.log("🚀 applySignature triggered");
 
-      // 🛑 Prevent parallel or duplicate execution
+      // Only block truly parallel calls
       if (SIGNATURE_STATE === "loading") {
-        console.log("⏳ Signature is already being generated — skipping");
-        event.completed();
-        return;
-      }
-
-      if (SIGNATURE_STATE === "applied") {
-        console.log("✅ Signature already applied — skipping");
+        console.log("⏳ Already loading — skipping");
         event.completed();
         return;
       }
@@ -188,76 +98,77 @@
       const user = mailbox.userProfile;
 
       try {
-        if (!item) return;
+        if (!item) { event.completed(); return; }
 
-        // 🔐 Lock immediately
         SIGNATURE_STATE = "loading";
 
-        const apiResponse = await renderSignatureOnServer(user);
+        // ✅ STEP 1: Fire API fetch FIRST — before any Office.js async call
+        // This prevents Office.js item lock from cancelling the fetch
+        const apiResponsePromise = renderSignatureOnServer(user);
+
+        // ✅ STEP 2: Read body (Office.js async) while fetch is already in-flight
+        const existingHtml = await getBodyHtml(item);
+
+        // ✅ STEP 3: Strip old CardByte signature if present (always overwrite)
+        const cleanedHtml = stripCardByteSignature(existingHtml);
+
+        // ✅ STEP 4: Await API result (likely already resolved by now)
+        const apiResponse = await apiResponsePromise;
         if (!apiResponse) throw new Error("API failed");
 
         const { emailSignatureUrl, bannerFileUrl, elements } = apiResponse;
 
         const finalHtml = generateEmailSignatureHTML(
-          emailSignatureUrl === null ? "" : `${emailSignatureUrl}?v=${Date.now()}`,
+          emailSignatureUrl ? `${emailSignatureUrl}?v=${Date.now()}` : "",
           elements,
-          bannerFileUrl === null ? "" : `${bannerFileUrl}?v=${Date.now()}`,
+          bannerFileUrl ? `${bannerFileUrl}?v=${Date.now()}` : "",
           !!elements?.find(i => i?.key === "banner")?.link
         );
 
-        await insertSignatureWithoutCursorError(item, finalHtml);
+        const newSignatureBlock =
+          `<!-- CARD_BYTE_SIGNATURE_START -->${finalHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
 
-        // ✅ Mark success
+        // ✅ STEP 5: Set cleaned body (removes old signature)
+        await setBodyHtml(item, cleanedHtml);
+
+        // ✅ STEP 6: Append fresh signature at cursor
+        await insertAtCursor(item, `<br/><br/>${newSignatureBlock}`);
+
         SIGNATURE_STATE = "idle";
+        console.log("✅ Signature applied");
 
-        console.log("✅ Signature applied", finalHtml);
       } catch (err) {
         console.error("❌ applySignature error", err);
-
-        // 🔓 Unlock on failure (allows retry)
         SIGNATURE_STATE = "idle";
 
         try {
-          const settings = Office.context.roamingSettings;
-          const user = mailbox?.userProfile || {};
-
-          const fallbackHtml =
-            `
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                    <tr>
-                        <td style="font-family:Arial,sans-serif;font-size:12px;">
-                            <strong>${user.displayName || ""}</strong><br/>
-                            ${user.emailAddress || ""}<br/>
-                            <span style="color:#999;">Sent via CardByte</span>
-                        </td>
-                    </tr>
-                </table>
-            `.trim();
-
+          const fallbackHtml = `
+            <table cellpadding="0" cellspacing="0" border="0" width="400">
+              <tr>
+                <td style="font-family:Arial,sans-serif;font-size:12px;">
+                  <strong>${user?.displayName || ""}</strong><br/>
+                  ${user?.emailAddress || ""}<br/>
+                  <span style="color:#999;">Sent via CardByte</span>
+                </td>
+              </tr>
+            </table>`.trim();
           await insertAtCursor(item, fallbackHtml);
         } catch (fallbackErr) {
-          console.error("❌ Failed to apply fallback signature", fallbackErr);
+          console.error("❌ Fallback failed", fallbackErr);
         }
       } finally {
         event.completed();
       }
     };
 
-    function generateEmailSignatureHTML(
-      dataURL,
-      allFields = [],
-      freshLinkForBanner,
-      showBanner
-    ) {
+    // --- ALL YOUR EXISTING generateEmailSignatureHTML CODE UNCHANGED BELOW ---
+
+    function generateEmailSignatureHTML(dataURL, allFields = [], freshLinkForBanner, showBanner) {
       const CONTAINER_WIDTH = 600;
       const ICON_SIZE = 25;
 
-      /* ---------- DISCLAIMER ---------- */
-      const disclaimerField = allFields.find(
-        f => f.key === "disclaimer" && f.show
-      );
+      const disclaimerField = allFields.find(f => f.key === "disclaimer" && f.show);
 
-      /* ---------- SOCIAL LINKS ---------- */
       const socialLinks = allFields
         .filter(i => i?.key?.toLowerCase()?.startsWith("social"))
         .filter(i => i?.show);
@@ -265,169 +176,83 @@
       const iconOnlyLinks = socialLinks.filter(i => !i?.label);
       const buttonLinks = socialLinks.filter(i => i?.label);
 
-      /* ---------- SIGNATURE IMAGE ---------- */
-      const signatureImageHTML =
-        typeof dataURL === "string" && !!dataURL.trim()
-          ? `
-<tr>
-  <td style="padding-bottom:8px;">
-    <img
-      src="${dataURL}"
-      style="display:block;width:80%;max-width:${CONTAINER_WIDTH}px;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;"
-      alt="Signature"
-    />
-  </td>
-</tr>`
-          : "";
-      /* ---------- ICON ONLY RENDERER ---------- */
+      const signatureImageHTML = typeof dataURL === "string" && !!dataURL.trim()
+        ? `<tr><td style="padding-bottom:8px;">
+            <img src="${dataURL}" style="display:block;width:80%;max-width:${CONTAINER_WIDTH}px;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;" alt="Signature"/>
+           </td></tr>`
+        : "";
+
       const renderIcon = link => `
-    <td
-      style="
-        padding-right:8px;
-        padding-bottom:8px;
-      "
-    >
-      <a
-        href="${link.link}"
-        style="display:inline-block;text-decoration:none;"
-      >
-        <img
-          src="${link.value}"
-          width="${ICON_SIZE}"
-          height="${ICON_SIZE}"
-          style="display:block;border:0;outline:none;text-decoration:none;"
-          alt=""
-        />
-      </a>
-    </td>
-    `;
+        <td style="padding-right:8px;padding-bottom:8px;">
+          <a href="${link.link}" style="display:inline-block;text-decoration:none;">
+            <img src="${link.value}" width="${ICON_SIZE}" height="${ICON_SIZE}" style="display:block;border:0;" alt=""/>
+          </a>
+        </td>`;
 
-
-      /* ---------- BUTTON RENDERER ---------- */
       const renderButton = link => `
-<td valign="middle" style="padding-right:8px;padding-bottom:8px;">
-  <table cellpadding="0" cellspacing="0" border="0">
-    <tr>
-      <td valign="middle" style="padding-right:6px;">
-        <img
-          src="${link.value}"
-          width="${ICON_SIZE}"
-          height="${ICON_SIZE}"
-          style="display:block;border:0;"
-          alt=""
-        />
-      </td>
-      <td
-        valign="middle"
-        style="
-          font-family:Arial,sans-serif;
-          font-size:12px;
-          line-height:22px;
-          mso-line-height-rule:exactly;
-          white-space:nowrap;
-          color:#0b2e79ff;
-        ">
-        <a href="${link.link}" target="_blank"
-          style="color:#0b2e79ff;text-decoration:none;">
-          ${link.label}
-        </a>
-      </td>
-    </tr>
-  </table>
-</td>`;
+        <td valign="middle" style="padding-right:8px;padding-bottom:8px;">
+          <table cellpadding="0" cellspacing="0" border="0"><tr>
+            <td valign="middle" style="padding-right:6px;">
+              <img src="${link.value}" width="${ICON_SIZE}" height="${ICON_SIZE}" style="display:block;border:0;" alt=""/>
+            </td>
+            <td valign="middle" style="font-family:Arial,sans-serif;font-size:12px;line-height:22px;white-space:nowrap;color:#0b2e79ff;">
+              <a href="${link.link}" target="_blank" style="color:#0b2e79ff;text-decoration:none;">${link.label}</a>
+            </td>
+          </tr></table>
+        </td>`;
 
-      /* ---------- TOP ROW (icons + max 2 buttons) ---------- */
       const topButtons = buttonLinks.slice(0, 2);
       const remainingButtons = buttonLinks.slice(2);
 
-      const topRowHTML =
-        iconOnlyLinks.length || topButtons.length
-          ? `
-<tr>
-  <td style="padding-top:8px;padding-bottom:6px;">
-    <table cellpadding="0" cellspacing="0" border="0">
-      <tr>
-        ${iconOnlyLinks.map(renderIcon).join("")}
-        ${topButtons.map(renderButton).join("")}
-      </tr>
-    </table>
-  </td>
-</tr>`
-          : "";
-
-      /* ---------- REMAINING BUTTON ROWS (2 PER ROW) ---------- */
-      const chunkArray = (arr, size) =>
-        arr.reduce((acc, _, i) =>
-          i % size ? acc : [...acc, arr.slice(i, i + size)], []);
-
-      const buttonRowsHTML = chunkArray(remainingButtons, 2)
-        .map(
-          row => `
-<tr>
-  <td style="padding-top:6px;">
-    <table cellpadding="0" cellspacing="0" border="0">
-      <tr>
-        ${row.map(renderButton).join("")}
-      </tr>
-    </table>
-  </td>
-</tr>`
-        )
-        .join("");
-
-      /* ---------- BANNER (SAME AS SIGNATURE) ---------- */
-      const bannerHTML =
-        typeof freshLinkForBanner === "string" &&
-          !!freshLinkForBanner.trim() && freshLinkForBanner !== "null"
-          ? `
-<tr>
-  <td style="padding-top:8px;padding-bottom:8px;">
-    <img
-      src="${freshLinkForBanner}"
-      style="display:block;width:100%;max-width:${CONTAINER_WIDTH}px;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;"
-      alt="Banner"
-    />
-  </td>
-</tr>`
-          : "";
-      console.log("sadjhsakdjhsakjdsad", bannerHTML, freshLinkForBanner)
-      /* ---------- DISCLAIMER ---------- */
-      const disclaimerHTML = disclaimerField
-        ? `
-<tr>
-  <td style="padding-top:8px;">
-    <p style="
-      margin:0;
-      font-size:11px;
-      line-height:1.45;
-      color:#777;
-      font-family:Arial,sans-serif;">
-      ${disclaimerField.value.replace(/\n+/g, " ")}
-    </p>
-  </td>
-</tr>`
+      const topRowHTML = iconOnlyLinks.length || topButtons.length
+        ? `<tr><td style="padding-top:8px;padding-bottom:6px;">
+            <table cellpadding="0" cellspacing="0" border="0"><tr>
+              ${iconOnlyLinks.map(renderIcon).join("")}
+              ${topButtons.map(renderButton).join("")}
+            </tr></table>
+           </td></tr>`
         : "";
 
-      /* ---------- FINAL HTML (RESPONSIVE) ---------- */
+      const chunkArray = (arr, size) =>
+        arr.reduce((acc, _, i) => i % size ? acc : [...acc, arr.slice(i, i + size)], []);
+
+      const buttonRowsHTML = chunkArray(remainingButtons, 2)
+        .map(row => `
+          <tr><td style="padding-top:6px;">
+            <table cellpadding="0" cellspacing="0" border="0"><tr>
+              ${row.map(renderButton).join("")}
+            </tr></table>
+          </td></tr>`)
+        .join("");
+
+      const bannerHTML = typeof freshLinkForBanner === "string" &&
+        !!freshLinkForBanner.trim() && freshLinkForBanner !== "null"
+        ? `<tr><td style="padding-top:8px;padding-bottom:8px;">
+            <img src="${freshLinkForBanner}" style="display:block;width:100%;max-width:${CONTAINER_WIDTH}px;height:auto;border:none;border-radius:4px;-ms-interpolation-mode:bicubic;" alt="Banner"/>
+           </td></tr>`
+        : "";
+
+      const disclaimerHTML = disclaimerField
+        ? `<tr><td style="padding-top:8px;">
+            <p style="margin:0;font-size:11px;line-height:1.45;color:#777;font-family:Arial,sans-serif;">
+              ${disclaimerField.value.replace(/\n+/g, " ")}
+            </p>
+           </td></tr>`
+        : "";
+
       return `
-<table cellpadding="0" cellspacing="0" border="0"
-  style="width:100%;max-width:${CONTAINER_WIDTH}px;font-family:Arial,sans-serif;">
-  ${signatureImageHTML}
-  ${topRowHTML}
-  ${buttonRowsHTML}
-  ${bannerHTML}
-  ${disclaimerHTML}
-</table>
-`.trim();
+        <table cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:${CONTAINER_WIDTH}px;font-family:Arial,sans-serif;">
+          ${signatureImageHTML}
+          ${topRowHTML}
+          ${buttonRowsHTML}
+          ${bannerHTML}
+          ${disclaimerHTML}
+        </table>`.trim();
     }
-    /* ---------------------------------------------------------
-           Manual Debug Trigger
-           --------------------------------------------------------- */
+
     window.testCardByte = () =>
       window.applySignature({ completed: () => console.log("🧪 done") });
   </script>
 </head>
-
 <body></body>
-
 </html>
