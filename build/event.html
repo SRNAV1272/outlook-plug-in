@@ -35,12 +35,13 @@
        --------------------------------------------------------- */
 
     Office.onReady(() => {
-      window.applySignature({
-        completed: async () => {
-          SIGNATURE_STATE = "idle";  // ← always reset, move it here from inside try/catch
-          console.log("✅ Office.onReady completed", SIGNATURE_STATE);
-        }
-      });
+      console.log("[CardByte] Office.onReady fired — waiting for event trigger");
+      // console.log("[CardByte] Office.onReady fired — waiting for event trigger");({
+      //   completed: async () => {
+      //     SIGNATURE_STATE = "idle";  // ← always reset, move it here from inside try/catch
+      //     console.log("✅ Office.onReady completed", SIGNATURE_STATE);
+      //   }
+      // });
     });
 
     /* ---------------------------------------------------------
@@ -1032,6 +1033,7 @@
           console.error("[CardByte] ❌ Fallback error:", fallbackErr);
         }
       } finally {
+        SIGNATURE_STATE = "idle";
         event.completed();
       }
     };
