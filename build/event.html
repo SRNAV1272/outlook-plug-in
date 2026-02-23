@@ -37,7 +37,8 @@
     Office.onReady(() => {
       window.applySignature({
         completed: async () => {
-          console.log("✅ Office.onReady completed");
+          SIGNATURE_STATE = "idle";  // ← always reset, move it here from inside try/catch
+          console.log("✅ Office.onReady completed", SIGNATURE_STATE);
         }
       });
     });
@@ -714,7 +715,6 @@
         console.error("[CardByte] insertSignature TOTAL FAILURE:", err);
         throw err;
       } finally {
-        SIGNATURE_STATE = "idle";  // ← always reset, move it here from inside try/catch
         window.__INSERTING_SIGNATURE__ = false;
       }
     }
