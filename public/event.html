@@ -64,6 +64,7 @@
       });
     }
 
+    // ✅ Strips CardByte signature block
     function stripCardByteSignature(html) {
       return html
         .replace(
@@ -72,7 +73,6 @@
         )
         .trim();
     }
-
     function setBodyHtml(item, html) {
       return new Promise((resolve, reject) => {
         item.body.setAsync(
@@ -83,10 +83,9 @@
       });
     }
 
-    window.applySignature = async function (event = { completed: () => {} }) {
+    window.applySignature = async function (event = { completed: () => { } }) {
       console.log("🚀 applySignature triggered");
 
-      // Only block truly parallel calls
       if (SIGNATURE_STATE === "loading") {
         console.log("⏳ Already loading — skipping");
         event.completed();
@@ -102,17 +101,17 @@
 
         SIGNATURE_STATE = "loading";
 
-        // ✅ STEP 1: Fire API fetch FIRST — before any Office.js async call
-        // This prevents Office.js item lock from cancelling the fetch
+        // ✅ STEP 1: Fire fetch FIRST — before ANY Office.js await
         const apiResponsePromise = renderSignatureOnServer(user);
 
-        // ✅ STEP 2: Read body (Office.js async) while fetch is already in-flight
+        // ✅ STEP 2: Read body while fetch is in-flight
         const existingHtml = await getBodyHtml(item);
 
-        // ✅ STEP 3: Strip old CardByte signature if present (always overwrite)
-        const cleanedHtml = stripCardByteSignature(existingHtml);
+        // ✅ STEP 3: Strip ALL existing signatures (CardByte + plain text Outlook)
+        let cleanedHtml = stripCardByteSignature(existingHtml);
+        cleanedHtml = stripOutlookSignature(cleanedHtml);
 
-        // ✅ STEP 4: Await API result (likely already resolved by now)
+        // ✅ STEP 4: Await API
         const apiResponse = await apiResponsePromise;
         if (!apiResponse) throw new Error("API failed");
 
@@ -125,14 +124,24 @@
           !!elements?.find(i => i?.key === "banner")?.link
         );
 
-        const newSignatureBlock =
-          `<!-- CARD_BYTE_SIGNATURE_START -->${finalHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
+        // ✅ STEP 5: Build complete HTML — body + signature in ONE string
+        const completeHtml = `
+      ${cleanedHtml}
+      <br/>
+      <br/>
+      <!-- CARD_BYTE_SIGNATURE_START -->
+      ${finalHtml}
+      <!-- CARD_BYTE_SIGNATURE_END -->
+    `;
 
-        // ✅ STEP 5: Set cleaned body (removes old signature)
-        await setBodyHtml(item, cleanedHtml);
-
-        // ✅ STEP 6: Append fresh signature at cursor
-        await insertAtCursor(item, `<br/><br/>${newSignatureBlock}`);
+        // ✅ STEP 6: Single setAsync call — no two-step, no race condition
+        await new Promise((resolve, reject) => {
+          item.body.setAsync(
+            completeHtml,
+            { coercionType: Office.CoercionType.Html },
+            r => (r.status === "succeeded" ? resolve() : reject(r.error))
+          );
+        });
 
         SIGNATURE_STATE = "idle";
         console.log("✅ Signature applied");
@@ -143,16 +152,23 @@
 
         try {
           const fallbackHtml = `
-            <table cellpadding="0" cellspacing="0" border="0" width="400">
-              <tr>
-                <td style="font-family:Arial,sans-serif;font-size:12px;">
-                  <strong>${user?.displayName || ""}</strong><br/>
-                  ${user?.emailAddress || ""}<br/>
-                  <span style="color:#999;">Sent via CardByte</span>
-                </td>
-              </tr>
-            </table>`.trim();
-          await insertAtCursor(item, fallbackHtml);
+        <table cellpadding="0" cellspacing="0" border="0" width="400">
+          <tr>
+            <td style="font-family:Arial,sans-serif;font-size:12px;">
+              <strong>${user?.displayName || ""}</strong><br/>
+              ${user?.emailAddress || ""}<br/>
+              <span style="color:#999;">Sent via CardByte</span>
+            </td>
+          </tr>
+        </table>`.trim();
+
+          await new Promise((resolve, reject) => {
+            item.body.setAsync(
+              fallbackHtml,
+              { coercionType: Office.CoercionType.Html },
+              r => (r.status === "succeeded" ? resolve() : reject(r.error))
+            );
+          });
         } catch (fallbackErr) {
           console.error("❌ Fallback failed", fallbackErr);
         }
@@ -161,6 +177,26 @@
       }
     };
 
+    // ✅ Strips plain text Outlook default signatures (Rahul Ghose type)
+    function stripOutlookSignature(html) {
+      const patterns = [
+        // Outlook default sig div
+        /<div\s+id="Signature"[\s\S]*?<\/div>/gi,
+        // MsoNormal class divs (Outlook desktop)
+        /<div\s+class="?MsoNormal"?[\s\S]*?<\/div>/gi,
+        // iPhone/Android sent-from
+        /Sent from (my )?iPhone[\s\S]*/gi,
+        /Sent from my Android[\s\S]*/gi,
+        // Double dash separator
+        /--<br\s*\/?>/gi,
+      ];
+
+      let cleaned = html;
+      for (const p of patterns) {
+        cleaned = cleaned.replace(p, "");
+      }
+      return cleaned.trim();
+    }
     // --- ALL YOUR EXISTING generateEmailSignatureHTML CODE UNCHANGED BELOW ---
 
     function generateEmailSignatureHTML(dataURL, allFields = [], freshLinkForBanner, showBanner) {
@@ -254,5 +290,7 @@
       window.applySignature({ completed: () => console.log("🧪 done") });
   </script>
 </head>
+
 <body></body>
+
 </html>
