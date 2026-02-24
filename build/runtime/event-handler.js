@@ -222,59 +222,56 @@ async function renderSignatureOnServer(user) {
     try {
         const encryptedMail = await encryptEmail(user);
 
-        const results = await Promise.allSettled([
-            fetch("https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", {
+        // 🔹 1️⃣ Try Primary API First
+        const primaryRes = await fetch(
+            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            {
                 method: "GET",
                 headers: {
                     username: encryptedMail,
                 },
-            }),
+            }
+        );
 
-            fetch("https://qa-renderer.cardbyte.ai/render-signature", {
+        // ✅ If primary works → return it
+        if (primaryRes.ok) {
+            const data = await primaryRes.text();
+            const decryptedData = await handleAesDecrypt(data);
+
+            console.log("Using NEW renderer");
+            return JSON.parse(decryptedData)?.html || null;
+        }
+
+        console.warn("Primary failed. Falling back to legacy...");
+
+    } catch (err) {
+        console.warn("Primary crashed. Falling back to legacy...", err);
+    }
+
+    // 🔹 2️⃣ Fallback to Legacy API
+    try {
+        const legacyRes = await fetch(
+            "https://qa-renderer.cardbyte.ai/render-signature",
+            {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                 },
                 body: JSON.stringify({ email: user }),
-            }),
-        ]);
-
-        const [resResult, legacyResult] = results;
-
-        // --- Handle legacy response ---
-        if (legacyResult.status === "fulfilled") {
-            const legacyRes = legacyResult.value;
-
-            if (legacyRes.ok) {
-                const legacyData = await legacyRes.json();
-                // setForm(legacyData?.finalHtml)
-                console.log("Legacy Data:", legacyData?.finalHtml);
-                return legacyData?.finalHtml
-            } else {
-                console.error("Legacy API failed:", legacyRes.status);
             }
-        } else {
-            console.error("Legacy request error:", legacyResult.reason);
+        );
+
+        if (!legacyRes.ok) {
+            throw new Error("Legacy renderer failed");
         }
 
-        // --- Handle main response ---
-        if (resResult.status === "fulfilled") {
-            const res = resResult.value;
+        const legacyData = await legacyRes.json();
 
-            if (!res.ok) {
-                throw new Error("Node renderer failed");
-            }
+        console.log("Using LEGACY renderer", legacyData);
+        return legacyData?.finalHtml || null;
 
-            const data = await res.text();
-            const decryptedData = await handleAesDecrypt(data);
-
-            return JSON.parse(decryptedData)?.html || null;
-        }
-
-        throw new Error("Main API request failed");
-
-    } catch (e) {
-        console.error("error", e);
+    } catch (legacyError) {
+        console.error("Both primary and legacy failed:", legacyError);
         return null;
     }
 }
