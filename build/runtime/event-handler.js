@@ -179,23 +179,39 @@ async function renderSignatureOnServer(user) {
         const encryptedMail = await encryptEmail(user);
         console.log("[CardByte] Fetching signature for:", user);
 
-        const res = await fetch(
-            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-            {
-                method: "GET",
-                headers: {
-                    username: encryptedMail
-                }
-            }
-        );
+        // const res = await fetch(
+        //     "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+        //     {
+        //         method: "GET",
+        //         headers: {
+        //             username: encryptedMail
+        //         }
+        //     }
+        // );
+
+        // if (!res.ok) {
+        //     throw new Error(`Server responded with ${res.status}`);
+        // }
+
+        // const data = await res.text();
+        // const decryptedData = await handleAesDecrypt(data);
+        // return JSON.parse(decryptedData)?.html;
+        const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ email: user })
+        });
 
         if (!res.ok) {
             throw new Error(`Server responded with ${res.status}`);
         }
 
-        const data = await res.text();
-        const decryptedData = await handleAesDecrypt(data);
-        return JSON.parse(decryptedData)?.html;
+        const data = await res.json();
+        console.log("Asdjadkhasdkasdsa", data)
+        // const decryptedData = await handleAesDecrypt(data);
+        return data?.finalHtml;
     } catch (e) {
         console.error("[CardByte] renderSignatureOnServer error:", e);
         return null;
