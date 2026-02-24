@@ -359,7 +359,7 @@ export default function SignatureView({ Office, user, apply }) {
                                         {/* <div dangerouslySetInnerHTML={{ __html: form }} /> */}
                                         <div
                                             style={{
-                                                width: '95%',
+                                                // width: '95%',
                                                 background: '#fff',
                                                 borderRadius: '8px',
                                                 overflow: 'auto',
@@ -371,7 +371,7 @@ export default function SignatureView({ Office, user, apply }) {
                                             }}>
                                             <div
                                                 style={{
-                                                    width: '100%',
+                                                    // width: '100%',
                                                     display: 'flex',
                                                     justifyContent: 'center',
                                                     alignItems: 'center',
