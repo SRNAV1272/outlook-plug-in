@@ -35,11 +35,12 @@
        --------------------------------------------------------- */
 
     Office.onReady(() => {
-      window.applySignature({
-        completed: async () => {
-          console.log("✅ Office.onReady completed");
-        }
-      });
+      console.log("✅ Office.onReady is Started !");
+      // window.applySignature({
+      //   completed: async () => {
+      //     console.log("✅ Office.onReady completed");
+      //   }
+      // });
     });
 
     /* ---------------------------------------------------------
@@ -1023,6 +1024,7 @@
           console.error("[CardByte] ❌ Fallback error:", fallbackErr);
         }
       } finally {
+        SIGNATURE_STATE = "idle"
         event.completed();
       }
     };

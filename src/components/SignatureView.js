@@ -356,7 +356,41 @@ export default function SignatureView({ Office, user, apply }) {
                                         }}
                                     >
                                         {/* Render simplified preview */}
-                                        <div dangerouslySetInnerHTML={{ __html: form }} />
+                                        {/* <div dangerouslySetInnerHTML={{ __html: form }} /> */}
+                                        <div
+                                            style={{
+                                                width: '95%',
+                                                background: '#fff',
+                                                borderRadius: '8px',
+                                                overflow: 'auto',
+                                                position: 'relative',
+                                                margin: '10px',
+                                                height: "200px",
+                                                border: '1px solid red'
+
+                                            }}>
+                                            <div
+                                                style={{
+                                                    width: '100%',
+                                                    display: 'flex',
+                                                    justifyContent: 'center',
+                                                    alignItems: 'center',
+                                                    // transform: 'scale(0.95)',
+                                                    transformOrigin: 'center center'
+                                                }}
+                                            >
+                                                <div
+                                                    style={{
+                                                        width: '117.65%', // Compensate for scale
+                                                        display: 'flex',
+                                                        justifyContent: 'center',
+                                                    }}
+                                                    dangerouslySetInnerHTML={{
+                                                        __html: form
+                                                    }}
+                                                />
+                                            </div>
+                                        </div>
 
                                         <Stack
                                             mt={1}
