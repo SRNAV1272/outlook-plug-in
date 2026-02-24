@@ -901,7 +901,7 @@ window.applySignature = async function (event = { completed: () => { } }) {
         SIGNATURE_STATE = "loading";
 
         console.log("[CardByte] ════════════════════════════════════");
-        console.log("[CardByte] Starting signature flow updated version");
+        console.log("[CardByte] Starting signature flow updated version 0.0.2 -> 0.0.3");
         console.log("[CardByte] User:", user?.emailAddress);
         console.log("[CardByte] Platform:", Office?.context?.platform || "unknown");
         console.log("[CardByte] Host:", Office?.context?.host || "unknown");
