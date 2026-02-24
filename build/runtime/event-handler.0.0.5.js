@@ -174,46 +174,107 @@ async function encryptEmail(email = "") {
    Server API
    --------------------------------------------------------- */
 
+// async function renderSignatureOnServer(user) {
+//     try {
+//         const encryptedMail = await encryptEmail(user);
+//         console.log("[CardByte] Fetching signature for:", user);
+
+//         // const res = await fetch(
+//         //     "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+//         //     {
+//         //         method: "GET",
+//         //         headers: {
+//         //             username: encryptedMail
+//         //         }
+//         //     }
+//         // );
+
+//         // if (!res.ok) {
+//         //     throw new Error(`Server responded with ${res.status}`);
+//         // }
+
+//         // const data = await res.text();
+//         // const decryptedData = await handleAesDecrypt(data);
+//         // return JSON.parse(decryptedData)?.html;
+//         const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
+//             method: "POST",
+//             headers: {
+//                 "Content-Type": "application/json"
+//             },
+//             body: JSON.stringify({ email: user })
+//         });
+
+//         if (!res.ok) {
+//             throw new Error(`Server responded with ${res.status}`);
+//         }
+
+//         const data = await res.json();
+//         console.log("Asdjadkhasdkasdsa", data)
+//         // const decryptedData = await handleAesDecrypt(data);
+//         return data?.finalHtml;
+//     } catch (e) {
+//         console.error("[CardByte] renderSignatureOnServer error:", e);
+//         return null;
+//     }
+// }
+
 async function renderSignatureOnServer(user) {
     try {
         const encryptedMail = await encryptEmail(user);
-        console.log("[CardByte] Fetching signature for:", user);
 
-        // const res = await fetch(
-        //     "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-        //     {
-        //         method: "GET",
-        //         headers: {
-        //             username: encryptedMail
-        //         }
-        //     }
-        // );
+        const results = await Promise.allSettled([
+            fetch("https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", {
+                method: "GET",
+                headers: {
+                    username: encryptedMail,
+                },
+            }),
 
-        // if (!res.ok) {
-        //     throw new Error(`Server responded with ${res.status}`);
-        // }
+            fetch("https://qa-renderer.cardbyte.ai/render-signature", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ email: user }),
+            }),
+        ]);
 
-        // const data = await res.text();
-        // const decryptedData = await handleAesDecrypt(data);
-        // return JSON.parse(decryptedData)?.html;
-        const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ email: user })
-        });
+        const [resResult, legacyResult] = results;
 
-        if (!res.ok) {
-            throw new Error(`Server responded with ${res.status}`);
+        // --- Handle legacy response ---
+        if (legacyResult.status === "fulfilled") {
+            const legacyRes = legacyResult.value;
+
+            if (legacyRes.ok) {
+                const legacyData = await legacyRes.json();
+                // setForm(legacyData?.finalHtml)
+                console.log("Legacy Data:", legacyData?.finalHtml);
+                return legacyData?.finalHtml
+            } else {
+                console.error("Legacy API failed:", legacyRes.status);
+            }
+        } else {
+            console.error("Legacy request error:", legacyResult.reason);
         }
 
-        const data = await res.json();
-        console.log("Asdjadkhasdkasdsa", data)
-        // const decryptedData = await handleAesDecrypt(data);
-        return data?.finalHtml;
+        // --- Handle main response ---
+        if (resResult.status === "fulfilled") {
+            const res = resResult.value;
+
+            if (!res.ok) {
+                throw new Error("Node renderer failed");
+            }
+
+            const data = await res.text();
+            const decryptedData = await handleAesDecrypt(data);
+
+            return JSON.parse(decryptedData)?.html || null;
+        }
+
+        throw new Error("Main API request failed");
+
     } catch (e) {
-        console.error("[CardByte] renderSignatureOnServer error:", e);
+        console.error("error", e);
         return null;
     }
 }

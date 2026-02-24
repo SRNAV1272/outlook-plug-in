@@ -8,6 +8,7 @@ import signnotassigned from "../components/SignatureComponents/Assets/Images/sig
 export default function SignatureView({ Office, user, apply }) {
     const [form, setForm] = useState(null)
     const [error, setError] = useState("")
+    const [legacy, setLegacy] = useState(false)
     // Responsive scaling
     const [load, setLoad] = useState(false)
     const applyHTML = async () => {
@@ -196,22 +197,61 @@ export default function SignatureView({ Office, user, apply }) {
 
     async function renderSignatureOnServer(user) {
         try {
-            const encryptedMail = await encryptEmail(user)
-            const res = await fetch("https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", {
-                method: "GET",
-                headers: {
-                    "username": encryptedMail
-                }
-            });
+            const encryptedMail = await encryptEmail(user);
 
-            if (!res.ok) {
-                throw new Error("Node renderer failed");
+            const results = await Promise.allSettled([
+                fetch("https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", {
+                    method: "GET",
+                    headers: {
+                        username: encryptedMail,
+                    },
+                }),
+
+                fetch("https://qa-renderer.cardbyte.ai/render-signature", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ email: user }),
+                }),
+            ]);
+
+            const [resResult, legacyResult] = results;
+
+            // --- Handle legacy response ---
+            if (legacyResult.status === "fulfilled") {
+                const legacyRes = legacyResult.value;
+
+                if (legacyRes.ok) {
+                    const legacyData = await legacyRes.json();
+                    // setForm(legacyData?.finalHtml)
+                    console.log("Legacy Data:", legacyData?.finalHtml);
+                    return legacyData?.finalHtml
+                } else {
+                    console.error("Legacy API failed:", legacyRes.status);
+                }
+            } else {
+                console.error("Legacy request error:", legacyResult.reason);
             }
-            const data = await res?.text()
-            const decryptedData = await handleAesDecrypt(data)
-            return JSON.parse(decryptedData)?.html; // optional
+
+            // --- Handle main response ---
+            if (resResult.status === "fulfilled") {
+                const res = resResult.value;
+
+                if (!res.ok) {
+                    throw new Error("Node renderer failed");
+                }
+
+                const data = await res.text();
+                const decryptedData = await handleAesDecrypt(data);
+
+                return JSON.parse(decryptedData)?.html || null;
+            }
+
+            throw new Error("Main API request failed");
+
         } catch (e) {
-            console.error("error", e)
+            console.error("error", e);
             return null;
         }
     }
@@ -365,8 +405,8 @@ export default function SignatureView({ Office, user, apply }) {
                                                 overflow: 'auto',
                                                 position: 'relative',
                                                 margin: '10px',
-                                                height: "200px",
-                                                border: '1px solid red'
+                                                // height: "200px",
+                                                // border: '1px solid red'
 
                                             }}>
                                             <div
