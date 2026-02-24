@@ -1,3 +1,19 @@
+<!-- <!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <title>CardByte Event Handler</title>
+
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+
+  <script src="./static/js/event-handler.js?v=BUILD_HASH"></script>
+</head>
+
+<body></body>
+
+</html> -->
+
 <!DOCTYPE html>
 <html lang="en">
 
@@ -5,13 +21,84 @@
   <meta charset="utf-8" />
   <title>CardByte Event Handler</title>
 
-  <!-- Office.js -->
-  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <!-- Prevent Outlook from caching this page -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
 
-  <!-- Event Handler (cache-busted at build time) -->
-  <script src="./static/js/event-handler.js?v=098298c2"></script>
+  <!-- Office.js must load first -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 
-<body></body>
+<body>
+  <script>
+    (function () {
+      /**
+       * Runtime loader for CardByte event handler.
+       * 
+       * Fetches /runtime/version.json (cache-busted with timestamp)
+       * then loads /runtime/event-handler.<hash>.js
+       *
+       * Fallback: if version.json fails, loads event-handler.js directly.
+       */
+
+      function loadScript(src) {
+        return new Promise(function (resolve, reject) {
+          var script = document.createElement("script");
+          script.src = src;
+          script.async = false;
+          script.onload = resolve;
+          script.onerror = reject;
+          document.body.appendChild(script);
+        });
+      }
+
+      async function loadRuntime() {
+        var basePath = "/runtime/";
+        var version = null;
+
+        try {
+          // Timestamp bust ensures Outlook can't serve stale version.json
+          var res = await fetch(basePath + "version.json?t=" + Date.now(), {
+            cache: "no-store",
+            headers: { "Pragma": "no-cache", "Cache-Control": "no-cache" }
+          });
+
+          if (!res.ok) throw new Error("version.json returned " + res.status);
+
+          var data = await res.json();
+          version = data.version;
+        } catch (e) {
+          console.warn("[CardByte] version.json fetch failed, using fallback:", e.message);
+        }
+
+        // Build the script URL
+        var scriptUrl = version
+          ? basePath + "event-handler." + version + ".js"
+          : basePath + "event-handler.js?t=" + Date.now();
+
+        try {
+          await loadScript(scriptUrl);
+          console.log("[CardByte] ✅ Runtime loaded:", scriptUrl);
+        } catch (e) {
+          console.error("[CardByte] ❌ Failed to load runtime:", scriptUrl, e);
+
+          // Last resort: try unversioned file
+          if (version) {
+            console.warn("[CardByte] Trying unversioned fallback...");
+            try {
+              await loadScript(basePath + "event-handler.js?t=" + Date.now());
+              console.log("[CardByte] ✅ Fallback runtime loaded");
+            } catch (e2) {
+              console.error("[CardByte] ❌ All runtime loading failed:", e2);
+            }
+          }
+        }
+      }
+
+      loadRuntime();
+    })();
+  </script>
+</body>
 
 </html>
