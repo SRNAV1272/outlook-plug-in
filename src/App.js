@@ -766,7 +766,8 @@ export default function App({ user }) {
     // Variant 2: Compressed images
     try {
       const compressed = await compressImagesInHtml(signatureBlock);
-      if (compressed.length < originalSize && compressed.length <= MAX_SAFE_HTML_SIZE) {
+      // Add even if same size — compression may have helped individual images
+      if (compressed.length <= MAX_SAFE_HTML_SIZE) {
         variants.push({ label: "Compressed", html: compressed, images: null });
       }
     } catch (e) {
@@ -776,19 +777,20 @@ export default function App({ user }) {
     // Variant 3: CID inline attachments (images extracted)
     try {
       const { cleanedHtml, images } = extractBase64Images(signatureBlock);
-      if (cleanedHtml.length < originalSize) {
+      if (images.length > 0) {
         variants.push({ label: "CID", html: cleanedHtml, images });
       }
     } catch (e) {
       console.warn("[CardByte] CID extraction failed:", e.message);
     }
 
-    // Variant 4: All images stripped (always smallest, always works)
+    // Variant 4: All images stripped (always works, last resort)
     const stripped = stripBase64Images(signatureBlock);
     variants.push({ label: "Stripped", html: stripped, images: null });
 
-    // Sort by size ascending — try smallest first
-    variants.sort((a, b) => a.html.length - b.html.length);
+    // ✅ DO NOT sort by size — order matters:
+    // Original → Compressed → CID → Stripped
+    // We want best visual quality first, stripped only as last resort
 
     console.log(`[CardByte] Variants: ${variants.map(v => `${v.label}(${(v.html.length / 1024).toFixed(1)}KB)`).join(", ")}`);
 
