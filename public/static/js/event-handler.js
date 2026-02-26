@@ -1,5 +1,11 @@
 /* =========================================================
-   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER
+   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER (v0.0.4)
+   =========================================================
+   FIXES:
+   - Reply/ReplyAll/Forward preserves the conversation chain
+   - Cursor stays at top of reply area (not pushed to bottom)
+   - setSignatureAsync preferred for replies (doesn't move cursor)
+   - Fallback uses prependAsync which also preserves cursor
    ========================================================= */
 let SIGNATURE_STATE = "idle"; // idle | loading | applied
 
@@ -173,50 +179,6 @@ async function encryptEmail(email = "") {
 /* ---------------------------------------------------------
    Server API
    --------------------------------------------------------- */
-
-// async function renderSignatureOnServer(user) {
-//     try {
-//         const encryptedMail = await encryptEmail(user);
-//         console.log("[CardByte] Fetching signature for:", user);
-
-//         // const res = await fetch(
-//         //     "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-//         //     {
-//         //         method: "GET",
-//         //         headers: {
-//         //             username: encryptedMail
-//         //         }
-//         //     }
-//         // );
-
-//         // if (!res.ok) {
-//         //     throw new Error(`Server responded with ${res.status}`);
-//         // }
-
-//         // const data = await res.text();
-//         // const decryptedData = await handleAesDecrypt(data);
-//         // return JSON.parse(decryptedData)?.html;
-//         const res = await fetch("https://qa-renderer.cardbyte.ai/render-signature", {
-//             method: "POST",
-//             headers: {
-//                 "Content-Type": "application/json"
-//             },
-//             body: JSON.stringify({ email: user })
-//         });
-
-//         if (!res.ok) {
-//             throw new Error(`Server responded with ${res.status}`);
-//         }
-
-//         const data = await res.json();
-//         console.log("Asdjadkhasdkasdsa", data)
-//         // const decryptedData = await handleAesDecrypt(data);
-//         return data?.finalHtml;
-//     } catch (e) {
-//         console.error("[CardByte] renderSignatureOnServer error:", e);
-//         return null;
-//     }
-// }
 
 async function renderSignatureOnServer(user) {
     try {
@@ -510,6 +472,8 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
 
 /**
  * Method A: body.setAsync — replaces entire body (has size limits)
+ * ⚠️ WARNING: This replaces the FULL body. Only use with combined HTML
+ * that already includes the reply chain.
  */
 function bodySetAsync(item, html) {
     return new Promise((resolve, reject) => {
@@ -525,8 +489,9 @@ function bodySetAsync(item, html) {
 }
 
 /**
- * Method B: body.prependAsync — prepends to body (may handle larger payloads)
- * Available in Mailbox requirement set 1.1+
+ * Method B: body.prependAsync — prepends to body top
+ * ✅ SAFE for replies: adds content at top, keeps reply chain intact,
+ *    cursor stays near top.
  */
 function bodyPrependAsync(item, html) {
     return new Promise((resolve, reject) => {
@@ -547,7 +512,6 @@ function bodyPrependAsync(item, html) {
 
 /**
  * Method C: body.setSelectedDataAsync — inserts at cursor position
- * Can sometimes bypass setAsync size limits.
  */
 function bodySetSelectedDataAsync(item, html) {
     return new Promise((resolve, reject) => {
@@ -568,6 +532,8 @@ function bodySetSelectedDataAsync(item, html) {
 
 /**
  * Method D: body.setSignatureAsync — specifically designed for signatures
+ * ✅ BEST for replies: inserts signature in the signature slot without
+ *    touching the body content or cursor position.
  * Available in Mailbox requirement set 1.10+
  */
 function bodySetSignatureAsync(item, html) {
@@ -603,32 +569,102 @@ function containsGifImages(html) {
 }
 
 /**
- * Tries multiple insertion methods in order of preference.
- * On OWA, setAsync/prependAsync are tried first because
- * setSignatureAsync strips large base64 images (especially GIFs).
- * On desktop Outlook, setSignatureAsync is preferred.
+ * Detects if the current body looks like a reply/forward
+ * (contains a quoted conversation chain).
+ */
+function detectReplyChain(html) {
+    const replyMarkers = [
+        /divRplyFwdMsg/i,
+        /appendonsend/i,
+        /OriginalMessage/i,
+        /<blockquote/i,
+        /x_divRplyFwdMsg/i,
+        /class="?OutlookMessageHeader"?/i,
+        /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+    ];
+    return replyMarkers.some((p) => p.test(html));
+}
+
+/**
+ * Tries insertion methods — order depends on whether this is a
+ * reply (must preserve chain + cursor) or a new compose.
+ *
+ * FOR REPLIES:
+ *   1. setSignatureAsync — best: signature slot, no body/cursor change
+ *   2. prependAsync — good: adds at top, chain stays, cursor near top
+ *   3. setAsync with full combined HTML — last resort (cursor may jump)
+ *
+ * FOR NEW COMPOSE:
+ *   Same as before — setSignatureAsync first on desktop, setAsync on OWA
  *
  * Returns { success: boolean, method: string }
  */
-async function tryInsertHtml(item, html, label = "") {
+async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
     const owa = isOWA();
-    const hasGifs = containsGifImages(html);
+    const hasGifs = containsGifImages(signatureHtml);
+
+    // For signature-only insertion (reply mode), prefer methods that
+    // don't replace the body:
+    //   1. setSignatureAsync — inserts into signature slot, body untouched
+    //   2. prependAsync — adds at top of body, chain stays below
+    // Only fall back to setAsync with full body as last resort.
+
+    let methods;
+
+    if (owa && hasGifs) {
+        // OWA + GIFs: setSignatureAsync strips GIFs, so try prepend first
+        methods = [
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+        ];
+    } else {
+        // Default: setSignatureAsync is best — doesn't touch body at all
+        methods = [
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+        ];
+    }
+
+    console.log(`[CardByte] ${label} Platform: ${owa ? 'OWA' : 'Desktop'}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' → ')}`);
+
+    for (const m of methods) {
+        try {
+            console.log(`[CardByte] ${label} Trying ${m.name}...`);
+            await m.fn();
+            console.log(`[CardByte] ✅ ${m.name} succeeded`);
+            return { success: true, method: m.name };
+        } catch (err) {
+            const msg = err?.message || err?.code || JSON.stringify(err);
+            console.warn(`[CardByte] ${m.name} failed: ${msg}`);
+        }
+    }
+
+    return { success: false, method: "none" };
+}
+
+/**
+ * Full-body replacement insertion (used for new compose or as last resort).
+ * Tries all methods including setAsync which replaces the entire body.
+ */
+async function tryInsertFullBody(item, fullHtml, label = "") {
+    const owa = isOWA();
+    const hasGifs = containsGifImages(fullHtml);
 
     let methods;
 
     if (owa || hasGifs) {
         methods = [
-            { name: "setAsync", fn: () => bodySetAsync(item, html) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
         ];
     } else {
         methods = [
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
-            { name: "setAsync", fn: () => bodySetAsync(item, html) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
         ];
     }
 
@@ -674,17 +710,23 @@ function stabilizeSelection(_item) {
 }
 
 /* ---------------------------------------------------------
-   Main Insertion — Multi-Strategy
+   Main Insertion — Multi-Strategy (FIXED for Reply chains)
    --------------------------------------------------------- */
 
 /**
- * Tier 1: Insert full HTML as-is (small signatures)
- * Tier 2: Compress images, then insert (GIFs preserved, non-GIFs compressed)
- * Tier 3: Extract images as CID attachments, insert light HTML
- * Tier 4: Strip images completely, insert text-only
+ * TWO PATHS:
  *
- * Each tier tries ALL insertion methods (order depends on platform)
- * before falling through to the next tier.
+ * PATH A — REPLY / REPLY ALL / FORWARD (reply chain detected):
+ *   Uses setSignatureAsync or prependAsync to insert ONLY the signature.
+ *   These methods don't replace the body, so the reply chain and cursor
+ *   position are preserved. Falls back to full-body replacement only
+ *   if signature-only methods all fail.
+ *
+ * PATH B — NEW COMPOSE (no reply chain):
+ *   Appends signature to existing body (which may just be empty or a
+ *   stripped default signature) and uses full-body replacement.
+ *
+ * Each path has tiered image compression fallbacks.
  */
 async function insertSignatureWithoutCursorError(item, signatureHtml) {
     try {
@@ -694,82 +736,173 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         await stabilizeSelection(item);
 
         const wrappedHtml = wrapForOutlook(signatureHtml);
-        const signatureBlock = `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
+        const signatureBlock = `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
 
         const sizeKB = (signatureBlock.length / 1024).toFixed(1);
         const gifCount = (signatureBlock.match(/data:image\/gif;base64,/gi) || []).length;
-        console.log(`[CardByte] ── Insertion start ── HTML size: ${sizeKB} KB, GIFs: ${gifCount}`);
+        console.log(`[CardByte] ── Insertion start ── Signature size: ${sizeKB} KB, GIFs: ${gifCount}`);
 
-        // ✅ READ existing body first to preserve reply chain
+        // ✅ READ existing body to detect reply chain
         const existingBody = await getBodyHtml(item);
+        const isReply = detectReplyChain(existingBody);
+        const alreadyHasSignature = hasCardByteSignature(existingBody);
 
-        let fullHtml;
+        console.log(`[CardByte] isReply: ${isReply}, alreadyHasSignature: ${alreadyHasSignature}`);
 
-        if (hasCardByteSignature(existingBody)) {
-            // Replace existing CardByte signature
-            fullHtml = existingBody.replace(
-                /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
-                signatureBlock
-            );
-        } else {
-            // Insert signature BEFORE the reply chain
-            // Look for the quoted reply boundary (Outlook uses <div id="divRplyFwdMsg" or similar)
-            const replyMarkers = [
-                /<div[^>]*id="?divRplyFwdMsg"?/i,
-                /<div[^>]*id="?appendonsend"?/i,
-                /<hr[^>]*style="display\s*:\s*inline-block/i,
-                /<blockquote/i,
-                /<!-- OriginalMessage -->/i,
-            ];
+        // ═══════════════════════════════════════════════════
+        // PATH A: REPLY / REPLY ALL / FORWARD
+        // ═══════════════════════════════════════════════════
+        if (isReply) {
+            console.log("[CardByte] 📧 Reply/Forward detected — using signature-only insertion to preserve chain & cursor");
 
-            let insertIndex = -1;
-            for (const marker of replyMarkers) {
-                const match = existingBody.search(marker);
-                if (match > -1) {
-                    insertIndex = match;
-                    break;
+            // If we already have a CardByte signature, we need to replace it
+            // which requires full-body replacement
+            if (alreadyHasSignature) {
+                console.log("[CardByte] Replacing existing CardByte signature in reply");
+                const updatedBody = existingBody.replace(
+                    /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
+                    signatureBlock
+                );
+                // Must use full-body set since we're replacing inline content
+                const result = await tryInsertFullBody(item, updatedBody, "Reply-Replace");
+                if (result.success) return;
+                // If that fails, fall through to signature-only methods below
+            }
+
+            // ── Tier 1: Insert signature only (no body replacement) ──
+            {
+                console.log("[CardByte] Reply Tier 1: Signature-only insert");
+                const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
+                if (result.success) return;
+            }
+
+            // ── Tier 2: Compress images in signature, then signature-only insert ──
+            {
+                console.log("[CardByte] Reply Tier 2: Compress + signature-only insert");
+                try {
+                    const compressed = await compressImagesInHtml(signatureBlock);
+                    console.log(`[CardByte] Compressed signature: ${(compressed.length / 1024).toFixed(1)} KB`);
+                    const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
+                    if (result.success) return;
+                } catch (e) {
+                    console.warn("[CardByte] Reply Tier 2 compression error:", e.message);
                 }
             }
 
-            if (insertIndex > -1) {
-                // Insert signature between new content and reply chain
-                const before = existingBody.slice(0, insertIndex);
-                const after = existingBody.slice(insertIndex);
-                fullHtml = `${before}<br/><br/>${signatureBlock}${after}`;
-            } else {
-                // No reply chain found — append at bottom
-                fullHtml = `${existingBody}<br/><br/>${signatureBlock}`;
+            // ── Tier 3: CID attachments + signature-only insert ──
+            {
+                console.log("[CardByte] Reply Tier 3: CID + signature-only insert");
+                try {
+                    const { cleanedHtml, images } = extractBase64Images(signatureBlock);
+                    const result = await tryInsertSignatureOnly(item, cleanedHtml, "Reply-T3");
+                    if (result.success) {
+                        let attached = 0;
+                        for (const img of images) {
+                            try {
+                                await addInlineImageAttachment(item, img);
+                                attached++;
+                            } catch (e) {
+                                console.warn(`[CardByte] Image attach failed: ${img.cid}`);
+                            }
+                        }
+                        console.log(`[CardByte] Attached ${attached}/${images.length} images`);
+                        return;
+                    }
+                } catch (e) {
+                    console.warn("[CardByte] Reply Tier 3 error:", e.message);
+                }
             }
+
+            // ── Tier 4: Strip images + signature-only insert ──
+            {
+                console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
+                const stripped = stripBase64Images(signatureBlock);
+                const result = await tryInsertSignatureOnly(item, stripped, "Reply-T4");
+                if (result.success) return;
+            }
+
+            // ── Tier 5 (last resort): Full body replacement with reply chain preserved ──
+            {
+                console.log("[CardByte] Reply Tier 5: Full body replacement (last resort — cursor may move)");
+
+                // Find the reply boundary and insert signature before it
+                const replyMarkers = [
+                    /<div[^>]*id="?divRplyFwdMsg"?/i,
+                    /<div[^>]*id="?appendonsend"?/i,
+                    /<div[^>]*id="?x_divRplyFwdMsg"?/i,
+                    /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+                    /<blockquote/i,
+                    /<!-- OriginalMessage -->/i,
+                ];
+
+                let insertIndex = -1;
+                for (const marker of replyMarkers) {
+                    const match = existingBody.search(marker);
+                    if (match > -1) {
+                        insertIndex = match;
+                        break;
+                    }
+                }
+
+                let fullHtml;
+                if (insertIndex > -1) {
+                    const before = existingBody.slice(0, insertIndex);
+                    const after = existingBody.slice(insertIndex);
+                    fullHtml = `${before}${signatureBlock}${after}`;
+                } else {
+                    fullHtml = `${existingBody}${signatureBlock}`;
+                }
+
+                const stripped = stripBase64Images(fullHtml);
+                const result = await tryInsertFullBody(item, stripped, "Reply-T5");
+                if (result.success) return;
+            }
+
+            throw new Error("All reply insertion tiers failed");
         }
 
-        // ── Tier 1: Direct insert ──
+        // ═══════════════════════════════════════════════════
+        // PATH B: NEW COMPOSE
+        // ═══════════════════════════════════════════════════
+        console.log("[CardByte] ✉️ New compose detected — using standard insertion");
+
+        // For new compose, try setSignatureAsync first (it places the
+        // signature correctly and keeps cursor at top)
+        // ── Tier 1: Signature-only methods first (even for new compose) ──
         {
-            console.log("[CardByte] Tier 1: Direct insert");
-            const result = await tryInsertHtml(item, fullHtml, "Tier1");
+            console.log("[CardByte] Compose Tier 1: Signature-only insert");
+            const result = await tryInsertSignatureOnly(item, signatureBlock, "Compose-T1");
             if (result.success) return;
         }
 
-        // ── Tier 2: Compress images (GIFs preserved, others compressed) ──
+        // ── Tier 2: Full body replacement (append signature to existing body) ──
+        const fullHtml = `${existingBody}<br/>${signatureBlock}`;
+
         {
-            console.log("[CardByte] Tier 2: Compress images");
+            console.log("[CardByte] Compose Tier 2: Direct full-body insert");
+            const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
+            if (result.success) return;
+        }
+
+        // ── Tier 3: Compress images + full body ──
+        {
+            console.log("[CardByte] Compose Tier 3: Compress images");
             try {
                 const compressed = await compressImagesInHtml(fullHtml);
                 console.log(`[CardByte] Compressed size: ${(compressed.length / 1024).toFixed(1)} KB`);
-                const result = await tryInsertHtml(item, compressed, "Tier2");
+                const result = await tryInsertFullBody(item, compressed, "Compose-T3");
                 if (result.success) return;
             } catch (e) {
-                console.warn("[CardByte] Tier 2 compression error:", e.message);
+                console.warn("[CardByte] Compose Tier 3 compression error:", e.message);
             }
         }
 
-        // ── Tier 3: CID inline attachments ──
+        // ── Tier 4: CID inline attachments ──
         {
-            console.log("[CardByte] Tier 3: CID inline attachments");
+            console.log("[CardByte] Compose Tier 4: CID inline attachments");
             try {
                 const { cleanedHtml, images } = extractBase64Images(fullHtml);
-                console.log(`[CardByte] HTML without images: ${(cleanedHtml.length / 1024).toFixed(1)} KB, images: ${images.length}`);
-
-                const result = await tryInsertHtml(item, cleanedHtml, "Tier3");
+                const result = await tryInsertFullBody(item, cleanedHtml, "Compose-T4");
                 if (result.success) {
                     let attached = 0;
                     for (const img of images) {
@@ -784,20 +917,19 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     return;
                 }
             } catch (e) {
-                console.warn("[CardByte] Tier 3 error:", e.message);
+                console.warn("[CardByte] Compose Tier 4 error:", e.message);
             }
         }
 
-        // ── Tier 4: Strip all images ──
+        // ── Tier 5: Strip all images ──
         {
-            console.log("[CardByte] Tier 4: Strip images (last resort)");
+            console.log("[CardByte] Compose Tier 5: Strip images (last resort)");
             const stripped = stripBase64Images(fullHtml);
-            console.log(`[CardByte] Stripped size: ${(stripped.length / 1024).toFixed(1)} KB`);
-            const result = await tryInsertHtml(item, stripped, "Tier4");
+            const result = await tryInsertFullBody(item, stripped, "Compose-T5");
             if (result.success) return;
         }
 
-        throw new Error("All 4 tiers × all insertion methods failed");
+        throw new Error("All compose insertion tiers failed");
 
     } catch (err) {
         console.error("[CardByte] insertSignature TOTAL FAILURE:", err);
@@ -951,6 +1083,7 @@ async function disableClientSignature(item) {
 /**
  * Ensures no default/Outlook/mobile signature is present in the body.
  * Called BEFORE inserting the CardByte signature.
+ * ✅ SAFE: Skips removal entirely on reply/forward to avoid damaging chain.
  */
 async function ensureNoDefaultSignature(item) {
     try {
@@ -964,8 +1097,7 @@ async function ensureNoDefaultSignature(item) {
         }
 
         // ✅ Don't strip signatures from reply/forward bodies — too risky
-        const hasReplyChain = /divRplyFwdMsg|appendonsend|OriginalMessage|<blockquote/i.test(html);
-        if (hasReplyChain) {
+        if (detectReplyChain(html)) {
             console.log("[CardByte] Reply/forward detected — skipping default signature removal");
             return false;
         }
@@ -1024,7 +1156,7 @@ window.applySignature = async function (event = { completed: () => { } }) {
         SIGNATURE_STATE = "loading";
 
         console.log("[CardByte] ════════════════════════════════════");
-        console.log("[CardByte] Starting signature flow updated version 0.0.2 -> 0.0.3");
+        console.log("[CardByte] Starting signature flow v0.0.4");
         console.log("[CardByte] User:", user?.emailAddress);
         console.log("[CardByte] Platform:", Office?.context?.platform || "unknown");
         console.log("[CardByte] Host:", Office?.context?.host || "unknown");
@@ -1081,11 +1213,17 @@ window.applySignature = async function (event = { completed: () => { } }) {
 
             const item = mailbox?.item;
             if (item) {
-                const fbResult = await tryInsertHtml(item, fallbackHtml, "Fallback");
+                // Even fallback should try signature-only first
+                const fbResult = await tryInsertSignatureOnly(item, fallbackHtml, "Fallback");
                 if (fbResult.success) {
                     console.log("[CardByte] Fallback applied via", fbResult.method);
                 } else {
-                    console.error("[CardByte] ❌ Fallback also failed entirely");
+                    const fbResult2 = await tryInsertFullBody(item, fallbackHtml, "Fallback-Full");
+                    if (fbResult2.success) {
+                        console.log("[CardByte] Fallback applied via", fbResult2.method);
+                    } else {
+                        console.error("[CardByte] ❌ Fallback also failed entirely");
+                    }
                 }
             }
         } catch (fallbackErr) {

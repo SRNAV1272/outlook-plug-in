@@ -396,34 +396,29 @@ export default function SignatureView({ Office, user, apply }) {
                                         {/* <div dangerouslySetInnerHTML={{ __html: form }} /> */}
                                         <div
                                             style={{
-                                                // width: '95%',
+                                                width: '100%',
                                                 background: '#fff',
                                                 borderRadius: '8px',
                                                 overflow: 'auto',
                                                 position: 'relative',
-                                                margin: '10px',
-                                                // height: "200px",
-                                                // border: '1px solid red'
-
-                                            }}>
+                                                height: '200px',
+                                            }}
+                                        >
                                             <div
                                                 style={{
-                                                    // width: '100%',
-                                                    display: 'flex',
-                                                    justifyContent: 'center',
-                                                    alignItems: 'center',
-                                                    // transform: 'scale(0.95)',
-                                                    transformOrigin: 'center center'
+                                                    width: '100%',
+                                                    overflowX: 'auto',
+                                                    textAlign: 'center', // center small content
                                                 }}
                                             >
                                                 <div
                                                     style={{
-                                                        width: '117.65%', // Compensate for scale
-                                                        display: 'flex',
-                                                        justifyContent: 'center',
+                                                        display: 'inline-block', // enable centering
+                                                        textAlign: 'left',        // keep text normal
+                                                        padding: '10px',
                                                     }}
                                                     dangerouslySetInnerHTML={{
-                                                        __html: form
+                                                        __html: form,
                                                     }}
                                                 />
                                             </div>
