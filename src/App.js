@@ -595,128 +595,58 @@ export default function App({ user }) {
       return;
     }
 
-    Office.onReady(async () => {
-      const item = Office.context?.mailbox?.item;
+    // ✅ Access item directly — Office.onReady has already fired at startup
+    const item = Office.context?.mailbox?.item;
 
-      if (!item || !item.body) {
-        console.error("Not in compose mode");
+    if (!item || !item.body) {
+      console.error("Not in compose mode");
+      return;
+    }
+
+    try {
+      await ensureNoDefaultSignature(item);
+
+      const existingBody = await getBodyHtml(item);
+
+      if (hasCardByteSignature(existingBody)) {
+        console.log("✅ CardByte signature already present — skipping");
         return;
       }
 
-      try {
-        await ensureNoDefaultSignature(item);
+      await ensureNoDefaultSignature(item);
 
-        const existingBody = await getBodyHtml(item);
+      const wrappedHtml = wrapForOutlook(signature);
+      const signatureBlock = `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
 
-        if (hasCardByteSignature(existingBody)) {
-          console.log("✅ CardByte signature already present — skipping");
-          return;
-        }
+      const isReply = detectReplyChain(existingBody);
+      const alreadyHasSignature = hasCardByteSignature(existingBody);
+      const sizeKB = (signatureBlock.length / 1024).toFixed(1);
 
-        await ensureNoDefaultSignature(item);
+      console.log(`[CardByte] isReply: ${isReply}, alreadyHasSignature: ${alreadyHasSignature}, size: ${sizeKB}KB`);
 
-        const wrappedHtml = wrapForOutlook(signature);
-        const signatureBlock = `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
+      // ═══════════════════════════════════════════════════
+      // PRE-PROCESS: Build size variants upfront
+      // ═══════════════════════════════════════════════════
+      const variants = await buildSignatureVariants(signatureBlock, item);
 
-        const isReply = detectReplyChain(existingBody);
-        const alreadyHasSignature = hasCardByteSignature(existingBody);
-        const sizeKB = (signatureBlock.length / 1024).toFixed(1);
-
-        console.log(`[CardByte] isReply: ${isReply}, alreadyHasSignature: ${alreadyHasSignature}, size: ${sizeKB}KB`);
-
-        // ═══════════════════════════════════════════════════
-        // PRE-PROCESS: Build size variants upfront
-        // ═══════════════════════════════════════════════════
-        const variants = await buildSignatureVariants(signatureBlock, item);
-
-        if (isReply) {
-          console.log("[CardByte] 📧 Reply/Forward detected");
-
-          if (alreadyHasSignature) {
-            console.log("[CardByte] Replacing existing CardByte signature in reply");
-            for (const v of variants) {
-              const updatedBody = existingBody.replace(
-                /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
-                v.html
-              );
-              const result = await tryInsertFullBody(item, updatedBody, `Reply-Replace-${v.label}`);
-              if (result.success) return;
-            }
-          }
-
-          // Try each variant with signature-only methods
-          for (const v of variants) {
-            console.log(`[CardByte] Reply ${v.label}: signature-only (${(v.html.length / 1024).toFixed(1)}KB)`);
-            const result = await tryInsertSignatureOnly(item, v.html, `Reply-${v.label}`);
-            if (result.success) {
-              // Attach CID images if this variant used them
-              if (v.images && v.images.length > 0) {
-                let attached = 0;
-                for (const img of v.images) {
-                  try {
-                    await addInlineImageAttachment(item, img);
-                    attached++;
-                  } catch (e) {
-                    console.warn(`[CardByte] Image attach failed: ${img.cid}`);
-                  }
-                }
-                console.log(`[CardByte] Attached ${attached}/${v.images.length} images`);
-              }
-              return;
-            }
-          }
-
-          // Last resort: full body replacement
-          console.log("[CardByte] Reply last resort: Full body replacement");
-          const replyMarkers = [
-            /<div[^>]*id="?divRplyFwdMsg"?/i,
-            /<div[^>]*id="?appendonsend"?/i,
-            /<div[^>]*id="?x_divRplyFwdMsg"?/i,
-            /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
-            /<blockquote/i,
-            /<!-- OriginalMessage -->/i,
-          ];
-
-          let insertIndex = -1;
-          for (const marker of replyMarkers) {
-            const match = existingBody.search(marker);
-            if (match > -1) { insertIndex = match; break; }
-          }
-
-          const strippedSig = stripBase64Images(signatureBlock);
-          let fullHtml;
-          if (insertIndex > -1) {
-            fullHtml = `${existingBody.slice(0, insertIndex)}${strippedSig}${existingBody.slice(insertIndex)}`;
-          } else {
-            fullHtml = `${existingBody}${strippedSig}`;
-          }
-
-          const result = await tryInsertFullBody(item, fullHtml, "Reply-LastResort");
-          if (result.success) return;
-
-          throw new Error("All reply insertion tiers failed");
-        }
-
-        // ═══════════════════════════════════════════════════
-        // PATH B: NEW COMPOSE
-        // ═══════════════════════════════════════════════════
-        console.log("[CardByte] ✉️ New compose detected");
+      if (isReply) {
+        console.log("[CardByte] 📧 Reply/Forward detected");
 
         if (alreadyHasSignature) {
+          console.log("[CardByte] Replacing existing CardByte signature in reply");
           for (const v of variants) {
             const updatedBody = existingBody.replace(
               /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
               v.html
             );
-            const result = await tryInsertFullBody(item, updatedBody, `Compose-Replace-${v.label}`);
+            const result = await tryInsertFullBody(item, updatedBody, `Reply-Replace-${v.label}`);
             if (result.success) return;
           }
         }
 
-        // Try each variant with signature-only methods
         for (const v of variants) {
-          console.log(`[CardByte] Compose ${v.label}: signature-only (${(v.html.length / 1024).toFixed(1)}KB)`);
-          const result = await tryInsertSignatureOnly(item, v.html, `Compose-${v.label}`);
+          console.log(`[CardByte] Reply ${v.label}: signature-only (${(v.html.length / 1024).toFixed(1)}KB)`);
+          const result = await tryInsertSignatureOnly(item, v.html, `Reply-${v.label}`);
           if (result.success) {
             if (v.images && v.images.length > 0) {
               let attached = 0;
@@ -734,18 +664,84 @@ export default function App({ user }) {
           }
         }
 
-        // Last resort: full body replacement with stripped images
-        console.log("[CardByte] Compose last resort: Full body replacement");
-        const stripped = stripBase64Images(signatureBlock);
-        const fullHtml = `${existingBody}<br/>${stripped}`;
-        const result = await tryInsertFullBody(item, fullHtml, "Compose-LastResort");
+        // Last resort: full body replacement
+        console.log("[CardByte] Reply last resort: Full body replacement");
+        const replyMarkers = [
+          /<div[^>]*id="?divRplyFwdMsg"?/i,
+          /<div[^>]*id="?appendonsend"?/i,
+          /<div[^>]*id="?x_divRplyFwdMsg"?/i,
+          /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+          /<blockquote/i,
+          /<!-- OriginalMessage -->/i,
+        ];
+
+        let insertIndex = -1;
+        for (const marker of replyMarkers) {
+          const match = existingBody.search(marker);
+          if (match > -1) { insertIndex = match; break; }
+        }
+
+        const strippedSig = stripBase64Images(signatureBlock);
+        let fullHtml;
+        if (insertIndex > -1) {
+          fullHtml = `${existingBody.slice(0, insertIndex)}${strippedSig}${existingBody.slice(insertIndex)}`;
+        } else {
+          fullHtml = `${existingBody}${strippedSig}`;
+        }
+
+        const result = await tryInsertFullBody(item, fullHtml, "Reply-LastResort");
         if (result.success) return;
 
-        throw new Error("All compose insertion tiers failed");
-      } catch (e) {
-        console.error("[CardByte] Apply signature failed:", e);
+        throw new Error("All reply insertion tiers failed");
       }
-    });
+
+      // ═══════════════════════════════════════════════════
+      // PATH B: NEW COMPOSE
+      // ═══════════════════════════════════════════════════
+      console.log("[CardByte] ✉️ New compose detected");
+
+      if (alreadyHasSignature) {
+        for (const v of variants) {
+          const updatedBody = existingBody.replace(
+            /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
+            v.html
+          );
+          const result = await tryInsertFullBody(item, updatedBody, `Compose-Replace-${v.label}`);
+          if (result.success) return;
+        }
+      }
+
+      for (const v of variants) {
+        console.log(`[CardByte] Compose ${v.label}: signature-only (${(v.html.length / 1024).toFixed(1)}KB)`);
+        const result = await tryInsertSignatureOnly(item, v.html, `Compose-${v.label}`);
+        if (result.success) {
+          if (v.images && v.images.length > 0) {
+            let attached = 0;
+            for (const img of v.images) {
+              try {
+                await addInlineImageAttachment(item, img);
+                attached++;
+              } catch (e) {
+                console.warn(`[CardByte] Image attach failed: ${img.cid}`);
+              }
+            }
+            console.log(`[CardByte] Attached ${attached}/${v.images.length} images`);
+          }
+          return;
+        }
+      }
+
+      // Last resort
+      console.log("[CardByte] Compose last resort: Full body replacement");
+      const stripped = stripBase64Images(signatureBlock);
+      const fullHtml = `${existingBody}<br/>${stripped}`;
+      const result = await tryInsertFullBody(item, fullHtml, "Compose-LastResort");
+      if (result.success) return;
+
+      throw new Error("All compose insertion tiers failed");
+    } catch (e) {
+      console.error("[CardByte] Apply signature failed:", e);
+    }
   }
 
   /**
@@ -766,7 +762,6 @@ export default function App({ user }) {
     // Variant 2: Compressed images
     try {
       const compressed = await compressImagesInHtml(signatureBlock);
-      // Add even if same size — compression may have helped individual images
       if (compressed.length <= MAX_SAFE_HTML_SIZE) {
         variants.push({ label: "Compressed", html: compressed, images: null });
       }
@@ -774,7 +769,7 @@ export default function App({ user }) {
       console.warn("[CardByte] Compression failed:", e.message);
     }
 
-    // Variant 3: CID inline attachments (images extracted)
+    // Variant 3: CID inline attachments
     try {
       const { cleanedHtml, images } = extractBase64Images(signatureBlock);
       if (images.length > 0) {
@@ -784,13 +779,12 @@ export default function App({ user }) {
       console.warn("[CardByte] CID extraction failed:", e.message);
     }
 
-    // Variant 4: All images stripped (always works, last resort)
+    // Variant 4: Stripped (last resort — no images)
     const stripped = stripBase64Images(signatureBlock);
     variants.push({ label: "Stripped", html: stripped, images: null });
 
-    // ✅ DO NOT sort by size — order matters:
-    // Original → Compressed → CID → Stripped
-    // We want best visual quality first, stripped only as last resort
+    // ✅ NO SORTING — order is: Original → Compressed → CID → Stripped
+    // Best visual quality first, stripped only as last resort
 
     console.log(`[CardByte] Variants: ${variants.map(v => `${v.label}(${(v.html.length / 1024).toFixed(1)}KB)`).join(", ")}`);
 
