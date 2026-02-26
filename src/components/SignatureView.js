@@ -399,29 +399,37 @@ export default function SignatureView({ Office, user, apply }) {
                                                 width: '100%',
                                                 background: '#fff',
                                                 borderRadius: '8px',
-                                                overflow: 'auto',
+                                                overflow: 'hidden',
                                                 position: 'relative',
-                                                height: '200px',
                                             }}
                                         >
                                             <div
-                                                style={{
-                                                    width: '100%',
-                                                    overflowX: 'auto',
-                                                    textAlign: 'center', // center small content
+                                                ref={(el) => {
+                                                    if (el) {
+                                                        const contentWidth = el.scrollWidth;
+                                                        const containerWidth = el.parentElement?.clientWidth || contentWidth;
+                                                        if (contentWidth > containerWidth) {
+                                                            const scale = containerWidth / contentWidth;
+                                                            el.style.transform = `scale(${scale})`;
+                                                            el.style.transformOrigin = 'top left';
+                                                            el.style.width = `${100 / scale}%`;
+                                                            // Adjust parent height to match scaled content
+                                                            requestAnimationFrame(() => {
+                                                                const scaledHeight = el.scrollHeight * scale;
+                                                                el.parentElement.style.height = `${scaledHeight}px`;
+                                                            });
+                                                        }
+                                                    }
                                                 }}
-                                            >
-                                                <div
-                                                    style={{
-                                                        display: 'inline-block', // enable centering
-                                                        textAlign: 'left',        // keep text normal
-                                                        padding: '10px',
-                                                    }}
-                                                    dangerouslySetInnerHTML={{
-                                                        __html: form,
-                                                    }}
-                                                />
-                                            </div>
+                                                style={{
+                                                    display: 'inline-block',
+                                                    textAlign: 'left',
+                                                    padding: '10px',
+                                                }}
+                                                dangerouslySetInnerHTML={{
+                                                    __html: form,
+                                                }}
+                                            />
                                         </div>
 
                                         <Stack

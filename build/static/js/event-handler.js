@@ -24,6 +24,7 @@ const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
 const MAX_SAFE_HTML_SIZE = 500_000; // ~500 KB
+const LARGE_IMAGE_THRESHOLD = 200_000; // ~200 KB — images above this use CID instead of inline base64
 
 /* ---------------------------------------------------------
    Office Ready
@@ -408,7 +409,7 @@ async function compressImagesInHtml(html) {
 }
 
 /**
- * Extracts base64 images → cid: references.
+ * Extracts ALL base64 images → cid: references.
  */
 function extractBase64Images(html) {
     const images = [];
@@ -423,6 +424,45 @@ function extractBase64Images(html) {
             images.push({ cid, fileName, mimeType, base64Data });
             index++;
             return `src="cid:${cid}"`;
+        }
+    );
+
+    return { cleanedHtml, images };
+}
+
+/**
+ * Extracts ONLY large base64 images (above LARGE_IMAGE_THRESHOLD) → cid: references.
+ * Small images remain inline as base64. This is critical for GIFs (1MB+)
+ * which cause setSignatureAsync/prependAsync to silently convert or strip them.
+ *
+ * GIFs are ALWAYS extracted to CID regardless of size because Outlook's
+ * signature APIs are known to corrupt/convert GIF base64 data.
+ */
+function extractLargeAndGifImages(html) {
+    const images = [];
+    let index = 0;
+
+    const cleanedHtml = html.replace(
+        /src\s*=\s*"data:(image\/([^;]+));base64,([^"]+)"/gi,
+        (fullMatch, mimeType, extension, base64Data) => {
+            const isGif = mimeType.toLowerCase() === "image/gif";
+            const sizeBytes = base64Data.length * 0.75; // approximate decoded size
+
+            // Extract GIFs always + any image above threshold
+            if (isGif || sizeBytes > LARGE_IMAGE_THRESHOLD) {
+                const cid = `cardbyte_img_${index}`;
+                const safeExt = extension.replace(/[^a-z0-9]/gi, "") || "png";
+                const fileName = `${cid}.${safeExt}`;
+                images.push({ cid, fileName, mimeType, base64Data });
+                index++;
+                console.log(
+                    `[CardByte] Extracted ${isGif ? 'GIF' : 'large image'} to CID: ${cid} (${(sizeBytes / 1024).toFixed(0)} KB)`
+                );
+                return `src="cid:${cid}"`;
+            }
+
+            // Small non-GIF images stay inline
+            return fullMatch;
         }
     );
 
@@ -740,7 +780,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
         const sizeKB = (signatureBlock.length / 1024).toFixed(1);
         const gifCount = (signatureBlock.match(/data:image\/gif;base64,/gi) || []).length;
-        console.log(`[CardByte] ── Insertion start ── Signature size: ${sizeKB} KB, GIFs: ${gifCount}`);
+        const hasLargeImages = signatureBlock.length > MAX_SAFE_HTML_SIZE;
+        console.log(`[CardByte] ── Insertion start ── Signature size: ${sizeKB} KB, GIFs: ${gifCount}, hasLargeImages: ${hasLargeImages}`);
 
         // ✅ READ existing body to detect reply chain
         const existingBody = await getBodyHtml(item);
@@ -748,6 +789,49 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         const alreadyHasSignature = hasCardByteSignature(existingBody);
 
         console.log(`[CardByte] isReply: ${isReply}, alreadyHasSignature: ${alreadyHasSignature}`);
+
+        // ═══════════════════════════════════════════════════════
+        // PRE-PROCESS: Extract large images & GIFs to CID upfront
+        // ═══════════════════════════════════════════════════════
+        // GIFs and large images (>200KB) get corrupted/converted when
+        // passed as inline base64 to Outlook APIs (setSignatureAsync,
+        // prependAsync, setAsync). Convert them to CID references
+        // BEFORE any insertion attempt so the HTML stays small and
+        // the actual image data goes as a separate attachment.
+        //
+        // Small non-GIF images remain inline (they work fine as base64).
+        // ═══════════════════════════════════════════════════════
+
+        const { cleanedHtml: cidSignatureBlock, images: cidImages } = extractLargeAndGifImages(signatureBlock);
+
+        if (cidImages.length > 0) {
+            console.log(`[CardByte] Pre-extracted ${cidImages.length} large/GIF image(s) to CID`);
+            console.log(`[CardByte] Signature after CID extraction: ${(cidSignatureBlock.length / 1024).toFixed(1)} KB`);
+        }
+
+        // Use CID-processed signature for all insertion attempts
+        const insertBlock = cidImages.length > 0 ? cidSignatureBlock : signatureBlock;
+
+        /**
+         * Helper: attach CID images after successful HTML insertion.
+         * Returns true if all images attached successfully.
+         */
+        async function attachCidImages() {
+            if (cidImages.length === 0) return true;
+
+            let attached = 0;
+            for (const img of cidImages) {
+                try {
+                    await addInlineImageAttachment(item, img);
+                    attached++;
+                    console.log(`[CardByte] ✅ Attached CID: ${img.cid} (${img.mimeType}, ${(img.base64Data.length * 0.75 / 1024).toFixed(0)} KB)`);
+                } catch (e) {
+                    console.warn(`[CardByte] ⚠️ CID attach failed: ${img.cid}:`, e?.message || e);
+                }
+            }
+            console.log(`[CardByte] Attached ${attached}/${cidImages.length} CID images`);
+            return attached > 0;
+        }
 
         // ═══════════════════════════════════════════════════
         // PATH A: REPLY / REPLY ALL / FORWARD
@@ -761,43 +845,52 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 console.log("[CardByte] Replacing existing CardByte signature in reply");
                 const updatedBody = existingBody.replace(
                     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
-                    signatureBlock
+                    insertBlock
                 );
-                // Must use full-body set since we're replacing inline content
                 const result = await tryInsertFullBody(item, updatedBody, "Reply-Replace");
-                if (result.success) return;
-                // If that fails, fall through to signature-only methods below
+                if (result.success) {
+                    await attachCidImages();
+                    return;
+                }
             }
 
-            // ── Tier 1: Insert signature only (no body replacement) ──
+            // ── Tier 1: Insert signature only with CID-processed HTML ──
             {
-                console.log("[CardByte] Reply Tier 1: Signature-only insert");
-                const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
-                if (result.success) return;
+                console.log("[CardByte] Reply Tier 1: Signature-only insert (CID pre-processed)");
+                const result = await tryInsertSignatureOnly(item, insertBlock, "Reply-T1");
+                if (result.success) {
+                    await attachCidImages();
+                    return;
+                }
             }
 
-            // ── Tier 2: Compress images in signature, then signature-only insert ──
+            // ── Tier 2: Compress remaining inline images, then signature-only ──
             {
-                console.log("[CardByte] Reply Tier 2: Compress + signature-only insert");
+                console.log("[CardByte] Reply Tier 2: Compress remaining + signature-only");
                 try {
-                    const compressed = await compressImagesInHtml(signatureBlock);
+                    const compressed = await compressImagesInHtml(insertBlock);
                     console.log(`[CardByte] Compressed signature: ${(compressed.length / 1024).toFixed(1)} KB`);
                     const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
-                    if (result.success) return;
+                    if (result.success) {
+                        await attachCidImages();
+                        return;
+                    }
                 } catch (e) {
                     console.warn("[CardByte] Reply Tier 2 compression error:", e.message);
                 }
             }
 
-            // ── Tier 3: CID attachments + signature-only insert ──
+            // ── Tier 3: Extract ALL remaining images to CID ──
             {
-                console.log("[CardByte] Reply Tier 3: CID + signature-only insert");
+                console.log("[CardByte] Reply Tier 3: Extract ALL images to CID");
                 try {
-                    const { cleanedHtml, images } = extractBase64Images(signatureBlock);
-                    const result = await tryInsertSignatureOnly(item, cleanedHtml, "Reply-T3");
+                    const { cleanedHtml: fullyCleaned, images: remainingImages } = extractBase64Images(insertBlock);
+                    const allCidImages = [...cidImages, ...remainingImages];
+                    const result = await tryInsertSignatureOnly(item, fullyCleaned, "Reply-T3");
                     if (result.success) {
+                        // Attach all CID images (pre-extracted + newly extracted)
                         let attached = 0;
-                        for (const img of images) {
+                        for (const img of allCidImages) {
                             try {
                                 await addInlineImageAttachment(item, img);
                                 attached++;
@@ -805,7 +898,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                                 console.warn(`[CardByte] Image attach failed: ${img.cid}`);
                             }
                         }
-                        console.log(`[CardByte] Attached ${attached}/${images.length} images`);
+                        console.log(`[CardByte] Attached ${attached}/${allCidImages.length} total images`);
                         return;
                     }
                 } catch (e) {
@@ -816,7 +909,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             // ── Tier 4: Strip images + signature-only insert ──
             {
                 console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
-                const stripped = stripBase64Images(signatureBlock);
+                const stripped = stripBase64Images(insertBlock);
                 const result = await tryInsertSignatureOnly(item, stripped, "Reply-T4");
                 if (result.success) return;
             }
@@ -825,7 +918,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             {
                 console.log("[CardByte] Reply Tier 5: Full body replacement (last resort — cursor may move)");
 
-                // Find the reply boundary and insert signature before it
                 const replyMarkers = [
                     /<div[^>]*id="?divRplyFwdMsg"?/i,
                     /<div[^>]*id="?appendonsend"?/i,
@@ -848,9 +940,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 if (insertIndex > -1) {
                     const before = existingBody.slice(0, insertIndex);
                     const after = existingBody.slice(insertIndex);
-                    fullHtml = `${before}${signatureBlock}${after}`;
+                    fullHtml = `${before}${insertBlock}${after}`;
                 } else {
-                    fullHtml = `${existingBody}${signatureBlock}`;
+                    fullHtml = `${existingBody}${insertBlock}`;
                 }
 
                 const stripped = stripBase64Images(fullHtml);
@@ -866,46 +958,54 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         // ═══════════════════════════════════════════════════
         console.log("[CardByte] ✉️ New compose detected — using standard insertion");
 
-        // For new compose, try setSignatureAsync first (it places the
-        // signature correctly and keeps cursor at top)
         // ── Tier 1: Signature-only methods first (even for new compose) ──
         {
-            console.log("[CardByte] Compose Tier 1: Signature-only insert");
-            const result = await tryInsertSignatureOnly(item, signatureBlock, "Compose-T1");
-            if (result.success) return;
+            console.log("[CardByte] Compose Tier 1: Signature-only insert (CID pre-processed)");
+            const result = await tryInsertSignatureOnly(item, insertBlock, "Compose-T1");
+            if (result.success) {
+                await attachCidImages();
+                return;
+            }
         }
 
-        // ── Tier 2: Full body replacement (append signature to existing body) ──
-        const fullHtml = `${existingBody}<br/>${signatureBlock}`;
+        // ── Tier 2: Full body replacement ──
+        const fullHtml = `${existingBody}<br/>${insertBlock}`;
 
         {
             console.log("[CardByte] Compose Tier 2: Direct full-body insert");
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
-            if (result.success) return;
+            if (result.success) {
+                await attachCidImages();
+                return;
+            }
         }
 
-        // ── Tier 3: Compress images + full body ──
+        // ── Tier 3: Compress remaining images + full body ──
         {
             console.log("[CardByte] Compose Tier 3: Compress images");
             try {
                 const compressed = await compressImagesInHtml(fullHtml);
                 console.log(`[CardByte] Compressed size: ${(compressed.length / 1024).toFixed(1)} KB`);
                 const result = await tryInsertFullBody(item, compressed, "Compose-T3");
-                if (result.success) return;
+                if (result.success) {
+                    await attachCidImages();
+                    return;
+                }
             } catch (e) {
                 console.warn("[CardByte] Compose Tier 3 compression error:", e.message);
             }
         }
 
-        // ── Tier 4: CID inline attachments ──
+        // ── Tier 4: Extract ALL remaining images to CID ──
         {
-            console.log("[CardByte] Compose Tier 4: CID inline attachments");
+            console.log("[CardByte] Compose Tier 4: ALL images to CID");
             try {
-                const { cleanedHtml, images } = extractBase64Images(fullHtml);
+                const { cleanedHtml, images: remainingImages } = extractBase64Images(fullHtml);
+                const allCidImages = [...cidImages, ...remainingImages];
                 const result = await tryInsertFullBody(item, cleanedHtml, "Compose-T4");
                 if (result.success) {
                     let attached = 0;
-                    for (const img of images) {
+                    for (const img of allCidImages) {
                         try {
                             await addInlineImageAttachment(item, img);
                             attached++;
@@ -913,7 +1013,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                             console.warn(`[CardByte] Image attach failed: ${img.cid}`);
                         }
                     }
-                    console.log(`[CardByte] Attached ${attached}/${images.length} images`);
+                    console.log(`[CardByte] Attached ${attached}/${allCidImages.length} images`);
                     return;
                 }
             } catch (e) {
