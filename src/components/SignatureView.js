@@ -8,7 +8,6 @@ import signnotassigned from "../components/SignatureComponents/Assets/Images/sig
 export default function SignatureView({ Office, user, apply }) {
     const [form, setForm] = useState(null)
     const [error, setError] = useState("")
-    const [legacy, setLegacy] = useState(false)
     // Responsive scaling
     const [load, setLoad] = useState(false)
     const applyHTML = async () => {
@@ -201,7 +200,7 @@ export default function SignatureView({ Office, user, apply }) {
 
             // 🔹 1️⃣ Try Primary API First
             const primaryRes = await fetch(
-                "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+                "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
                 {
                     method: "GET",
                     headers: {
@@ -228,7 +227,7 @@ export default function SignatureView({ Office, user, apply }) {
         // 🔹 2️⃣ Fallback to Legacy API
         try {
             const legacyRes = await fetch(
-                "https://qa-renderer.cardbyte.ai/render-signature",
+                "https://renderer.cardbyte.ai/render-signature",
                 {
                     method: "POST",
                     headers: {
