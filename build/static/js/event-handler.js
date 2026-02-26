@@ -694,11 +694,53 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         await stabilizeSelection(item);
 
         const wrappedHtml = wrapForOutlook(signatureHtml);
-        const fullHtml = `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
+        const signatureBlock = `<br/><br/><!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
 
-        const sizeKB = (fullHtml.length / 1024).toFixed(1);
-        const gifCount = (fullHtml.match(/data:image\/gif;base64,/gi) || []).length;
+        const sizeKB = (signatureBlock.length / 1024).toFixed(1);
+        const gifCount = (signatureBlock.match(/data:image\/gif;base64,/gi) || []).length;
         console.log(`[CardByte] ── Insertion start ── HTML size: ${sizeKB} KB, GIFs: ${gifCount}`);
+
+        // ✅ READ existing body first to preserve reply chain
+        const existingBody = await getBodyHtml(item);
+
+        let fullHtml;
+
+        if (hasCardByteSignature(existingBody)) {
+            // Replace existing CardByte signature
+            fullHtml = existingBody.replace(
+                /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
+                signatureBlock
+            );
+        } else {
+            // Insert signature BEFORE the reply chain
+            // Look for the quoted reply boundary (Outlook uses <div id="divRplyFwdMsg" or similar)
+            const replyMarkers = [
+                /<div[^>]*id="?divRplyFwdMsg"?/i,
+                /<div[^>]*id="?appendonsend"?/i,
+                /<hr[^>]*style="display\s*:\s*inline-block/i,
+                /<blockquote/i,
+                /<!-- OriginalMessage -->/i,
+            ];
+
+            let insertIndex = -1;
+            for (const marker of replyMarkers) {
+                const match = existingBody.search(marker);
+                if (match > -1) {
+                    insertIndex = match;
+                    break;
+                }
+            }
+
+            if (insertIndex > -1) {
+                // Insert signature between new content and reply chain
+                const before = existingBody.slice(0, insertIndex);
+                const after = existingBody.slice(insertIndex);
+                fullHtml = `${before}<br/><br/>${signatureBlock}${after}`;
+            } else {
+                // No reply chain found — append at bottom
+                fullHtml = `${existingBody}<br/><br/>${signatureBlock}`;
+            }
+        }
 
         // ── Tier 1: Direct insert ──
         {
@@ -918,6 +960,13 @@ async function ensureNoDefaultSignature(item) {
 
         if (hasCardByteSignature(html)) {
             console.log("[CardByte] CardByte signature already present — skipping default removal");
+            return false;
+        }
+
+        // ✅ Don't strip signatures from reply/forward bodies — too risky
+        const hasReplyChain = /divRplyFwdMsg|appendonsend|OriginalMessage|<blockquote/i.test(html);
+        if (hasReplyChain) {
+            console.log("[CardByte] Reply/forward detected — skipping default signature removal");
             return false;
         }
 
