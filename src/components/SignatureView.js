@@ -9,6 +9,7 @@ import html2canvas from "html2canvas";
 export default function SignatureView({ Office, user, apply }) {
     const [form, setForm] = useState(null)
     const [error, setError] = useState("")
+    const [showLegacy, setShowLegacy] = useState(false)
     const containerRef = useRef(null);
     const [snapshot, setSnapshot] = useState(null);
 
@@ -256,6 +257,7 @@ export default function SignatureView({ Office, user, apply }) {
             const legacyData = await legacyRes.json();
 
             console.log("Using LEGACY renderer", legacyData);
+            setShowLegacy(true)
             return legacyData?.finalHtml || null;
 
         } catch (legacyError) {
@@ -414,12 +416,53 @@ export default function SignatureView({ Office, user, apply }) {
                                                 position: 'relative',
                                             }}
                                         >
-                                            {/* // Display the snapshot */}
-                                            {snapshot ? (
-                                                <img src={snapshot} alt="Form preview" style={{ width: '100%', borderRadius: '8px' }} />
-                                            ) : (
-                                                <p>Loading preview...</p>
-                                            )}
+
+                                        </div>
+                                        <div
+                                            style={{
+                                                width: '100%',
+                                                background: '#fff',
+                                                borderRadius: '8px',
+                                                overflow: 'hidden',
+                                                position: 'relative',
+                                            }}
+                                        >
+                                            {
+                                                showLegacy ?
+                                                    <div
+                                                        ref={(el) => {
+                                                            if (el) {
+                                                                const contentWidth = el.scrollWidth;
+                                                                const containerWidth = el.parentElement?.clientWidth || contentWidth;
+                                                                if (contentWidth > containerWidth) {
+                                                                    const scale = containerWidth / contentWidth;
+                                                                    el.style.transform = `scale(${scale})`;
+                                                                    el.style.transformOrigin = 'top left';
+                                                                    el.style.width = `${100 / scale}%`;
+                                                                    // Adjust parent height to match scaled content
+                                                                    requestAnimationFrame(() => {
+                                                                        const scaledHeight = el.scrollHeight * scale;
+                                                                        el.parentElement.style.height = `${scaledHeight}px`;
+                                                                    });
+                                                                }
+                                                            }
+                                                        }}
+                                                        style={{
+                                                            display: 'inline-block',
+                                                            textAlign: 'left',
+                                                            padding: '10px',
+                                                        }}
+                                                        dangerouslySetInnerHTML={{
+                                                            __html: form,
+                                                        }}
+                                                    /> :
+
+                                                    snapshot ? (
+                                                        <img src={snapshot} alt="Form preview" style={{ width: '100%', borderRadius: '8px' }} />
+                                                    ) : (
+                                                        <p>Loading preview...</p>
+                                                    )
+                                            }
                                         </div>
                                         <div ref={containerRef} style={{ position: 'absolute', left: '-9999px' }}>
                                             <div dangerouslySetInnerHTML={{ __html: form }} />
