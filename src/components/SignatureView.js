@@ -209,7 +209,7 @@ export default function SignatureView({ Office, user, apply }) {
 
     async function renderSignatureOnServer(user) {
         try {
-            const encryptedMail = await encryptEmail(user);
+            const encryptedMail = await encryptEmail("sairajesh.korla1272@outlook.com");
 
             // 🔹 1️⃣ Try Primary API First
             const primaryRes = await fetch(
@@ -407,24 +407,30 @@ export default function SignatureView({ Office, user, apply }) {
                                     >
                                         {/* Render simplified preview */}
                                         {/* <div dangerouslySetInnerHTML={{ __html: form }} /> */}
+                                        <style>{`
+                                                .sig-scroll-box::-webkit-scrollbar {
+                                                    height: 3px;
+                                                }
+                                                .sig-scroll-box::-webkit-scrollbar-track {
+                                                    background: transparent;
+                                                }
+                                                .sig-scroll-box::-webkit-scrollbar-thumb {
+                                                    background: #0B2E79;
+                                                    border-radius: 99px;
+                                                }
+                                            `}</style>
                                         <div
+                                            className="sig-scroll-box"
                                             style={{
                                                 width: '100%',
                                                 background: '#fff',
                                                 borderRadius: '8px',
-                                                overflow: 'hidden',
                                                 position: 'relative',
-                                            }}
-                                        >
-
-                                        </div>
-                                        <div
-                                            style={{
-                                                width: '100%',
-                                                background: '#fff',
-                                                borderRadius: '8px',
-                                                overflow: 'hidden',
-                                                position: 'relative',
+                                                overflowX: 'auto',
+                                                overflowY: 'hidden',
+                                                // scrollbarWidth: 'none',
+                                                // msOverflowStyle: 'none',
+                                                // WebkitOverflowScrolling: 'touch',
                                             }}
                                         >
                                             {
@@ -458,7 +464,7 @@ export default function SignatureView({ Office, user, apply }) {
                                                     /> :
 
                                                     snapshot ? (
-                                                        <img src={snapshot} alt="Form preview" style={{ width: '100%', borderRadius: '8px' }} />
+                                                        <img src={snapshot} alt="Form preview" style={{ width: '150%', borderRadius: '8px' }} />
                                                     ) : (
                                                         <p>Loading preview...</p>
                                                     )
