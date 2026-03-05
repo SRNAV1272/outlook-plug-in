@@ -1693,3 +1693,30 @@ window.debugSignatureSize = async function () {
         overLimit: html.length > maxSize
     };
 };
+
+/* =========================================================
+   CARDBYTE — event-handler.js  BOTTOM-OF-FILE PATCH
+   =========================================================
+   ADD THESE LINES at the very bottom of your existing
+   event-handler.js file (after all existing code).
+
+   WHY:
+   LaunchEvent-based activation (M365 / OWA, Mailbox 1.10+)
+   does NOT use window.applySignature.
+   It requires Office.actions.associate() to register the
+   function name declared in the manifest LaunchEvent block.
+   Without this, the auto-trigger fires but nothing happens.
+   ========================================================= */
+
+// ── Required for LaunchEvent / event-based activation (M365 / OWA) ──
+// Registers "applySignature" with the Office runtime so the manifest's
+//   <LaunchEvent Type="OnNewMessageCompose" FunctionName="applySignature" />
+// can find and call it.
+if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+    Office.actions.associate("applySignature", applySignature);
+    console.log("[CardByte] Office.actions.associate registered: applySignature");
+} else {
+    // Office.actions not available on older hosts (2016/2019) — safe to ignore.
+    // Those hosts use the taskpane auto-load path instead.
+    console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
+}
