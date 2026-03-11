@@ -791,22 +791,22 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
             }
-            {
-                console.log("[CardByte] Reply Tier 3: CID + signature-only insert");
-                try {
-                    const { cleanedHtml, images } = extractBase64Images(signatureBlock);
-                    const result = await tryInsertSignatureOnly(item, cleanedHtml, "Reply-T3");
-                    if (result.success) {
-                        let attached = 0;
-                        for (const img of images) {
-                            try { await addInlineImageAttachment(item, img); attached++; }
-                            catch (e) { console.warn(`[CardByte] Image attach failed: ${img.cid}`); }
-                        }
-                        console.log(`[CardByte] Attached ${attached}/${images.length} images`);
-                        await stabilizeSelection(item); return;
-                    }
-                } catch (e) { console.warn("[CardByte] Reply Tier 3 error:", e.message); }
-            }
+            // {
+            //     console.log("[CardByte] Reply Tier 3: CID + signature-only insert");
+            //     try {
+            //         const { cleanedHtml, images } = extractBase64Images(signatureBlock);
+            //         const result = await tryInsertSignatureOnly(item, cleanedHtml, "Reply-T3");
+            //         if (result.success) {
+            //             let attached = 0;
+            //             for (const img of images) {
+            //                 try { await addInlineImageAttachment(item, img); attached++; }
+            //                 catch (e) { console.warn(`[CardByte] Image attach failed: ${img.cid}`); }
+            //             }
+            //             console.log(`[CardByte] Attached ${attached}/${images.length} images`);
+            //             await stabilizeSelection(item); return;
+            //         }
+            //     } catch (e) { console.warn("[CardByte] Reply Tier 3 error:", e.message); }
+            // }
             {
                 console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
                 const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
