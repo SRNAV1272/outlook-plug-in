@@ -818,7 +818,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
-            } 
+            }
 
             {
                 console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
@@ -1193,6 +1193,70 @@ window.applySignature = async function (event = { completed: () => { } }) {
         event.completed();
     }
 };
+
+/* ---------------------------------------------------------
+   ON-SEND HANDLER
+   Re-inserts (or replaces) the CardByte signature at send time.
+   Called by the OnMessageSend LaunchEvent.
+   --------------------------------------------------------- */
+window.onSendHandler = async function (event = { completed: () => { } }) {
+    const mailbox = Office?.context?.mailbox;
+    const item = mailbox?.item;
+    const user = mailbox?.userProfile?.emailAddress;
+
+    try {
+        if (!item) {
+            console.warn("[CardByte][OnSend] No mail item found — allowing send");
+            event.completed({ allowEvent: true });
+            return;
+        }
+
+        console.log("[CardByte][OnSend] ════════════════════════════");
+        console.log("[CardByte][OnSend] Re-checking signature before send");
+        console.log("[CardByte][OnSend] User:", user);
+        console.log("[CardByte][OnSend] Platform:", detectPlatform());
+
+        // Check if signature already present and fresh — skip re-fetch if so
+        const existingBody = await getBodyHtml(item);
+        const alreadyHasSignature = hasCardByteSignature(existingBody);
+
+        if (alreadyHasSignature) {
+            console.log("[CardByte][OnSend] Signature already present — allowing send");
+            event.completed({ allowEvent: true });
+            return;
+        }
+
+        console.log("[CardByte][OnSend] No signature found — inserting before send");
+
+        // Fetch fresh signature from server
+        const apiResponse = await renderSignatureOnServer(user);
+        if (!apiResponse) {
+            console.warn("[CardByte][OnSend] API returned null — allowing send without signature");
+            event.completed({ allowEvent: true });
+            return;
+        }
+
+        // Reset the guard so insertSignatureWithoutCursorError doesn't bail out
+        window.__INSERTING_SIGNATURE__ = false;
+        SIGNATURE_STATE = "idle";
+
+        await insertSignatureWithoutCursorError(item, apiResponse);
+
+        console.log("[CardByte][OnSend] Signature inserted — allowing send");
+        event.completed({ allowEvent: true });
+
+    } catch (err) {
+        console.error("[CardByte][OnSend] Error:", err.message || err);
+        // Always allow send on error — don't block the user
+        event.completed({ allowEvent: true });
+    }
+};
+
+// Register with Office actions
+if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+    Office.actions.associate("onSendHandler", onSendHandler);
+    console.log("[CardByte] Office.actions.associate registered: onSendHandler");
+}
 
 /* ---------------------------------------------------------
    Debug Helpers
