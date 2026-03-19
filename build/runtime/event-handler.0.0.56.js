@@ -657,19 +657,49 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
 
     let methods;
 
+    // if (mobile) {
+    //     methods = [
+    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+    //     ];
+    // } else if (owa || hasGifs) {
+    //     methods = [
+    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+    //         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+    //         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+    //     ];
+    // } else {
+    //     methods = [
+    //         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+    //         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+    //     ];
+    // }
     if (mobile) {
         methods = [
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
         ];
-    } else if (owa || hasGifs) {
+    } else if (owa && hasGifs) {
+        // OWA + GIFs: setSignatureAsync breaks GIF rendering, so setAsync first
         methods = [
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
         ];
+    } else if (owa && !hasGifs) {
+        // OWA, no GIFs: setSignatureAsync FIRST — keeps cursor at top
+        methods = [
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+        ];
     } else {
+        // Desktop
         methods = [
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
