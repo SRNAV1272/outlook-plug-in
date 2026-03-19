@@ -205,22 +205,44 @@ async function encryptEmail(email = "") {
    --------------------------------------------------------- */
 
 function forceCursorToTop(item) {
+    // return new Promise((resolve) => {
+    //     try {
+    //         if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
+    //         // prependAsync("") moves Outlook's internal write cursor to position 0
+    //         // without inserting any visible content.
+    //         item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, (r) => {
+    //             if (r.status !== "succeeded") { resolve(); return; }
+    //             if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
+    //             // Commit the visible caret at position 0
+    //             item.body.setSelectedDataAsync(
+    //                 "",
+    //                 { coercionType: Office.CoercionType.Html },
+    //                 () => resolve()
+    //             );
+    //         });
+    //     } catch { resolve(); }
+    // });
     return new Promise((resolve) => {
-        try {
-            if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-            // prependAsync("") moves Outlook's internal write cursor to position 0
-            // without inserting any visible content.
-            item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, (r) => {
-                if (r.status !== "succeeded") { resolve(); return; }
-                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-                // Commit the visible caret at position 0
+        // After setAsync, OWA renders the body fresh.
+        // We exploit setSelectedDataAsync by first getting the body,
+        // then prepending a zero-width non-breaking space as an anchor,
+        // selecting it, then immediately deleting it — this forces OWA
+        // to commit the caret at position 0.
+        console.log("sdlkasdhsakjdhasjdhakjsdhkjsahd- set cursor at the top entered - 1")
+        item.body.prependAsync(
+            "\uFEFF", // zero-width no-break space — invisible, won't appear in sent email
+            { coercionType: Office.CoercionType.Text },
+            (r1) => {
+                console.log("sdlkasdhsakjdhasjdhakjsdhkjsahd- set cursor at the top entered - 2")
+                if (r1.status !== "succeeded") { resolve(); return; }
+                // Now select + delete it — this claims the caret at position 0
                 item.body.setSelectedDataAsync(
                     "",
-                    { coercionType: Office.CoercionType.Html },
-                    () => resolve()
+                    { coercionType: Office.CoercionType.Text },
+                    (r2) => resolve()
                 );
-            });
-        } catch { resolve(); }
+            }
+        );
     });
 }
 
