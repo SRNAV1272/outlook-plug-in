@@ -685,15 +685,15 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
 function wrapForOutlook(innerHtml) {
     if (isMobile()) {
         return `
-    <div contenteditable="false" style="font-family: Arial, sans-serif; font-size: 14px;">
+    <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Arial, sans-serif; font-size: 14px;">
       <table contenteditable="false" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:100%;">
         <tbody><tr><td style="padding: 0; margin: 0;">${innerHtml}</td></tr></tbody>
       </table>
     </div>`;
     }
     return `
-    <div contenteditable="false" style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
-      <table contenteditable="false"  cellpadding="0" cellspacing="0" border="0" style="font-family: inherit; font-size: inherit; color: inherit;">
+    <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
+      <table contenteditable="false" cellpadding="0" cellspacing="0" border="0" style="font-family: inherit; font-size: inherit; color: inherit;">
         <tbody><tr><td style="padding: 0; margin: 0;">${innerHtml}</td></tr></tbody>
       </table>
     </div>`;
@@ -1238,29 +1238,44 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     }
 
     function _hasSig(html) {
-        return html.includes("CARD_BYTE_SIGNATURE_START") || html.includes("CARDBYTE_SIGNATURE");
+        return /id="cardbyte-signature-block"/i.test(html)
+            || html.includes("CARD_BYTE_SIGNATURE_START")
+            || html.includes("CARDBYTE_SIGNATURE");
     }
 
     function _stripSig(html) {
-        // Pass A: strip spacer + block together
-        let result = html.replace(
-            /(?:(?:<br\s*\/?>|<div[^>]*>\s*(?:&nbsp;|\s)*<\/div>|\s)*)\s*<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+        let result = html;
+
+        // Primary: strip by id — matches the div wrapper added in wrapForOutlook
+        // Handles both self-contained and nested content inside the div
+        result = result.replace(
+            /<div[^>]*id="cardbyte-signature-block"[^>]*>[\s\S]*?<\/div>/gi,
             ""
         );
-        // Pass B: safety net for bare block
+
+        // Fallback: strip old comment-based markers if id strip missed anything
         result = result.replace(
             /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
             ""
         );
-        // Pass C: trim trailing whitespace/br junk
+
+        // Strip any leftover spacer immediately before where the sig was:
+        // <br><div style="min-height:50px">&nbsp;</div><br>
+        result = result.replace(
+            /<br\s*\/?>\s*<div[^>]*min-height\s*:\s*50px[^>]*>\s*&nbsp;\s*<\/div>\s*<br\s*\/?>/gi,
+            ""
+        );
+
+        // Trim trailing br/whitespace/nbsp
         result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+
         return result;
     }
 
     try {
         console.log("[CardByte][OnSend] Reading body...");
         const body = await _getBodyHtml();
-        console.log(`[CardByte][OnSend] Body size: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
+        console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
 
         if (!_hasSig(body)) {
             console.log("[CardByte][OnSend] No signature found — allowing send as-is");
