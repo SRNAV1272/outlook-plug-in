@@ -27,6 +27,7 @@
    - Fallback uses prependAsync which also preserves cursor
    ========================================================= */
 let SIGNATURE_STATE = "idle"; // idle | loading | applied
+let CACHED_SIGNATURE_HTML = null; // stores raw API response for use at send time
 
 const SIGNATURE_SPACER = `
         <br>
@@ -1139,6 +1140,8 @@ window.applySignature = async function (event = { completed: () => { } }) {
         const apiResponse = await renderSignatureOnServer(user?.emailAddress);
         if (!apiResponse) throw new Error("API returned empty or null response");
 
+        CACHED_SIGNATURE_HTML = apiResponse; // ← cache for onSendHandler
+
         const sizeKB = (apiResponse.length / 1024).toFixed(1);
         const base64Count = (apiResponse.match(/data:image\/[^;]+;base64,/gi) || []).length;
         const gifCount = (apiResponse.match(/data:image\/gif;base64,/gi) || []).length;
@@ -1214,6 +1217,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     console.log("[CardByte][OnSend] ════════════════════════════");
     console.log("[CardByte][OnSend] Handler fired");
     console.log("[CardByte][OnSend] item:", item ? "found" : "NULL");
+    console.log("[CardByte][OnSend] cachedSignature:", CACHED_SIGNATURE_HTML ? `${(CACHED_SIGNATURE_HTML.length / 1024).toFixed(1)}KB` : "NULL");
 
     if (!item) {
         console.error("[CardByte][OnSend] No item — allowing send");
@@ -1245,14 +1249,38 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             || html.includes("CARDBYTE_SIGNATURE");
     }
 
+    // Strips a <div id="..."> that matches idPattern, correctly handling nested divs
+    function _stripDivById(html, idPattern) {
+        const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
+        const openMatch = openTagRegex.exec(html);
+        if (!openMatch) return html;
+
+        const startIndex = openMatch.index;
+        let pos = startIndex + openMatch[0].length;
+        let depth = 1;
+
+        while (pos < html.length && depth > 0) {
+            const nextOpen = html.indexOf("<div", pos);
+            const nextClose = html.indexOf("</div>", pos);
+
+            if (nextClose === -1) break;
+
+            if (nextOpen !== -1 && nextOpen < nextClose) {
+                depth++;
+                pos = nextOpen + 4;
+            } else {
+                depth--;
+                pos = nextClose + 6;
+            }
+        }
+
+        return html.slice(0, startIndex) + html.slice(pos);
+    }
+
     function _stripSig(html) {
         let result = html;
 
-        // Primary: match id="cardbyte-signature-block" OR "x_cardbyte-signature-block"
-        // Outlook prefixes all ids with x_ when reading back HTML
-        // The outer div wraps the entire signature including the inner table,
-        // so we need to match greedily up to the LAST </div> that closes it.
-        // We use a loop to handle nested divs correctly.
+        // Primary: strip by id (handles x_ prefix Outlook adds on read-back)
         result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
 
         // Fallback: comment-based markers (legacy)
@@ -1261,8 +1289,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             ""
         );
 
-        // Strip leftover SIGNATURE_SPACER:
-        // <br><div style="min-height:50px;">&nbsp;</div><br>
+        // Strip leftover SIGNATURE_SPACER
         result = result.replace(
             /<br\s*\/?>\s*<div[^>]*min-height\s*:\s*50px[^>]*>\s*&nbsp;\s*<\/div>\s*<br\s*\/?>/gi,
             ""
@@ -1274,55 +1301,45 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         return result;
     }
 
-    // Strips a <div id="..."> that matches idPattern, correctly handling nested divs
-    function _stripDivById(html, idPattern) {
-        // Find the opening tag that contains the target id
-        const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
-        const openMatch = openTagRegex.exec(html);
-        if (!openMatch) return html;
+    // Rebuilds the clean signature block from the cached raw API HTML —
+    // same pipeline as applySignature: mobile simplify → compress → wrap → block
+    async function _buildFreshSignatureBlock() {
+        let processedHtml = CACHED_SIGNATURE_HTML;
 
-        const startIndex = openMatch.index;
-        let pos = startIndex + openMatch[0].length;
-        let depth = 1;
-
-        // Walk forward counting <div> opens and </div> closes to find the matching close
-        while (pos < html.length && depth > 0) {
-            const nextOpen = html.indexOf("<div", pos);
-            const nextClose = html.indexOf("</div>", pos);
-
-            if (nextClose === -1) break; // malformed HTML — bail
-
-            if (nextOpen !== -1 && nextOpen < nextClose) {
-                depth++;
-                pos = nextOpen + 4; // move past "<div"
-            } else {
-                depth--;
-                pos = nextClose + 6; // move past "</div>"
-            }
+        if (isMobile()) {
+            processedHtml = simplifyHtmlForMobile(processedHtml);
+            processedHtml = await compressImagesInHtml(processedHtml);
         }
 
-        // pos now points to right after the closing </div>
-        return html.slice(0, startIndex) + html.slice(pos);
+        const wrappedHtml = wrapForOutlook(processedHtml);
+        return `${SIGNATURE_SPACER}<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
     }
 
     try {
         console.log("[CardByte][OnSend] Reading body...");
         const body = await _getBodyHtml();
-        console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB`);
-        console.log(`[CardByte][OnSend] hasSig: ${_hasSig(body)}`, body);
+        console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
 
-        if (!_hasSig(body)) {
-            console.log("[CardByte][OnSend] No signature found — allowing send as-is");
+        // ── Step 1: Strip existing signature from body ───────────────────
+        const stripped = _hasSig(body) ? _stripSig(body) : body;
+        console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB, sigStillPresent: ${_hasSig(stripped)}`);
+
+        // ── Step 2: Append fresh signature at the bottom ─────────────────
+        if (!CACHED_SIGNATURE_HTML) {
+            console.warn("[CardByte][OnSend] No cached signature — sending without signature");
+            if (_hasSig(body)) await _setBodyHtml(stripped); // at least remove the broken one
             event.completed({ allowEvent: true });
             return;
         }
 
-        const stripped = _stripSig(body);
-        console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB`);
-        console.log(`[CardByte][OnSend] sigStillPresent: ${_hasSig(stripped)}`);
+        console.log("[CardByte][OnSend] Building fresh signature block from cache...");
+        const freshBlock = await _buildFreshSignatureBlock();
+        const finalHtml = stripped + freshBlock;
+        console.log(`[CardByte][OnSend] Final body: ${(finalHtml.length / 1024).toFixed(1)}KB`);
 
-        await _setBodyHtml(stripped);
-        console.log("[CardByte][OnSend] ✅ Signature removed — allowing send");
+        // ── Step 3: Write back ───────────────────────────────────────────
+        await _setBodyHtml(finalHtml);
+        console.log("[CardByte][OnSend] ✅ Signature stripped and re-appended at bottom — allowing send");
         event.completed({ allowEvent: true });
 
     } catch (err) {
