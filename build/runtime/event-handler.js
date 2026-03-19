@@ -950,7 +950,9 @@ function getBodyHtml(item) {
 }
 
 function hasCardByteSignature(html) {
-    return html.includes("CARD_BYTE_SIGNATURE_START") || html.includes("CARDBYTE_SIGNATURE");
+    return /id="x?_?cardbyte-signature-block"/i.test(html)
+        || html.includes("CARD_BYTE_SIGNATURE_START")
+        || html.includes("CARDBYTE_SIGNATURE");
 }
 
 function looksLikeDefaultSignature(html) {
@@ -1238,7 +1240,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     }
 
     function _hasSig(html) {
-        return /id="cardbyte-signature-block"/i.test(html)
+        return /id="x?_?cardbyte-signature-block"/i.test(html)
             || html.includes("CARD_BYTE_SIGNATURE_START")
             || html.includes("CARDBYTE_SIGNATURE");
     }
@@ -1246,36 +1248,68 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     function _stripSig(html) {
         let result = html;
 
-        // Primary: strip by id — matches the div wrapper added in wrapForOutlook
-        // Handles both self-contained and nested content inside the div
-        result = result.replace(
-            /<div[^>]*id="cardbyte-signature-block"[^>]*>[\s\S]*?<\/div>/gi,
-            ""
-        );
+        // Primary: match id="cardbyte-signature-block" OR "x_cardbyte-signature-block"
+        // Outlook prefixes all ids with x_ when reading back HTML
+        // The outer div wraps the entire signature including the inner table,
+        // so we need to match greedily up to the LAST </div> that closes it.
+        // We use a loop to handle nested divs correctly.
+        result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
 
-        // Fallback: strip old comment-based markers if id strip missed anything
+        // Fallback: comment-based markers (legacy)
         result = result.replace(
             /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
             ""
         );
 
-        // Strip any leftover spacer immediately before where the sig was:
-        // <br><div style="min-height:50px">&nbsp;</div><br>
+        // Strip leftover SIGNATURE_SPACER:
+        // <br><div style="min-height:50px;">&nbsp;</div><br>
         result = result.replace(
             /<br\s*\/?>\s*<div[^>]*min-height\s*:\s*50px[^>]*>\s*&nbsp;\s*<\/div>\s*<br\s*\/?>/gi,
             ""
         );
 
-        // Trim trailing br/whitespace/nbsp
+        // Trim trailing br / whitespace / nbsp
         result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
 
         return result;
     }
 
+    // Strips a <div id="..."> that matches idPattern, correctly handling nested divs
+    function _stripDivById(html, idPattern) {
+        // Find the opening tag that contains the target id
+        const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
+        const openMatch = openTagRegex.exec(html);
+        if (!openMatch) return html;
+
+        const startIndex = openMatch.index;
+        let pos = startIndex + openMatch[0].length;
+        let depth = 1;
+
+        // Walk forward counting <div> opens and </div> closes to find the matching close
+        while (pos < html.length && depth > 0) {
+            const nextOpen = html.indexOf("<div", pos);
+            const nextClose = html.indexOf("</div>", pos);
+
+            if (nextClose === -1) break; // malformed HTML — bail
+
+            if (nextOpen !== -1 && nextOpen < nextClose) {
+                depth++;
+                pos = nextOpen + 4; // move past "<div"
+            } else {
+                depth--;
+                pos = nextClose + 6; // move past "</div>"
+            }
+        }
+
+        // pos now points to right after the closing </div>
+        return html.slice(0, startIndex) + html.slice(pos);
+    }
+
     try {
         console.log("[CardByte][OnSend] Reading body...");
         const body = await _getBodyHtml();
-        console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`, body);
+        console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB`);
+        console.log(`[CardByte][OnSend] hasSig: ${_hasSig(body)}`, body);
 
         if (!_hasSig(body)) {
             console.log("[CardByte][OnSend] No signature found — allowing send as-is");
@@ -1284,7 +1318,8 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         }
 
         const stripped = _stripSig(body);
-        console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB, sigStillPresent: ${_hasSig(stripped)}`);
+        console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB`);
+        console.log(`[CardByte][OnSend] sigStillPresent: ${_hasSig(stripped)}`);
 
         await _setBodyHtml(stripped);
         console.log("[CardByte][OnSend] ✅ Signature removed — allowing send");
@@ -1292,11 +1327,11 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
 
     } catch (err) {
         console.error("[CardByte][OnSend] ❌ Error:", err.message || err);
+        console.error("[CardByte][OnSend] Stack:", err.stack || "N/A");
         event.completed({ allowEvent: true });
     }
 };
 
-// Register with Office actions
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("onSendHandler", onSendHandler);
     console.log("[CardByte] Office.actions.associate registered: onSendHandler");
