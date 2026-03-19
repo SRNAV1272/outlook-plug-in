@@ -1275,7 +1275,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     try {
         console.log("[CardByte][OnSend] Reading body...");
         const body = await _getBodyHtml();
-        console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
+        console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`, body);
 
         if (!_hasSig(body)) {
             console.log("[CardByte][OnSend] No signature found — allowing send as-is");
