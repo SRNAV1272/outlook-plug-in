@@ -1272,23 +1272,17 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
 
     function _stripSig(html) {
         let result = html;
-
-        // Primary: strip by id (handles x_ prefix)
         result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
-
-        // Fallback: comment-based markers (legacy)
         result = result.replace(
             /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
             ""
         );
-
-        // Only trim TRAILING junk — never leading (preserves reply chain structure)
+        // Only trim trailing — never leading
         result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
-
         return result;
     }
 
-    // Finds the index where the reply chain begins in the HTML
+    // Returns the index of the earliest reply chain marker in html, or -1
     function _findReplyChainIndex(html) {
         const replyMarkers = [
             /<div[^>]*id="?x?_?divRplyFwdMsg"?/i,
@@ -1296,12 +1290,15 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
             /<blockquote/i,
             /class="?OutlookMessageHeader"?/i,
+            /x_divRplyFwdMsg/i,
+            /divRplyFwdMsg/i,
         ];
         let earliest = -1;
         for (const marker of replyMarkers) {
             const idx = html.search(marker);
             if (idx > -1 && (earliest === -1 || idx < earliest)) {
                 earliest = idx;
+                console.log(`[CardByte][OnSend] Reply marker matched: ${marker} at index ${idx}`);
             }
         }
         return earliest;
@@ -1309,14 +1306,11 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
 
     async function _buildFreshSignatureBlock() {
         let processedHtml = CACHED_SIGNATURE_HTML;
-
         if (isMobile()) {
             processedHtml = simplifyHtmlForMobile(processedHtml);
             processedHtml = await compressImagesInHtml(processedHtml);
         }
-
         const wrappedHtml = wrapForOutlook(processedHtml);
-        // No leading spacer — body content provides natural separation
         return `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
     }
 
@@ -1329,7 +1323,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         const stripped = _hasSig(body) ? _stripSig(body) : body;
         console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB, sigStillPresent: ${_hasSig(stripped)}`);
 
-        // ── Step 2: No cached signature — send as-is ─────────────────────
+        // ── Step 2: No cached signature — just send stripped ─────────────
         if (!CACHED_SIGNATURE_HTML) {
             console.warn("[CardByte][OnSend] No cached signature — sending without signature");
             if (_hasSig(body)) await _setBodyHtml(stripped);
@@ -1337,25 +1331,31 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             return;
         }
 
-        // ── Step 3: Build fresh signature block ──────────────────────────
-        console.log("[CardByte][OnSend] Building fresh signature block from cache...");
+        // ── Step 3: Build fresh block ────────────────────────────────────
+        console.log("[CardByte][OnSend] Building fresh signature block...");
         const freshBlock = await _buildFreshSignatureBlock();
+        console.log(`[CardByte][OnSend] Fresh block: ${(freshBlock.length / 1024).toFixed(1)}KB`);
 
-        // ── Step 4: Insert signature in the right place ──────────────────
-        // For reply/forward: inject BEFORE the reply chain, not at the very end
-        // For new compose: append at the bottom
-        let finalHtml;
+        // ── Step 4: Find reply chain boundary in stripped body ───────────
         const replyChainIndex = _findReplyChainIndex(stripped);
         const isReply = replyChainIndex > -1;
+        console.log(`[CardByte][OnSend] isReply: ${isReply}, replyChainIndex: ${replyChainIndex}`);
+
+        let finalHtml;
 
         if (isReply) {
-            console.log(`[CardByte][OnSend] Reply/forward detected — inserting signature before reply chain at index ${replyChainIndex}`);
-            // Insert: [typed content] + [signature] + [reply chain]
-            const beforeChain = stripped.slice(0, replyChainIndex).replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+            console.log("[CardByte][OnSend] Reply path — inserting before reply chain");
+            const beforeChain = stripped
+                .slice(0, replyChainIndex)
+                .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "")
+                .trimEnd();
             const replyChain = stripped.slice(replyChainIndex);
+            console.log(`[CardByte][OnSend] beforeChain: ${(beforeChain.length / 1024).toFixed(1)}KB`);
+            console.log(`[CardByte][OnSend] replyChain: ${(replyChain.length / 1024).toFixed(1)}KB`);
+            // [typed content][signature][reply chain]
             finalHtml = beforeChain + freshBlock + replyChain;
         } else {
-            console.log("[CardByte][OnSend] New compose — appending signature at bottom");
+            console.log("[CardByte][OnSend] Compose path — appending at bottom");
             finalHtml = stripped + freshBlock;
         }
 
