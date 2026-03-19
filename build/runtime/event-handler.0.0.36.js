@@ -73,18 +73,33 @@ function detectPlatform() {
     return "desktop";
 }
 
+// Replace the moveCursorToTop helper with this version:
 function moveCursorToTop(item) {
     return new Promise((resolve) => {
-        try {
-            if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-            // Insert a zero-width space at the beginning — this moves focus to the top
-            item.body.prependAsync("\u200B", { coercionType: Office.CoercionType.Text }, () => {
-                // Now set selection to the very start so cursor lands there
-                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-            });
-        } catch (e) {
-            resolve();
-        }
+        // Delay is critical — Outlook's own post-insert focus runs async
+        // and will override any immediate cursor call we make.
+        setTimeout(() => {
+            try {
+                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
+                // Set an empty selection at the current position first to claim focus
+                item.body.setSelectedDataAsync(
+                    "\u200B",  // zero-width space — gives Outlook a real insertion point to anchor to
+                    { coercionType: Office.CoercionType.Text },
+                    () => {
+                        // Now get the body to find the very start, then place cursor there
+                        item.body.getAsync(Office.CoercionType.Text, (r) => {
+                            if (r.status !== "succeeded") { resolve(); return; }
+                            // prependAsync on TEXT coercion type moves cursor without adding visible content
+                            item.body.prependAsync(
+                                "",
+                                { coercionType: Office.CoercionType.Text },
+                                () => resolve()
+                            );
+                        });
+                    }
+                );
+            } catch { resolve(); }
+        }, 300); // 300ms lets Outlook finish its own focus management
     });
 }
 
@@ -933,7 +948,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         console.error("[CardByte] insertSignature TOTAL FAILURE:", err);
         throw err;
     } finally {
-        await moveCursorToTop(item).catch(() => {}); // best-effort cursor reset
+        await moveCursorToTop(item).catch(() => { }); // best-effort cursor reset
         window.__INSERTING_SIGNATURE__ = false;
     }
 }
