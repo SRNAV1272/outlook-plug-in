@@ -1273,6 +1273,27 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         return html.slice(0, startIndex) + html.slice(pos);
     }
 
+    // function _stripSig(html) {
+    //     let result = html;
+
+    //     // Primary: strip by id
+    //     result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
+
+    //     // Fallback: comment-based markers (legacy)
+    //     result = result.replace(
+    //         /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+    //         ""
+    //     );
+
+    //     // Strip leftover spacer (now just a <br>)
+    //     result = result.replace(/(<br\s*\/?>)+$/gi, "").trimEnd();
+
+    //     return result;
+    // }
+
+    // Rebuilds the clean signature block from the cached raw API HTML —
+    // same pipeline as applySignature: mobile simplify → compress → wrap → block
+
     function _stripSig(html) {
         let result = html;
 
@@ -1285,14 +1306,13 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             ""
         );
 
-        // Strip leftover spacer (now just a <br>)
-        result = result.replace(/(<br\s*\/?>)+$/gi, "").trimEnd();
+        // Trim leading AND trailing br / whitespace / nbsp
+        result = result.replace(/^(\s|<br\s*\/?>|&nbsp;)+/gi, "").trimStart();
+        result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
 
         return result;
     }
-
-    // Rebuilds the clean signature block from the cached raw API HTML —
-    // same pipeline as applySignature: mobile simplify → compress → wrap → block
+    
     async function _buildFreshSignatureBlock() {
         let processedHtml = CACHED_SIGNATURE_HTML;
 
