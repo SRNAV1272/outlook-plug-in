@@ -29,11 +29,7 @@
 let SIGNATURE_STATE = "idle"; // idle | loading | applied
 let CACHED_SIGNATURE_HTML = null; // stores raw API response for use at send time
 
-const SIGNATURE_SPACER = `
-        <br>
-        <div style="min-height:50px;">&nbsp;</div>
-        <br>
-    `;
+const SIGNATURE_SPACER = `<br>`;
 
 const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 
@@ -1280,7 +1276,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     function _stripSig(html) {
         let result = html;
 
-        // Primary: strip by id (handles x_ prefix Outlook adds on read-back)
+        // Primary: strip by id
         result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
 
         // Fallback: comment-based markers (legacy)
@@ -1289,14 +1285,8 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             ""
         );
 
-        // Strip leftover SIGNATURE_SPACER
-        result = result.replace(
-            /<br\s*\/?>\s*<div[^>]*min-height\s*:\s*50px[^>]*>\s*&nbsp;\s*<\/div>\s*<br\s*\/?>/gi,
-            ""
-        );
-
-        // Trim trailing br / whitespace / nbsp
-        result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+        // Strip leftover spacer (now just a <br>)
+        result = result.replace(/(<br\s*\/?>)+$/gi, "").trimEnd();
 
         return result;
     }
