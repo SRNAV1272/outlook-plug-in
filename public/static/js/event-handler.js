@@ -99,7 +99,7 @@ function moveCursorToTop(item) {
                     }
                 );
             } catch { resolve(); }
-        }, 300); // 300ms lets Outlook finish its own focus management
+        }, 600); // 600ms lets Outlook finish its own focus management
     });
 }
 
@@ -722,8 +722,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         if (window.__INSERTING_SIGNATURE__) return;
         window.__INSERTING_SIGNATURE__ = true;
 
-        await moveCursorToTop(item);
-
         const mobile = isMobile();
 
         // On mobile, simplify HTML first and aggressively compress/convert images
@@ -820,23 +818,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
-            }
-            // {
-            //     console.log("[CardByte] Reply Tier 3: CID + signature-only insert");
-            //     try {
-            //         const { cleanedHtml, images } = extractBase64Images(signatureBlock);
-            //         const result = await tryInsertSignatureOnly(item, cleanedHtml, "Reply-T3");
-            //         if (result.success) {
-            //             let attached = 0;
-            //             for (const img of images) {
-            //                 try { await addInlineImageAttachment(item, img); attached++; }
-            //                 catch (e) { console.warn(`[CardByte] Image attach failed: ${img.cid}`); }
-            //             }
-            //             console.log(`[CardByte] Attached ${attached}/${images.length} images`);
-            //             await stabilizeSelection(item); return;
-            //         }
-            //     } catch (e) { console.warn("[CardByte] Reply Tier 3 error:", e.message); }
-            // }
+            } 
+
             {
                 console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
                 const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
