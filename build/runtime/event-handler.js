@@ -702,7 +702,7 @@ function stabilizeSelection(item) {
             if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
             item.body.getAsync(Office.CoercionType.Html, (r) => {
                 if (r.status !== "succeeded") { resolve(); return; }
-                item.body.setSelectedDataAsync("\u200B", { coercionType: Office.CoercionType.Text }, () => resolve());
+                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
             });
         } catch (e) {
             resolve();
