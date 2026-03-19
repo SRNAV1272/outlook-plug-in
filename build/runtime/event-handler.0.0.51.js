@@ -1137,7 +1137,12 @@ window.applySignature = async function (event = { completed: () => { } }) {
         if (!apiResponse) throw new Error("API returned empty or null response");
 
         CACHED_SIGNATURE_HTML = apiResponse; // ← cache for onSendHandler
-
+        try {
+            localStorage.setItem("cardbyte_cached_signature", apiResponse);
+            console.log("[CardByte] Signature cached to localStorage");
+        } catch (e) {
+            console.warn("[CardByte] localStorage write failed:", e.message);
+        }
         const sizeKB = (apiResponse.length / 1024).toFixed(1);
         const base64Count = (apiResponse.match(/data:image\/[^;]+;base64,/gi) || []).length;
         const gifCount = (apiResponse.match(/data:image\/gif;base64,/gi) || []).length;
@@ -1213,13 +1218,54 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     console.log("[CardByte][OnSend] ════════════════════════════");
     console.log("[CardByte][OnSend] Handler fired");
     console.log("[CardByte][OnSend] item:", item ? "found" : "NULL");
-    console.log("[CardByte][OnSend] cachedSignature:", CACHED_SIGNATURE_HTML ? `${(CACHED_SIGNATURE_HTML.length / 1024).toFixed(1)}KB` : "NULL");
 
     if (!item) {
         console.error("[CardByte][OnSend] No item — allowing send");
         event.completed({ allowEvent: true });
         return;
     }
+
+    // ── Resolve signature: localStorage → API fallback ───────────────────
+    if (!CACHED_SIGNATURE_HTML) {
+        try {
+            const stored = localStorage.getItem("cardbyte_cached_signature");
+            if (stored) {
+                CACHED_SIGNATURE_HTML = stored;
+                console.log(`[CardByte][OnSend] Restored from localStorage: ${(stored.length / 1024).toFixed(1)}KB`);
+            }
+        } catch (e) {
+            console.warn("[CardByte][OnSend] localStorage read failed:", e.message);
+        }
+    }
+
+    if (!CACHED_SIGNATURE_HTML) {
+        try {
+            console.log("[CardByte][OnSend] Cache empty — fetching from API...");
+            const userEmail = mailbox?.userProfile?.emailAddress;
+            if (userEmail) {
+                const fetched = await renderSignatureOnServer(userEmail);
+                if (fetched) {
+                    CACHED_SIGNATURE_HTML = fetched;
+                    console.log(`[CardByte][OnSend] API fetch succeeded: ${(fetched.length / 1024).toFixed(1)}KB`);
+                    try {
+                        localStorage.setItem("cardbyte_cached_signature", fetched);
+                    } catch (e) {
+                        console.warn("[CardByte][OnSend] localStorage write failed:", e.message);
+                    }
+                } else {
+                    console.warn("[CardByte][OnSend] API returned null");
+                }
+            } else {
+                console.warn("[CardByte][OnSend] No user email — cannot fetch signature");
+            }
+        } catch (e) {
+            console.warn("[CardByte][OnSend] API fetch failed:", e.message);
+        }
+    }
+
+    console.log("[CardByte][OnSend] cachedSignature:", CACHED_SIGNATURE_HTML
+        ? `${(CACHED_SIGNATURE_HTML.length / 1024).toFixed(1)}KB`
+        : "NULL");
 
     function _getBodyHtml() {
         return new Promise((resolve, reject) => {
@@ -1282,7 +1328,6 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         return result;
     }
 
-    // Returns the index of the earliest reply chain marker in html, or -1
     function _findReplyChainIndex(html) {
         const replyMarkers = [
             /<div[^>]*id="?x?_?divRplyFwdMsg"?/i,
@@ -1323,9 +1368,9 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         const stripped = _hasSig(body) ? _stripSig(body) : body;
         console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB, sigStillPresent: ${_hasSig(stripped)}`);
 
-        // ── Step 2: No cached signature — just send stripped ─────────────
+        // ── Step 2: No signature available — send stripped or as-is ─────
         if (!CACHED_SIGNATURE_HTML) {
-            console.warn("[CardByte][OnSend] No cached signature — sending without signature");
+            console.warn("[CardByte][OnSend] No signature available — sending without");
             if (_hasSig(body)) await _setBodyHtml(stripped);
             event.completed({ allowEvent: true });
             return;
@@ -1336,7 +1381,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         const freshBlock = await _buildFreshSignatureBlock();
         console.log(`[CardByte][OnSend] Fresh block: ${(freshBlock.length / 1024).toFixed(1)}KB`);
 
-        // ── Step 4: Find reply chain boundary in stripped body ───────────
+        // ── Step 4: Find reply chain boundary ───────────────────────────
         const replyChainIndex = _findReplyChainIndex(stripped);
         const isReply = replyChainIndex > -1;
         console.log(`[CardByte][OnSend] isReply: ${isReply}, replyChainIndex: ${replyChainIndex}`);
@@ -1352,7 +1397,6 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             const replyChain = stripped.slice(replyChainIndex);
             console.log(`[CardByte][OnSend] beforeChain: ${(beforeChain.length / 1024).toFixed(1)}KB`);
             console.log(`[CardByte][OnSend] replyChain: ${(replyChain.length / 1024).toFixed(1)}KB`);
-            // [typed content][signature][reply chain]
             finalHtml = beforeChain + freshBlock + replyChain;
         } else {
             console.log("[CardByte][OnSend] Compose path — appending at bottom");
