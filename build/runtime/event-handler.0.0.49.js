@@ -1245,7 +1245,6 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             || html.includes("CARDBYTE_SIGNATURE");
     }
 
-    // Strips a <div id="..."> that matches idPattern, correctly handling nested divs
     function _stripDivById(html, idPattern) {
         const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
         const openMatch = openTagRegex.exec(html);
@@ -1258,9 +1257,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         while (pos < html.length && depth > 0) {
             const nextOpen = html.indexOf("<div", pos);
             const nextClose = html.indexOf("</div>", pos);
-
             if (nextClose === -1) break;
-
             if (nextOpen !== -1 && nextOpen < nextClose) {
                 depth++;
                 pos = nextOpen + 4;
@@ -1273,31 +1270,10 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         return html.slice(0, startIndex) + html.slice(pos);
     }
 
-    // function _stripSig(html) {
-    //     let result = html;
-
-    //     // Primary: strip by id
-    //     result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
-
-    //     // Fallback: comment-based markers (legacy)
-    //     result = result.replace(
-    //         /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
-    //         ""
-    //     );
-
-    //     // Strip leftover spacer (now just a <br>)
-    //     result = result.replace(/(<br\s*\/?>)+$/gi, "").trimEnd();
-
-    //     return result;
-    // }
-
-    // Rebuilds the clean signature block from the cached raw API HTML —
-    // same pipeline as applySignature: mobile simplify → compress → wrap → block
-
     function _stripSig(html) {
         let result = html;
 
-        // Primary: strip by id
+        // Primary: strip by id (handles x_ prefix)
         result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
 
         // Fallback: comment-based markers (legacy)
@@ -1306,13 +1282,31 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             ""
         );
 
-        // Trim leading AND trailing br / whitespace / nbsp
-        result = result.replace(/^(\s|<br\s*\/?>|&nbsp;)+/gi, "").trimStart();
+        // Only trim TRAILING junk — never leading (preserves reply chain structure)
         result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
 
         return result;
     }
-    
+
+    // Finds the index where the reply chain begins in the HTML
+    function _findReplyChainIndex(html) {
+        const replyMarkers = [
+            /<div[^>]*id="?x?_?divRplyFwdMsg"?/i,
+            /<div[^>]*id="?appendonsend"?/i,
+            /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+            /<blockquote/i,
+            /class="?OutlookMessageHeader"?/i,
+        ];
+        let earliest = -1;
+        for (const marker of replyMarkers) {
+            const idx = html.search(marker);
+            if (idx > -1 && (earliest === -1 || idx < earliest)) {
+                earliest = idx;
+            }
+        }
+        return earliest;
+    }
+
     async function _buildFreshSignatureBlock() {
         let processedHtml = CACHED_SIGNATURE_HTML;
 
@@ -1322,7 +1316,8 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         }
 
         const wrappedHtml = wrapForOutlook(processedHtml);
-        return `${SIGNATURE_SPACER}<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
+        // No leading spacer — body content provides natural separation
+        return `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
     }
 
     try {
@@ -1330,26 +1325,45 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         const body = await _getBodyHtml();
         console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
 
-        // ── Step 1: Strip existing signature from body ───────────────────
+        // ── Step 1: Strip existing signature ────────────────────────────
         const stripped = _hasSig(body) ? _stripSig(body) : body;
         console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB, sigStillPresent: ${_hasSig(stripped)}`);
 
-        // ── Step 2: Append fresh signature at the bottom ─────────────────
+        // ── Step 2: No cached signature — send as-is ─────────────────────
         if (!CACHED_SIGNATURE_HTML) {
             console.warn("[CardByte][OnSend] No cached signature — sending without signature");
-            if (_hasSig(body)) await _setBodyHtml(stripped); // at least remove the broken one
+            if (_hasSig(body)) await _setBodyHtml(stripped);
             event.completed({ allowEvent: true });
             return;
         }
 
+        // ── Step 3: Build fresh signature block ──────────────────────────
         console.log("[CardByte][OnSend] Building fresh signature block from cache...");
         const freshBlock = await _buildFreshSignatureBlock();
-        const finalHtml = stripped + freshBlock;
+
+        // ── Step 4: Insert signature in the right place ──────────────────
+        // For reply/forward: inject BEFORE the reply chain, not at the very end
+        // For new compose: append at the bottom
+        let finalHtml;
+        const replyChainIndex = _findReplyChainIndex(stripped);
+        const isReply = replyChainIndex > -1;
+
+        if (isReply) {
+            console.log(`[CardByte][OnSend] Reply/forward detected — inserting signature before reply chain at index ${replyChainIndex}`);
+            // Insert: [typed content] + [signature] + [reply chain]
+            const beforeChain = stripped.slice(0, replyChainIndex).replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+            const replyChain = stripped.slice(replyChainIndex);
+            finalHtml = beforeChain + freshBlock + replyChain;
+        } else {
+            console.log("[CardByte][OnSend] New compose — appending signature at bottom");
+            finalHtml = stripped + freshBlock;
+        }
+
         console.log(`[CardByte][OnSend] Final body: ${(finalHtml.length / 1024).toFixed(1)}KB`);
 
-        // ── Step 3: Write back ───────────────────────────────────────────
+        // ── Step 5: Write back ───────────────────────────────────────────
         await _setBodyHtml(finalHtml);
-        console.log("[CardByte][OnSend] ✅ Signature stripped and re-appended at bottom — allowing send");
+        console.log("[CardByte][OnSend] ✅ Done — allowing send");
         event.completed({ allowEvent: true });
 
     } catch (err) {
