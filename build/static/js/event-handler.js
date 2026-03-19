@@ -1492,11 +1492,41 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB, sigStillPresent: ${_hasSig(stripped)}`);
 
         // ── Step 2: No signature available — send stripped or as-is ─────
+        // if (!CACHED_SIGNATURE_HTML) {
+        //     console.warn("[CardByte][OnSend] No signature available — sending without");
+        //     if (_hasSig(body)) await _setBodyHtml(stripped);
+        //     event.completed({ allowEvent: true });
+        //     return;
+        // }
+        // ── Step 2: No signature available — attempt live fetch, then send ───
         if (!CACHED_SIGNATURE_HTML) {
-            console.warn("[CardByte][OnSend] No signature available — sending without");
-            if (_hasSig(body)) await _setBodyHtml(stripped);
-            event.completed({ allowEvent: true });
-            return;
+            console.warn("[CardByte][OnSend] No signature in cache — attempting live fetch before send");
+            try {
+                const userEmail = mailbox?.userProfile?.emailAddress;
+                if (userEmail) {
+                    const fetched = await renderSignatureOnServer(userEmail);
+                    if (fetched) {
+                        CACHED_SIGNATURE_HTML = fetched;
+                        console.log(`[CardByte][OnSend] Live fetch succeeded: ${(fetched.length / 1024).toFixed(1)}KB`);
+                        try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (_) { }
+                    } else {
+                        console.warn("[CardByte][OnSend] Live fetch returned null — sending without signature");
+                        if (_hasSig(body)) await _setBodyHtml(stripped);
+                        event.completed({ allowEvent: true });
+                        return;
+                    }
+                } else {
+                    console.warn("[CardByte][OnSend] No user email — sending without signature");
+                    if (_hasSig(body)) await _setBodyHtml(stripped);
+                    event.completed({ allowEvent: true });
+                    return;
+                }
+            } catch (fetchErr) {
+                console.warn("[CardByte][OnSend] Live fetch failed — sending without signature:", fetchErr.message);
+                if (_hasSig(body)) await _setBodyHtml(stripped);
+                event.completed({ allowEvent: true });
+                return;
+            }
         }
 
         // ── Step 3: Build fresh block ────────────────────────────────────
