@@ -73,6 +73,21 @@ function detectPlatform() {
     return "desktop";
 }
 
+function moveCursorToTop(item) {
+    return new Promise((resolve) => {
+        try {
+            if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
+            // Insert a zero-width space at the beginning — this moves focus to the top
+            item.body.prependAsync("\u200B", { coercionType: Office.CoercionType.Text }, () => {
+                // Now set selection to the very start so cursor lands there
+                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+            });
+        } catch (e) {
+            resolve();
+        }
+    });
+}
+
 function isMobile() {
     const p = detectPlatform();
     return p === "mobile-ios" || p === "mobile-android";
@@ -502,7 +517,7 @@ function bodyPrependAsync(item, html) {
         item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
             if (r.status === "succeeded") {
                 if (typeof item.body.setSelectedDataAsync === "function") {
-                    item.body.setSelectedDataAsync("\u200B", { coercionType: Office.CoercionType.Text }, () => resolve());
+                    item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
                 } else {
                     resolve();
                 }
@@ -692,7 +707,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         if (window.__INSERTING_SIGNATURE__) return;
         window.__INSERTING_SIGNATURE__ = true;
 
-        await stabilizeSelection(item);
+        await moveCursorToTop(item);
 
         const mobile = isMobile();
 
@@ -918,6 +933,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         console.error("[CardByte] insertSignature TOTAL FAILURE:", err);
         throw err;
     } finally {
+        await moveCursorToTop(item).catch(() => {}); // best-effort cursor reset
         window.__INSERTING_SIGNATURE__ = false;
     }
 }

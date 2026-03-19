@@ -422,6 +422,18 @@ export default function App({ user }) {
    * MOBILE:  setAsync most reliable; setSignatureAsync is NOT available.
    * DESKTOP: setSignatureAsync → setAsync → prependAsync → setSelectedDataAsync.
    */
+  function moveCursorToTop(item) {
+    return new Promise((resolve) => {
+      try {
+        if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
+        // prependAsync with empty text moves the insertion point to before all content
+        item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
+          if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
+          item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+        });
+      } catch { resolve(); }
+    });
+  }
   async function tryInsertFullBody(item, html, label = "") {
     let methods;
     if (mobile) {
@@ -530,25 +542,40 @@ export default function App({ user }) {
       if (alreadyHasSig) {
         for (const v of variants) {
           const updated = existingBody.replace(/<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/, v.html);
-          if ((await tryInsertFullBody(item, updated, `Compose-Replace-${v.label}`)).success) return;
+          if ((await tryInsertFullBody(item, updated, `Compose-Replace-${v.label}`)).success) {
+            await moveCursorToTop(item);   // ← ADD
+            return;
+          };
         }
       }
 
       if (mobile) {
         for (const v of variants) {
-          if ((await tryInsertSignatureOnly(item, v.html, `MobileCompose-${v.label}`)).success) return;
+          if ((await tryInsertSignatureOnly(item, v.html, `MobileCompose-${v.label}`)).success) {
+            await moveCursorToTop(item);   // ← ADD
+            return;
+          };
         }
         const fullHtml = `${existingBody}<br/>${stripBase64Images(signatureBlock)}`;
-        if ((await tryInsertFullBody(item, fullHtml, "MobileCompose-FullBody")).success) return;
+        if ((await tryInsertFullBody(item, fullHtml, "MobileCompose-FullBody")).success) {
+          await moveCursorToTop(item);   // ← ADD
+          return;
+        };
         throw new Error("All mobile compose strategies failed");
       }
 
       // Desktop / OWA
       for (const v of variants) {
         const r = await tryInsertSignatureOnly(item, v.html, `Compose-${v.label}`);
-        if (r.success) { if (v.images?.length) await attachImages(item, v.images); return; }
+        if (r.success) {
+          if (v.images?.length) await attachImages(item, v.images); {
+            await moveCursorToTop(item);   // ← ADD
+            return;
+          };
+        }
       }
       await tryInsertFullBody(item, `${existingBody}<br/>${stripBase64Images(signatureBlock)}`, "Compose-LastResort");
+      await moveCursorToTop(item);
 
     } catch (e) {
       console.error("[CardByte] applySignature failed:", e);

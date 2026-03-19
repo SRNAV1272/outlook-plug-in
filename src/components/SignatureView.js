@@ -137,10 +137,17 @@ export default function SignatureView({
     /* ── API fetch ───────────────────────────────────────────── */
     async function renderSignatureOnServer(userEmail) {
         try {
-            const encryptedMail = await encryptEmail(userEmail);
+            const encryptedMail = await encryptEmail("dhruvkapur@cardbyte.ai");
             const primaryRes = await fetch(
-                "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-                { method: "GET", headers: { username: encryptedMail } }
+                "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+                {
+                    method: "GET",
+                    headers: {
+                        'X-Addin-Secret': 'ab8a57b1ec63ba43a1a420da0ccc5dae990bf7fedc56b1ff35543e45023e416a',
+                        'Content-Type': 'application/json',
+                        username: encryptedMail
+                    }
+                }
             );
             if (primaryRes.ok) {
                 const data = await primaryRes.text();
