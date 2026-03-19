@@ -702,7 +702,7 @@ function stabilizeSelection(item) {
             if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
             item.body.getAsync(Office.CoercionType.Html, (r) => {
                 if (r.status !== "succeeded") { resolve(); return; }
-                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+                item.body.setSelectedDataAsync("\u200B", { coercionType: Office.CoercionType.Text }, () => resolve());
             });
         } catch (e) {
             resolve();
@@ -880,39 +880,25 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             throw new Error("All mobile compose insertion methods failed");
         }
 
-
-
         // DESKTOP / OWA COMPOSE PATH
-        // Mirror the reply/forward approach: always build a full-body HTML and write it back.
-        // This gives us 100% control over spacing — no Outlook-injected gaps from setSignatureAsync.
-
         {
-            console.log("[CardByte] Compose Tier 1: Full-body insert (consistent spacing like reply path)");
-            const fullHtml = existingBody
-                ? existingBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
-                : signatureBlock;
-            const result = await tryInsertFullBody(item, fullHtml, "Compose-T1");
+            console.log("[CardByte] Compose Tier 1: Signature-only insert");
+            const result = await tryInsertSignatureOnly(item, signatureBlock, "Compose-T1");
             if (result.success) { await stabilizeSelection(item); return; }
         }
         {
-            console.log("[CardByte] Compose Tier 2: Compress images + full-body insert");
+            console.log("[CardByte] Compose Tier 2: Compress + signature-only insert");
             try {
                 const compressed = await compressImagesInHtml(signatureBlock);
-                const fullHtml = existingBody
-                    ? existingBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
-                    : compressed;
-                const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
+                const result = await tryInsertSignatureOnly(item, compressed, "Compose-T2");
                 if (result.success) { await stabilizeSelection(item); return; }
             } catch (e) { console.warn("[CardByte] Compose Tier 2 compression error:", e.message); }
         }
         {
-            console.log("[CardByte] Compose Tier 3: CID images + full-body insert");
+            console.log("[CardByte] Compose Tier 3: CID + signature-only insert");
             try {
                 const { cleanedHtml, images } = extractBase64Images(signatureBlock);
-                const fullHtml = existingBody
-                    ? existingBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + cleanedHtml
-                    : cleanedHtml;
-                const result = await tryInsertFullBody(item, fullHtml, "Compose-T3");
+                const result = await tryInsertSignatureOnly(item, cleanedHtml, "Compose-T3");
                 if (result.success) {
                     let attached = 0;
                     for (const img of images) {
@@ -925,19 +911,18 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             } catch (e) { console.warn("[CardByte] Compose Tier 3 error:", e.message); }
         }
         {
-            console.log("[CardByte] Compose Tier 4: Strip images + full-body insert");
-            const stripped = stripBase64Images(signatureBlock);
-            const fullHtml = existingBody
-                ? existingBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
-                : stripped;
-            const result = await tryInsertFullBody(item, fullHtml, "Compose-T4");
+            console.log("[CardByte] Compose Tier 4: Strip images + signature-only");
+            const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Compose-T4");
+            if (result.success) { await stabilizeSelection(item); return; }
+        }
+        {
+            console.log("[CardByte] Compose Tier 5: Full body replacement (last resort)");
+            const fullHtml = `${existingBody}<br/>${signatureBlock}`;
+            const result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "Compose-T5");
             if (result.success) { await stabilizeSelection(item); return; }
         }
 
         throw new Error("All compose insertion tiers failed");
-
-
-
 
     } catch (err) {
         console.error("[CardByte] insertSignature TOTAL FAILURE:", err);
