@@ -1205,74 +1205,78 @@ window.applySignature = async function (event = { completed: () => { } }) {
    at the very bottom — below all content and reply chains.
    --------------------------------------------------------- */
 window.onSendHandler = async function (event = { completed: () => { } }) {
+
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
-    try {
-        if (!item) {
-            event.completed({ allowEvent: true });
-            return;
-        }
+    console.log("[CardByte][OnSend] ════════════════════════════");
+    console.log("[CardByte][OnSend] Handler fired");
+    console.log("[CardByte][OnSend] item:", item ? "found" : "NULL");
 
-        console.log("[CardByte][OnSend] ════════════════════════════");
-        console.log("[CardByte][OnSend] Repositioning signature to bottom");
+    if (!item) {
+        console.error("[CardByte][OnSend] No item — allowing send");
+        event.completed({ allowEvent: true });
+        return;
+    }
 
-        const existingBody = await getBodyHtml(item);
+    function _getBodyHtml() {
+        return new Promise((resolve, reject) => {
+            item.body.getAsync(Office.CoercionType.Html, (r) => {
+                if (r.status === "succeeded") resolve(r.value || "");
+                else reject(new Error(r.error?.message || "getAsync failed"));
+            });
+        });
+    }
 
-        if (!hasCardByteSignature(existingBody)) {
-            console.log("[CardByte][OnSend] No CardByte signature found — allowing send as-is");
-            event.completed({ allowEvent: true });
-            return;
-        }
+    function _setBodyHtml(html) {
+        return new Promise((resolve, reject) => {
+            item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+                if (r.status === "succeeded") resolve();
+                else reject(new Error(r.error?.message || "setAsync failed"));
+            });
+        });
+    }
 
-        // ── Step 1: Extract the raw signature block ──────────────────────
-        const sigMatch = existingBody.match(
-            /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/
-        );
-        if (!sigMatch) {
-            console.warn("[CardByte][OnSend] Could not extract signature block — allowing send");
-            event.completed({ allowEvent: true });
-            return;
-        }
-        const signatureBlock = sigMatch[0];
-        console.log(`[CardByte][OnSend] Extracted signature block (${(signatureBlock.length / 1024).toFixed(1)}KB)`);
+    function _hasSig(html) {
+        return html.includes("CARD_BYTE_SIGNATURE_START") || html.includes("CARDBYTE_SIGNATURE");
+    }
 
-        // ── Step 2: Remove ALL traces of the signature block AND any spacer ──
-        // Greedy removal: strip everything from the last <br>/<div> spacer
-        // before the START marker all the way through the END marker.
-        // Uses a broad pattern to handle Outlook's HTML re-serialization quirks.
-        let bodyWithoutSig = existingBody;
-
-        // Pass A: Remove the spacer + signature block together if spacer is adjacent
-        bodyWithoutSig = bodyWithoutSig.replace(
-            /(?:<br\s*\/?>|<div[^>]*>\s*&nbsp;\s*<\/div>|\s){0,5}\s*<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+    function _stripSig(html) {
+        // Pass A: strip spacer + block together
+        let result = html.replace(
+            /(?:(?:<br\s*\/?>|<div[^>]*>\s*(?:&nbsp;|\s)*<\/div>|\s)*)\s*<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
             ""
         );
-
-        // Pass B: Safety net — if START..END somehow still present, strip it bare
-        bodyWithoutSig = bodyWithoutSig.replace(
+        // Pass B: safety net for bare block
+        result = result.replace(
             /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
             ""
         );
+        // Pass C: trim trailing whitespace/br junk
+        result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+        return result;
+    }
 
-        // Pass C: Trim any trailing whitespace/br tags left at the end
-        bodyWithoutSig = bodyWithoutSig
-            .replace(/(<br\s*\/?>|\s|&nbsp;)*$/gi, "")
-            .trimEnd();
+    try {
+        console.log("[CardByte][OnSend] Reading body...");
+        const body = await _getBodyHtml();
+        console.log(`[CardByte][OnSend] Body size: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
 
-        console.log(`[CardByte][OnSend] Body after strip: ${(bodyWithoutSig.length / 1024).toFixed(1)}KB`);
+        if (!_hasSig(body)) {
+            console.log("[CardByte][OnSend] No signature found — allowing send as-is");
+            event.completed({ allowEvent: true });
+            return;
+        }
 
-        // ── Step 3: Append signature at the absolute bottom ──────────────
-        const finalHtml = bodyWithoutSig + SIGNATURE_SPACER + signatureBlock;
+        const stripped = _stripSig(body);
+        console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB, sigStillPresent: ${_hasSig(stripped)}`);
 
-        // ── Step 4: Write back ────────────────────────────────────────────
-        await bodySetAsync(item, finalHtml);
-
-        console.log("[CardByte][OnSend] Signature repositioned to bottom — allowing send");
+        await _setBodyHtml(stripped);
+        console.log("[CardByte][OnSend] ✅ Signature removed — allowing send");
         event.completed({ allowEvent: true });
 
     } catch (err) {
-        console.error("[CardByte][OnSend] Error:", err.message || err);
+        console.error("[CardByte][OnSend] ❌ Error:", err.message || err);
         event.completed({ allowEvent: true });
     }
 };
