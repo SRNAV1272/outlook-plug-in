@@ -1199,6 +1199,11 @@ window.applySignature = async function (event = { completed: () => { } }) {
    Re-inserts (or replaces) the CardByte signature at send time.
    Called by the OnMessageSend LaunchEvent.
    --------------------------------------------------------- */
+/* ---------------------------------------------------------
+   ON-SEND HANDLER
+   Removes any existing CardByte signature and re-appends it
+   at the very bottom — below all content and reply chains.
+   --------------------------------------------------------- */
 window.onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
@@ -1212,42 +1217,49 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         }
 
         console.log("[CardByte][OnSend] ════════════════════════════");
-        console.log("[CardByte][OnSend] Re-checking signature before send");
+        console.log("[CardByte][OnSend] Re-positioning signature before send");
         console.log("[CardByte][OnSend] User:", user);
         console.log("[CardByte][OnSend] Platform:", detectPlatform());
 
-        // Check if signature already present and fresh — skip re-fetch if so
         const existingBody = await getBodyHtml(item);
         const alreadyHasSignature = hasCardByteSignature(existingBody);
 
-        if (alreadyHasSignature) {
-            console.log("[CardByte][OnSend] Signature already present — allowing send");
+        if (!alreadyHasSignature) {
+            // No signature at all — nothing to reposition, allow send
+            console.log("[CardByte][OnSend] No CardByte signature found — allowing send as-is");
             event.completed({ allowEvent: true });
             return;
         }
 
-        console.log("[CardByte][OnSend] No signature found — inserting before send");
-
-        // Fetch fresh signature from server
-        const apiResponse = await renderSignatureOnServer(user);
-        if (!apiResponse) {
-            console.warn("[CardByte][OnSend] API returned null — allowing send without signature");
+        // ── Step 1: Extract the existing signature block exactly as-is ──
+        const sigMatch = existingBody.match(
+            /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/
+        );
+        if (!sigMatch) {
+            console.warn("[CardByte][OnSend] Signature markers found but block not extractable — allowing send");
             event.completed({ allowEvent: true });
             return;
         }
+        const signatureBlock = sigMatch[0];
 
-        // Reset the guard so insertSignatureWithoutCursorError doesn't bail out
-        window.__INSERTING_SIGNATURE__ = false;
-        SIGNATURE_STATE = "idle";
+        // ── Step 2: Strip the signature (and its spacer) from wherever it currently sits ──
+        // Also strip the SIGNATURE_SPACER that precedes it
+        let bodyWithoutSig = existingBody.replace(
+            /(?:<br\s*\/?>[\s\S]{0,200})?<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
+            ""
+        ).trimEnd();
 
-        await insertSignatureWithoutCursorError(item, apiResponse);
+        // ── Step 3: Append signature at the very bottom ──
+        const finalHtml = bodyWithoutSig + SIGNATURE_SPACER + signatureBlock;
 
-        console.log("[CardByte][OnSend] Signature inserted — allowing send");
+        // ── Step 4: Write back ──
+        await bodySetAsync(item, finalHtml);
+
+        console.log("[CardByte][OnSend] Signature repositioned to bottom — allowing send");
         event.completed({ allowEvent: true });
 
     } catch (err) {
         console.error("[CardByte][OnSend] Error:", err.message || err);
-        // Always allow send on error — don't block the user
         event.completed({ allowEvent: true });
     }
 };
