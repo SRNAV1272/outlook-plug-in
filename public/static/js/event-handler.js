@@ -246,38 +246,6 @@ function forceCursorToTop(item) {
     });
 }
 
-// async function renderSignatureOnServer(user) {
-//     try {
-//         const encryptedMail = await encryptEmail(user);
-//         const primaryRes = await fetch(
-//             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-//             { method: "GET", headers: { username: encryptedMail, "X-Platform": 'MAC' } }
-//         );
-//         if (primaryRes.ok) {
-//             const data = await primaryRes.text();
-//             const decryptedData = await handleAesDecrypt(data);
-//             console.log("Using NEW renderer");
-//             return JSON.parse(decryptedData)?.html || null;
-//         }
-//         console.warn("Primary failed. Falling back to legacy...");
-//     } catch (err) {
-//         console.warn("Primary crashed. Falling back to legacy...", err);
-//     }
-
-//     try {
-//         const legacyRes = await fetch(
-//             "https://qa-renderer.cardbyte.ai/render-signature",
-//             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
-//         );
-//         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
-//         const legacyData = await legacyRes.json();
-//         console.log("Using LEGACY renderer", legacyData);
-//         return legacyData?.finalHtml || null;
-//     } catch (legacyError) {
-//         console.error("Both primary and legacy failed:", legacyError);
-//         return null;
-//     }
-// }
 async function renderSignatureOnServer(user) {
     const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
@@ -592,11 +560,35 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
    Body Insertion Methods
    --------------------------------------------------------- */
 
+// function bodySetAsync(item, html) {
+//     return new Promise((resolve, reject) => {
+//         item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+//             if (r.status === "succeeded") resolve(); else reject(r.error);
+//         });
+//     });
+// }
 function bodySetAsync(item, html) {
     return new Promise((resolve, reject) => {
-        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") resolve(); else reject(r.error);
-        });
+        item.body.setAsync(
+            html,
+            { coercionType: Office.CoercionType.Html },
+            (r) => {
+                if (r.status !== "succeeded") {
+                    reject(r.error);
+                    return;
+                }
+                // setAsync always drops cursor at end — immediately reclaim top
+                if (typeof item.body?.setSelectedDataAsync === "function") {
+                    item.body.setSelectedDataAsync(
+                        "",
+                        { coercionType: Office.CoercionType.Text },
+                        () => resolve()
+                    );
+                } else {
+                    resolve();
+                }
+            }
+        );
     });
 }
 
@@ -869,7 +861,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 );
                 const result = await tryInsertFullBody(item, updatedBody, "Reply-Replace");
                 if (result.success) {
-                    await forceCursorToTop(item); // must be awaited right here, not in finally
                     return;
                 };
             }
@@ -881,7 +872,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 {
                     const result = await tryInsertSignatureOnly(item, signatureBlock, "MobileReply-T1");
                     if (result.success) {
-                        await forceCursorToTop(item); // must be awaited right here, not in finally
                         return;
                     }
                 }
@@ -906,13 +896,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
                     let result = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
                     if (result.success) {
-                        await forceCursorToTop(item); // must be awaited right here, not in finally
                         return;
                     }
 
                     result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileReply-T3");
                     if (result.success) {
-                        await forceCursorToTop(item); // must be awaited right here, not in finally
                         return;
                     }
                 }
@@ -925,7 +913,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 console.log("[CardByte] Reply Tier 1: Signature-only insert");
                 const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
                 if (result.success) {
-                    await forceCursorToTop(item); // must be awaited right here, not in finally
                     return;
                 }
             }
@@ -936,7 +923,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     console.log(`[CardByte] Compressed signature: ${(compressed.length / 1024).toFixed(1)} KB`);
                     const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
                     if (result.success) {
-                        await forceCursorToTop(item); // must be awaited right here, not in finally
                         return;
                     }
                 } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
@@ -946,7 +932,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
                 const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
                 if (result.success) {
-                    await forceCursorToTop(item); // must be awaited right here, not in finally
                     return;
                 }
             }
@@ -970,7 +955,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     : existingBody + signatureBlock;
                 const result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "Reply-T5");
                 if (result.success) {
-                    await forceCursorToTop(item); // must be awaited right here, not in finally
                     return;
                 }
             }
@@ -991,7 +975,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             );
             const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
             if (result.success) {
-                await forceCursorToTop(item); // must be awaited right here, not in finally
                 return;
             }
         }
@@ -1027,7 +1010,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 : signatureBlock;
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T1");
             if (result.success) {
-                await forceCursorToTop(item); // must be awaited right here, not in finally
                 return;
             }
         }
@@ -1040,7 +1022,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     : compressed;
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
                 if (result.success) {
-                    await forceCursorToTop(item); // must be awaited right here, not in finally
                     return;
                 }
             } catch (e) { console.warn("[CardByte] Compose Tier 2 compression error:", e.message); }
@@ -1060,7 +1041,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                         catch (e) { console.warn(`[CardByte] Image attach failed: ${img.cid}`); }
                     }
                     console.log(`[CardByte] Attached ${attached}/${images.length} images`);
-                    await forceCursorToTop(item); return;
                 }
             } catch (e) { console.warn("[CardByte] Compose Tier 3 error:", e.message); }
         }
@@ -1072,7 +1052,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 : stripped;
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T4");
             if (result.success) {
-                await forceCursorToTop(item); // must be awaited right here, not in finally
                 return;
             }
         }
