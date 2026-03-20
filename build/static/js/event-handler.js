@@ -246,12 +246,47 @@ function forceCursorToTop(item) {
     });
 }
 
+// async function renderSignatureOnServer(user) {
+//     try {
+//         const encryptedMail = await encryptEmail(user);
+//         const primaryRes = await fetch(
+//             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+//             { method: "GET", headers: { username: encryptedMail, "X-Platform": 'MAC' } }
+//         );
+//         if (primaryRes.ok) {
+//             const data = await primaryRes.text();
+//             const decryptedData = await handleAesDecrypt(data);
+//             console.log("Using NEW renderer");
+//             return JSON.parse(decryptedData)?.html || null;
+//         }
+//         console.warn("Primary failed. Falling back to legacy...");
+//     } catch (err) {
+//         console.warn("Primary crashed. Falling back to legacy...", err);
+//     }
+
+//     try {
+//         const legacyRes = await fetch(
+//             "https://qa-renderer.cardbyte.ai/render-signature",
+//             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
+//         );
+//         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
+//         const legacyData = await legacyRes.json();
+//         console.log("Using LEGACY renderer", legacyData);
+//         return legacyData?.finalHtml || null;
+//     } catch (legacyError) {
+//         console.error("Both primary and legacy failed:", legacyError);
+//         return null;
+//     }
+// }
 async function renderSignatureOnServer(user) {
+    const platform = Office.context.diagnostics.platform;
+    const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-            { method: "GET", headers: { username: encryptedMail } }
+            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
         if (primaryRes.ok) {
             const data = await primaryRes.text();
