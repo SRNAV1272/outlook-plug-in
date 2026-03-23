@@ -150,7 +150,7 @@ export default function SignatureView({
             //     }
             // );
             const primaryRes = await fetch(
-                "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+                "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
                 {
                     method: "GET",
                     headers: {
@@ -171,7 +171,7 @@ export default function SignatureView({
 
         try {
             const legacyRes = await fetch(
-                "https://qa-renderer.cardbyte.ai/render-signature",
+                "https://ns-renderer.cardbyte.ai/render-signature",
                 { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: userEmail }) }
             );
             if (!legacyRes.ok) throw new Error("Legacy renderer failed");
