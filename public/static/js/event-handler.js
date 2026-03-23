@@ -547,11 +547,14 @@ function bodySetAsync(item, html) {
                     reject(r.error);
                     return;
                 }
-                // setAsync always drops cursor at end — immediately reclaim top
-                if (typeof item.body?.setSelectedDataAsync === "function") {
-                    item.body.setSelectedDataAsync(
+                // setAsync always drops cursor at end.
+                // prependAsync("") with empty string reliably repositions
+                // the write cursor to position 0 without inserting any
+                // visible content — cleaner than the \uFEFF approach.
+                if (typeof item.body?.prependAsync === "function") {
+                    item.body.prependAsync(
                         "",
-                        { coercionType: Office.CoercionType.Text },
+                        { coercionType: Office.CoercionType.Html },
                         () => resolve()
                     );
                 } else {
