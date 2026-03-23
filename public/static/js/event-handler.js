@@ -537,31 +537,128 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
 //         });
 //     });
 // }
+// function bodySetAsync(item, html) {
+//     return new Promise((resolve, reject) => {
+//         item.body.setAsync(
+//             html,
+//             { coercionType: Office.CoercionType.Html },
+//             (r) => {
+//                 if (r.status !== "succeeded") {
+//                     reject(r.error);
+//                     return;
+//                 }
+//                 // setAsync always drops cursor at end.
+//                 // prependAsync("") with empty string reliably repositions
+//                 // the write cursor to position 0 without inserting any
+//                 // visible content — cleaner than the \uFEFF approach.
+//                 if (typeof item.body?.prependAsync === "function") {
+//                     item.body.prependAsync(
+//                         "",
+//                         { coercionType: Office.CoercionType.Html },
+//                         () => resolve()
+//                     );
+//                 } else {
+//                     resolve();
+//                 }
+//             }
+//         );
+//     });
+// }
 function bodySetAsync(item, html) {
     return new Promise((resolve, reject) => {
+        // Prefer chunk insertion (preserves cursor) over setAsync (nukes body + drops cursor at end)
+        if (typeof item.body?.setSelectedDataAsync === "function") {
+            bodyChunkInsert(item, html)
+                .then(resolve)
+                .catch((chunkErr) => {
+                    console.warn("[CardByte] bodyChunkInsert failed, falling back to setAsync:", chunkErr.message);
+                    // True fallback: setAsync + attempt cursor reposition
+                    item.body.setAsync(
+                        html,
+                        { coercionType: Office.CoercionType.Html },
+                        (r) => {
+                            if (r.status !== "succeeded") { reject(r.error); return; }
+                            if (typeof item.body?.prependAsync === "function") {
+                                item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
+                            } else {
+                                resolve();
+                            }
+                        }
+                    );
+                });
+            return;
+        }
+
+        // setSelectedDataAsync not available at all — direct setAsync
         item.body.setAsync(
             html,
             { coercionType: Office.CoercionType.Html },
             (r) => {
-                if (r.status !== "succeeded") {
-                    reject(r.error);
-                    return;
-                }
-                // setAsync always drops cursor at end.
-                // prependAsync("") with empty string reliably repositions
-                // the write cursor to position 0 without inserting any
-                // visible content — cleaner than the \uFEFF approach.
+                if (r.status !== "succeeded") { reject(r.error); return; }
                 if (typeof item.body?.prependAsync === "function") {
-                    item.body.prependAsync(
-                        "",
-                        { coercionType: Office.CoercionType.Html },
-                        () => resolve()
-                    );
+                    item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
                 } else {
                     resolve();
                 }
             }
         );
+    });
+}
+
+/**
+ * Chunked insertion via setSelectedDataAsync.
+ * Splits large HTML at tag boundaries and inserts sequentially at cursor.
+ * Cursor stays at top — no setAsync body-wipe, no prependAsync repositioning needed.
+ * Falls back to bodySetAsync if setSelectedDataAsync is unavailable.
+ */
+function bodyChunkInsert(item, html, chunkSize = 50_000) {
+    return new Promise(async (resolve, reject) => {
+        if (typeof item.body?.setSelectedDataAsync !== "function") {
+            reject(new Error("setSelectedDataAsync not available"));
+            return;
+        }
+
+        // Split at tag boundaries to avoid mid-tag breaks
+        const tagBoundaryRegex = /(?=<[a-z])/gi;
+        const parts = html.split(tagBoundaryRegex);
+        const chunks = [];
+        let current = "";
+
+        for (const part of parts) {
+            if ((current + part).length > chunkSize) {
+                if (current) chunks.push(current);
+                current = part;
+            } else {
+                current += part;
+            }
+        }
+        if (current) chunks.push(current);
+
+        console.log(`[CardByte] Chunk insert: ${chunks.length} chunk(s) for ${(html.length / 1024).toFixed(1)}KB`);
+
+        for (let i = 0; i < chunks.length; i++) {
+            try {
+                await new Promise((res, rej) => {
+                    item.body.setSelectedDataAsync(
+                        chunks[i],
+                        { coercionType: Office.CoercionType.Html },
+                        (r) => {
+                            if (r.status === "succeeded") {
+                                console.log(`[CardByte] Chunk ${i + 1}/${chunks.length} inserted`);
+                                res();
+                            } else {
+                                rej(new Error(`Chunk ${i + 1} failed: ${r.error?.message || r.error}`));
+                            }
+                        }
+                    );
+                });
+            } catch (err) {
+                reject(err);
+                return;
+            }
+        }
+
+        resolve();
     });
 }
 
@@ -1624,7 +1721,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         } catch (e) {
             console.warn("[CardByte][OnSend] Tier C also failed — allowing send without body modification:", e.message);
         }
-        
+
         event.completed({ allowEvent: true });
 
     } catch (err) {
