@@ -1458,12 +1458,25 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         return earliest;
     }
 
+    // async function _buildFreshSignatureBlock() {
+    //     let processedHtml = CACHED_SIGNATURE_HTML;
+    //     if (isMobile()) {
+    //         processedHtml = simplifyHtmlForMobile(processedHtml);
+    //         processedHtml = await compressImagesInHtml(processedHtml);
+    //     }
+    //     const wrappedHtml = wrapForOutlook(processedHtml);
+    //     return `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
+    // }
     async function _buildFreshSignatureBlock() {
         let processedHtml = CACHED_SIGNATURE_HTML;
+
+        // ✅ Always compress — not just on mobile
+        processedHtml = await compressImagesInHtml(processedHtml);
+
         if (isMobile()) {
             processedHtml = simplifyHtmlForMobile(processedHtml);
-            processedHtml = await compressImagesInHtml(processedHtml);
         }
+
         const wrappedHtml = wrapForOutlook(processedHtml);
         return `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
     }
@@ -1544,9 +1557,74 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
 
         console.log(`[CardByte][OnSend] Final body: ${(finalHtml.length / 1024).toFixed(1)}KB`);
 
-        // ── Step 5: Write back ───────────────────────────────────────────
-        await _setBodyHtml(finalHtml);
-        console.log("[CardByte][OnSend] ✅ Done — allowing send");
+        // // ── Step 5: Write back ───────────────────────────────────────────
+        // await _setBodyHtml(finalHtml);
+        // console.log("[CardByte][OnSend] ✅ Done — allowing send");
+        // ── Step 5: Write back — tiered by size ─────────────────────────────
+        const SETASYNC_LIMIT = 900_000; // 900 KB — safe headroom under OWA's ~1 MB cap
+
+        console.log(`[CardByte][OnSend] Size check — final: ${(finalHtml.length / 1024).toFixed(1)}KB, limit: ${(SETASYNC_LIMIT / 1024).toFixed(0)}KB`);
+
+        if (finalHtml.length <= SETASYNC_LIMIT) {
+            // Fast path — body is within safe limits
+            await _setBodyHtml(finalHtml);
+            console.log("[CardByte][OnSend] ✅ Done (direct write) — allowing send");
+            event.completed({ allowEvent: true });
+            return;
+        }
+
+        // Body too large — try progressively more aggressive compression
+
+        // Tier A: compress images in the full final body
+        console.warn(`[CardByte][OnSend] Body too large — compressing images`);
+        try {
+            const compressed = await compressImagesInHtml(finalHtml);
+            console.log(`[CardByte][OnSend] After compression: ${(compressed.length / 1024).toFixed(1)}KB`);
+            if (compressed.length <= SETASYNC_LIMIT) {
+                await _setBodyHtml(compressed);
+                console.log("[CardByte][OnSend] ✅ Done (compressed) — allowing send");
+                event.completed({ allowEvent: true });
+                return;
+            }
+        } catch (e) {
+            console.warn("[CardByte][OnSend] Compression failed:", e.message);
+        }
+
+        // Tier B: strip base64 images from reply chain only (preserve sig images)
+        if (isReply) {
+            console.warn(`[CardByte][OnSend] Still too large — stripping base64 from reply chain`);
+            try {
+                const strippedReplyChain = replyChain.replace(
+                    /(<img[^>]+src=")data:[^"]{100,}(")/gi,
+                    '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
+                );
+                const tierBHtml = beforeChain + freshBlock + strippedReplyChain;
+                console.log(`[CardByte][OnSend] Tier B size: ${(tierBHtml.length / 1024).toFixed(1)}KB`);
+                if (tierBHtml.length <= SETASYNC_LIMIT) {
+                    await _setBodyHtml(tierBHtml);
+                    console.log("[CardByte][OnSend] ✅ Done (reply-chain images stripped) — allowing send");
+                    event.completed({ allowEvent: true });
+                    return;
+                }
+            } catch (e) {
+                console.warn("[CardByte][OnSend] Tier B failed:", e.message);
+            }
+        }
+
+        // Tier C: strip ALL base64 images from everything (last resort before giving up)
+        console.warn(`[CardByte][OnSend] Still too large — stripping all base64 images`);
+        try {
+            const fullyStripped = finalHtml.replace(
+                /(<img[^>]+src=")data:[^"]{100,}(")/gi,
+                '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
+            );
+            console.log(`[CardByte][OnSend] Tier C size: ${(fullyStripped.length / 1024).toFixed(1)}KB`);
+            await _setBodyHtml(fullyStripped);
+            console.log("[CardByte][OnSend] ✅ Done (all images stripped) — allowing send");
+        } catch (e) {
+            console.warn("[CardByte][OnSend] Tier C also failed — allowing send without body modification:", e.message);
+        }
+        
         event.completed({ allowEvent: true });
 
     } catch (err) {
