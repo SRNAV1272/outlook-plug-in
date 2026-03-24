@@ -137,7 +137,7 @@ export default function SignatureView({
     /* ── API fetch ───────────────────────────────────────────── */
     async function renderSignatureOnServer(userEmail) {
         try {
-            const encryptedMail = await encryptEmail("operations@irishightech.com");
+            const encryptedMail = await encryptEmail(userEmail);
             const primaryRes = await fetch(
                 "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
                 {
