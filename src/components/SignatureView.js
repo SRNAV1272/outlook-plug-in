@@ -143,10 +143,11 @@ export default function SignatureView({
                 {
                     method: "GET",
                     headers: {
-                        username: encryptedMail,
-                    },
+                        'Content-Type': 'application/json',
+                        username: encryptedMail
+                    }
                 }
-            );
+            )
             if (primaryRes.ok) {
                 const data = await primaryRes.text();
                 const decryptedData = await handleAesDecrypt(data);
@@ -159,13 +160,7 @@ export default function SignatureView({
         try {
             const legacyRes = await fetch(
                 "https://renderer.cardbyte.ai/render-signature",
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify({ email: user }),
-                }
+                { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: userEmail }) }
             );
             if (!legacyRes.ok) throw new Error("Legacy renderer failed");
             const legacyData = await legacyRes.json();
