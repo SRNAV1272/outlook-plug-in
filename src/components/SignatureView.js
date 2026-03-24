@@ -143,6 +143,7 @@ export default function SignatureView({
                 {
                     method: "GET",
                     headers: {
+                        'X-Addin-Secret': 'ab8a57b1ec63ba43a1a420da0ccc5dae990bf7fedc56b1ff35543e45023e416a',
                         'Content-Type': 'application/json',
                         username: encryptedMail
                     }
