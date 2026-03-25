@@ -782,6 +782,44 @@ function stabilizeSelection(item) {
     });
 }
 
+
+function _stripDivById(html, idPattern) {
+    const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
+    const openMatch = openTagRegex.exec(html);
+    if (!openMatch) return html;
+
+    const startIndex = openMatch.index;
+    let pos = startIndex + openMatch[0].length;
+    let depth = 1;
+
+    while (pos < html.length && depth > 0) {
+        const nextOpen = html.indexOf("<div", pos);
+        const nextClose = html.indexOf("</div>", pos);
+        if (nextClose === -1) break;
+        if (nextOpen !== -1 && nextOpen < nextClose) {
+            depth++;
+            pos = nextOpen + 4;
+        } else {
+            depth--;
+            pos = nextClose + 6;
+        }
+    }
+
+    return html.slice(0, startIndex) + html.slice(pos);
+}
+
+function _stripSig(html) {
+    let result = html;
+    result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
+    result = result.replace(
+        /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+        ""
+    );
+    // Only trim trailing — never leading
+    result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+    return result;
+}
+
 /* ---------------------------------------------------------
    Main Insertion — Multi-Strategy
    --------------------------------------------------------- */
@@ -1400,43 +1438,6 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         return /id="x?_?cardbyte-signature-block"/i.test(html)
             || html.includes("CARD_BYTE_SIGNATURE_START")
             || html.includes("CARDBYTE_SIGNATURE");
-    }
-
-    function _stripDivById(html, idPattern) {
-        const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
-        const openMatch = openTagRegex.exec(html);
-        if (!openMatch) return html;
-
-        const startIndex = openMatch.index;
-        let pos = startIndex + openMatch[0].length;
-        let depth = 1;
-
-        while (pos < html.length && depth > 0) {
-            const nextOpen = html.indexOf("<div", pos);
-            const nextClose = html.indexOf("</div>", pos);
-            if (nextClose === -1) break;
-            if (nextOpen !== -1 && nextOpen < nextClose) {
-                depth++;
-                pos = nextOpen + 4;
-            } else {
-                depth--;
-                pos = nextClose + 6;
-            }
-        }
-
-        return html.slice(0, startIndex) + html.slice(pos);
-    }
-
-    function _stripSig(html) {
-        let result = html;
-        result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
-        result = result.replace(
-            /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
-            ""
-        );
-        // Only trim trailing — never leading
-        result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
-        return result;
     }
 
     function _findReplyChainIndex(html) {
