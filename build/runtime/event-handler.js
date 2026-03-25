@@ -204,7 +204,7 @@ async function renderSignatureOnServer(user) {
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
-            "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail } }
         );
         if (primaryRes.ok) {
