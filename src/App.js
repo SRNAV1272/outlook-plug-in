@@ -431,17 +431,17 @@ export default function App({ user }) {
       ];
     } else if (isOWAPlatform() || containsGifImages(html)) {
       methods = [
-        { name: "setAsync", fn: () => bodySetAsync(item, html) },
-        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
       ];
     } else {
       methods = [
+        { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
         { name: "setAsync", fn: () => bodySetAsync(item, html) },
-        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
-        { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
       ];
     }
     console.log(`[CardByte] ${label} [${platform}]: ${methods.map(m => m.name).join(" → ")}`);
