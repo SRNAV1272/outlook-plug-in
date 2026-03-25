@@ -832,7 +832,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 //     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
                 //     signatureBlock
                 // );
-                const updatedBody = stripSig(existingBody) + signatureBlock;
+                const updatedBody = _stripSig(existingBody) + signatureBlock;
                 const result = await tryInsertFullBody(item, updatedBody, "Reply-Replace");
                 if (result.success) {
                     return;
@@ -947,7 +947,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             //     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
             //     signatureBlock
             // );
-            const updatedBody = stripSig(existingBody) + signatureBlock;
+            const updatedBody = _stripSig(existingBody) + signatureBlock;
             const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
             if (result.success) {
                 return;
