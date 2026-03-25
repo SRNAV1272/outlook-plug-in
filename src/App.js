@@ -65,6 +65,54 @@ function isAutoApplyContext() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SIGNATURE STRIP HELPERS  (shared by applySignature on all paths)
+//
+// stripDivById — depth-aware removal of a <div id="..."> and all its children.
+//   Handles Outlook's habit of prefixing ids with "x_" in replies/forwards.
+//
+// stripSig — full CardByte signature removal:
+//   1. div-ID strip (depth-aware, catches x_ prefixed variants)
+//   2. comment-marker block strip (belt-and-suspenders)
+//   3. legacy CARDBYTE_SIGNATURE marker
+//   4. trailing whitespace / breaks trimmed — leading content is never touched
+// ─────────────────────────────────────────────────────────────────────────────
+function stripDivById(html, idPattern) {
+  const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
+  const openMatch = openTagRegex.exec(html);
+  if (!openMatch) return html;
+
+  const startIndex = openMatch.index;
+  let pos = startIndex + openMatch[0].length;
+  let depth = 1;
+
+  while (pos < html.length && depth > 0) {
+    const nextOpen = html.indexOf("<div", pos);
+    const nextClose = html.indexOf("</div>", pos);
+    if (nextClose === -1) break;
+    if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
+    else { depth--; pos = nextClose + 6; }
+  }
+
+  return html.slice(0, startIndex) + html.slice(pos);
+}
+
+function stripSig(html) {
+  let result = html;
+  // 1. depth-aware div strip (handles x_ prefix Outlook adds in replies)
+  result = stripDivById(result, /x?_?cardbyte-signature-block/i);
+  // 2. comment-marker block (belt-and-suspenders)
+  result = result.replace(
+    /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+    ""
+  );
+  // 3. legacy marker
+  result = result.replace(/<!-- CARDBYTE_SIGNATURE -->/gi, "");
+  // 4. trim trailing only — never leading
+  result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MOBILE: wait for the mail item to be fully ready before touching it.
 // On iOS / Android the compose item is sometimes not initialised when the
 // taskpane fires.
@@ -183,8 +231,10 @@ export default function App({ user }) {
   function hasCardByteSignature(html) {
     return html.includes("CARD_BYTE_SIGNATURE_START") ||
       html.includes("CARDBYTE_SIGNATURE") ||
-      html.includes("CB_SIG_START");
+      html.includes("CB_SIG_START") ||
+      /id="x?_?cardbyte-signature-block"/i.test(html);
   }
+
   function containsGifImages(html) { return /data:image\/gif;base64,/i.test(html); }
   function detectReplyChain(html) {
     return [/divRplyFwdMsg/i, /appendonsend/i, /OriginalMessage/i, /<blockquote/i,
@@ -499,8 +549,11 @@ export default function App({ user }) {
         console.log("[CardByte] 📧 Reply/Forward path");
 
         if (alreadyHasSig) {
+          // ✅ Use div-ID-aware strip, then re-inject before reply chain
+          const strippedBody = stripSig(existingBody);
+          console.log(`[CardByte] Reply-Replace: stripped to ${(strippedBody.length / 1024).toFixed(1)}KB`);
           for (const v of variants) {
-            const updated = existingBody.replace(/<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/, v.html);
+            const updated = buildReplyHtml(strippedBody, v.html);
             if ((await tryInsertFullBody(item, updated, `Reply-Replace-${v.label}`)).success) return;
           }
         }
@@ -528,8 +581,11 @@ export default function App({ user }) {
       console.log("[CardByte] ✉️ New compose path");
 
       if (alreadyHasSig) {
+        // ✅ Use div-ID-aware strip, then append fresh signature block
+        const strippedBody = stripSig(existingBody);
+        console.log(`[CardByte] Compose-Replace: stripped to ${(strippedBody.length / 1024).toFixed(1)}KB`);
         for (const v of variants) {
-          const updated = existingBody.replace(/<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/, v.html);
+          const updated = strippedBody + v.html;
           if ((await tryInsertFullBody(item, updated, `Compose-Replace-${v.label}`)).success) return;
         }
       }

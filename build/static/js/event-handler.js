@@ -828,10 +828,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
             if (alreadyHasSignature) {
                 console.log("[CardByte] Replacing existing CardByte signature in reply");
-                const updatedBody = existingBody.replace(
-                    /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
-                    signatureBlock
-                );
+                // const updatedBody = existingBody.replace(
+                //     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
+                //     signatureBlock
+                // );
+                const updatedBody = stripSig(existingBody) + signatureBlock;
                 const result = await tryInsertFullBody(item, updatedBody, "Reply-Replace");
                 if (result.success) {
                     return;
@@ -942,10 +943,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
-            const updatedBody = existingBody.replace(
-                /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
-                signatureBlock
-            );
+            // const updatedBody = existingBody.replace(
+            //     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
+            //     signatureBlock
+            // );
+            const updatedBody = stripSig(existingBody) + signatureBlock;
             const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
             if (result.success) {
                 return;
