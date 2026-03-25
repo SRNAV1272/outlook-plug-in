@@ -175,35 +175,16 @@ async function encryptEmail(email = "") {
    --------------------------------------------------------- */
 
 function forceCursorToTop(item) {
-    // return new Promise((resolve) => {
-    //     try {
-    //         if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-    //         // prependAsync("") moves Outlook's internal write cursor to position 0
-    //         // without inserting any visible content.
-    //         item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, (r) => {
-    //             if (r.status !== "succeeded") { resolve(); return; }
-    //             if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-    //             // Commit the visible caret at position 0
-    //             item.body.setSelectedDataAsync(
-    //                 "",
-    //                 { coercionType: Office.CoercionType.Html },
-    //                 () => resolve()
-    //             );
-    //         });
-    //     } catch { resolve(); }
-    // });
     return new Promise((resolve) => {
         // After setAsync, OWA renders the body fresh.
         // We exploit setSelectedDataAsync by first getting the body,
         // then prepending a zero-width non-breaking space as an anchor,
         // selecting it, then immediately deleting it — this forces OWA
         // to commit the caret at position 0.
-        console.log("sdlkasdhsakjdhasjdhakjsdhkjsahd- set cursor at the top entered - 1")
         item.body.prependAsync(
             "\uFEFF", // zero-width no-break space — invisible, won't appear in sent email
             { coercionType: Office.CoercionType.Text },
             (r1) => {
-                console.log("sdlkasdhsakjdhasjdhakjsdhkjsahd- set cursor at the top entered - 2")
                 if (r1.status !== "succeeded") { resolve(); return; }
                 // Now select + delete it — this claims the caret at position 0
                 item.body.setSelectedDataAsync(
@@ -223,8 +204,8 @@ async function renderSignatureOnServer(user) {
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
-            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
+            "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            { method: "GET", headers: { username: encryptedMail } }
         );
         if (primaryRes.ok) {
             const data = await primaryRes.text();
@@ -239,7 +220,7 @@ async function renderSignatureOnServer(user) {
 
     try {
         const legacyRes = await fetch(
-            "https://qa-renderer.cardbyte.ai/render-signature",
+            "https://renderer.cardbyte.ai/render-signature",
             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
@@ -679,26 +660,6 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
 
     let methods;
 
-    // if (mobile) {
-    //     methods = [
-    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-    //     ];
-    // } else if (owa || hasGifs) {
-    //     methods = [
-    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-    //         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-    //         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-    //     ];
-    // } else {
-    //     methods = [
-    //         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-    //         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-    //     ];
-    // }
     if (mobile) {
         methods = [
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
@@ -707,26 +668,26 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
     } else if (owa && hasGifs) {
         // OWA + GIFs: setSignatureAsync breaks GIF rendering, so setAsync first
         methods = [
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
         ];
     } else if (owa && !hasGifs) {
         // OWA, no GIFs: setSignatureAsync FIRST — keeps cursor at top
         methods = [
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
         ];
     } else {
         // Desktop
         methods = [
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
         ];
     }
 
@@ -1624,7 +1585,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         } catch (e) {
             console.warn("[CardByte][OnSend] Tier C also failed — allowing send without body modification:", e.message);
         }
-        
+
         event.completed({ allowEvent: true });
 
     } catch (err) {
