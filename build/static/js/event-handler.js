@@ -269,6 +269,12 @@ function simplifyHtmlForMobile(html) {
     return simplified;
 }
 
+function isMac() {
+    const platform = (Office?.context?.platform || "").toLowerCase();
+    const ua = (navigator?.userAgent || "").toLowerCase();
+    return platform === "mac" || ua.includes("macintosh") || ua.includes("mac os x");
+}
+
 /* ---------------------------------------------------------
    Image Processing Helpers
    --------------------------------------------------------- */
@@ -546,13 +552,36 @@ function bodySetAsync(item, html) {
     });
 }
 
+// function bodyPrependAsync(item, html) {
+//     return new Promise((resolve, reject) => {
+//         if (typeof item.body.prependAsync !== "function") { reject(new Error("prependAsync not available")); return; }
+//         item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+//             if (r.status === "succeeded") {
+//                 if (typeof item.body.setSelectedDataAsync === "function") {
+//                     item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+//                 } else {
+//                     resolve();
+//                 }
+//             } else {
+//                 reject(r.error);
+//             }
+//         });
+//     });
+// }
 function bodyPrependAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.prependAsync !== "function") { reject(new Error("prependAsync not available")); return; }
         item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
             if (r.status === "succeeded") {
                 if (typeof item.body.setSelectedDataAsync === "function") {
-                    item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+                    // Mac needs a small delay before cursor stabilization —
+                    // without it, setSelectedDataAsync fires before the DOM
+                    // has committed the prepended content, so the cursor
+                    // ends up below the signature instead of at position 0.
+                    const delay = isMac() ? 150 : 0;
+                    setTimeout(() => {
+                        item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+                    }, delay);
                 } else {
                     resolve();
                 }
@@ -608,9 +637,53 @@ function detectReplyChain(html) {
    Insertion Strategy — Platform-Aware
    --------------------------------------------------------- */
 
+// async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
+//     const platform = detectPlatform();
+//     const mobile = isMobile();
+//     const owa = platform === "owa";
+//     const hasGifs = containsGifImages(signatureHtml);
+
+//     let methods;
+
+//     if (mobile) {
+//         methods = [
+//             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+//         ];
+//         if (typeof item.body?.setSignatureAsync === "function") {
+//             methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) });
+//         }
+//     } else if (owa && hasGifs) {
+//         methods = [
+//             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+//             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+//         ];
+//     } else {
+//         methods = [
+//             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+//             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+//         ];
+//     }
+
+//     console.log(`[CardByte] ${label} Platform: ${platform}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' -> ')}`);
+
+//     for (const m of methods) {
+//         try {
+//             console.log(`[CardByte] ${label} Trying ${m.name}...`);
+//             await m.fn();
+//             console.log(`[CardByte] ${m.name} succeeded`);
+//             return { success: true, method: m.name };
+//         } catch (err) {
+//             const msg = err?.message || err?.code || JSON.stringify(err);
+//             console.warn(`[CardByte] ${m.name} failed: ${msg}`);
+//         }
+//     }
+
+//     return { success: false, method: "none" };
+// }
 async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
     const platform = detectPlatform();
     const mobile = isMobile();
+    const mac = isMac();
     const owa = platform === "owa";
     const hasGifs = containsGifImages(signatureHtml);
 
@@ -628,14 +701,23 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
         ];
+    } else if (mac) {
+        // Mac: setSignatureAsync is unreliable for reply/forward windows —
+        // it either silently fails or places cursor BELOW the signature block.
+        // prependAsync is consistent and always inserts at position 0.
+        methods = [
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+        ];
     } else {
+        // Windows desktop / OWA without GIFs
         methods = [
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     }
 
-    console.log(`[CardByte] ${label} Platform: ${platform}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' -> ')}`);
+    console.log(`[CardByte] ${label} Platform: ${platform}, mac: ${mac}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' -> ')}`);
 
     for (const m of methods) {
         try {
