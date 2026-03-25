@@ -707,26 +707,26 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
     } else if (owa && hasGifs) {
         // OWA + GIFs: setSignatureAsync breaks GIF rendering, so setAsync first
         methods = [
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
         ];
     } else if (owa && !hasGifs) {
         // OWA, no GIFs: setSignatureAsync FIRST — keeps cursor at top
         methods = [
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
         ];
     } else {
         // Desktop
         methods = [
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
         ];
     }
 
@@ -1624,7 +1624,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         } catch (e) {
             console.warn("[CardByte][OnSend] Tier C also failed — allowing send without body modification:", e.message);
         }
-        
+
         event.completed({ allowEvent: true });
 
     } catch (err) {
