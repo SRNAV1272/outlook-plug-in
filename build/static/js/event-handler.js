@@ -175,16 +175,35 @@ async function encryptEmail(email = "") {
    --------------------------------------------------------- */
 
 function forceCursorToTop(item) {
+    // return new Promise((resolve) => {
+    //     try {
+    //         if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
+    //         // prependAsync("") moves Outlook's internal write cursor to position 0
+    //         // without inserting any visible content.
+    //         item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, (r) => {
+    //             if (r.status !== "succeeded") { resolve(); return; }
+    //             if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
+    //             // Commit the visible caret at position 0
+    //             item.body.setSelectedDataAsync(
+    //                 "",
+    //                 { coercionType: Office.CoercionType.Html },
+    //                 () => resolve()
+    //             );
+    //         });
+    //     } catch { resolve(); }
+    // });
     return new Promise((resolve) => {
         // After setAsync, OWA renders the body fresh.
         // We exploit setSelectedDataAsync by first getting the body,
         // then prepending a zero-width non-breaking space as an anchor,
         // selecting it, then immediately deleting it — this forces OWA
         // to commit the caret at position 0.
+        console.log("sdlkasdhsakjdhasjdhakjsdhkjsahd- set cursor at the top entered - 1")
         item.body.prependAsync(
             "\uFEFF", // zero-width no-break space — invisible, won't appear in sent email
             { coercionType: Office.CoercionType.Text },
             (r1) => {
+                console.log("sdlkasdhsakjdhasjdhakjsdhkjsahd- set cursor at the top entered - 2")
                 if (r1.status !== "succeeded") { resolve(); return; }
                 // Now select + delete it — this claims the caret at position 0
                 item.body.setSelectedDataAsync(
@@ -220,7 +239,7 @@ async function renderSignatureOnServer(user) {
 
     try {
         const legacyRes = await fetch(
-            "https://renderer.cardbyte.ai/render-signature",
+            "https://qa-renderer.cardbyte.ai/render-signature",
             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
@@ -267,12 +286,6 @@ function simplifyHtmlForMobile(html) {
         '$1width="100%" style="max-width:100%;"'
     );
     return simplified;
-}
-
-function isMac() {
-    const platform = (Office?.context?.platform || "").toLowerCase();
-    const ua = (navigator?.userAgent || "").toLowerCase();
-    return platform === "mac" || ua.includes("macintosh") || ua.includes("mac os x");
 }
 
 /* ---------------------------------------------------------
@@ -552,36 +565,13 @@ function bodySetAsync(item, html) {
     });
 }
 
-// function bodyPrependAsync(item, html) {
-//     return new Promise((resolve, reject) => {
-//         if (typeof item.body.prependAsync !== "function") { reject(new Error("prependAsync not available")); return; }
-//         item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-//             if (r.status === "succeeded") {
-//                 if (typeof item.body.setSelectedDataAsync === "function") {
-//                     item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-//                 } else {
-//                     resolve();
-//                 }
-//             } else {
-//                 reject(r.error);
-//             }
-//         });
-//     });
-// }
 function bodyPrependAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.prependAsync !== "function") { reject(new Error("prependAsync not available")); return; }
         item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
             if (r.status === "succeeded") {
                 if (typeof item.body.setSelectedDataAsync === "function") {
-                    // Mac needs a small delay before cursor stabilization —
-                    // without it, setSelectedDataAsync fires before the DOM
-                    // has committed the prepended content, so the cursor
-                    // ends up below the signature instead of at position 0.
-                    const delay = isMac() ? 150 : 0;
-                    setTimeout(() => {
-                        item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-                    }, delay);
+                    item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
                 } else {
                     resolve();
                 }
@@ -637,53 +627,9 @@ function detectReplyChain(html) {
    Insertion Strategy — Platform-Aware
    --------------------------------------------------------- */
 
-// async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
-//     const platform = detectPlatform();
-//     const mobile = isMobile();
-//     const owa = platform === "owa";
-//     const hasGifs = containsGifImages(signatureHtml);
-
-//     let methods;
-
-//     if (mobile) {
-//         methods = [
-//             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-//         ];
-//         if (typeof item.body?.setSignatureAsync === "function") {
-//             methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) });
-//         }
-//     } else if (owa && hasGifs) {
-//         methods = [
-//             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-//             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-//         ];
-//     } else {
-//         methods = [
-//             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-//             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-//         ];
-//     }
-
-//     console.log(`[CardByte] ${label} Platform: ${platform}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' -> ')}`);
-
-//     for (const m of methods) {
-//         try {
-//             console.log(`[CardByte] ${label} Trying ${m.name}...`);
-//             await m.fn();
-//             console.log(`[CardByte] ${m.name} succeeded`);
-//             return { success: true, method: m.name };
-//         } catch (err) {
-//             const msg = err?.message || err?.code || JSON.stringify(err);
-//             console.warn(`[CardByte] ${m.name} failed: ${msg}`);
-//         }
-//     }
-
-//     return { success: false, method: "none" };
-// }
 async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
     const platform = detectPlatform();
     const mobile = isMobile();
-    const mac = isMac();
     const owa = platform === "owa";
     const hasGifs = containsGifImages(signatureHtml);
 
@@ -701,23 +647,14 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
         ];
-    } else if (mac) {
-        // Mac: setSignatureAsync is unreliable for reply/forward windows —
-        // it either silently fails or places cursor BELOW the signature block.
-        // prependAsync is consistent and always inserts at position 0.
-        methods = [
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-        ];
     } else {
-        // Windows desktop / OWA without GIFs
         methods = [
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     }
 
-    console.log(`[CardByte] ${label} Platform: ${platform}, mac: ${mac}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' -> ')}`);
+    console.log(`[CardByte] ${label} Platform: ${platform}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' -> ')}`);
 
     for (const m of methods) {
         try {
@@ -742,6 +679,26 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
 
     let methods;
 
+    // if (mobile) {
+    //     methods = [
+    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+    //     ];
+    // } else if (owa || hasGifs) {
+    //     methods = [
+    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+    //         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+    //         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+    //     ];
+    // } else {
+    //     methods = [
+    //         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+    //         { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+    //         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+    //     ];
+    // }
     if (mobile) {
         methods = [
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
