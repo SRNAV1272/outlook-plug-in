@@ -643,14 +643,26 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
             methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) });
         }
     } else if (owa && hasGifs) {
+        // methods = [
+        //     { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+        //     { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+        // ];
         methods = [
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
         ];
     } else {
+        // methods = [
+        //     { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+        //     { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+        // ];
         methods = [
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
         ];
     }
 
