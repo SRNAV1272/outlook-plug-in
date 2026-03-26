@@ -647,15 +647,28 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
         ];
-    } else {
+    } else if (owa) {
         methods = [
-            // { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-            // { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, signatureBlock) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureBlock) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureBlock) },
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+        ];
+    } else {
+        // desktop
+        methods = [
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     }
+    // else {
+    //     methods = [
+    //         // { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+    //         // { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+    //         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, signatureBlock) },
+    //         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureBlock) },
+    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureBlock) },
+    //     ];
+    // }
 
     console.log(`[CardByte] ${label} Platform: ${platform}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' -> ')}`);
 
@@ -926,58 +939,118 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 throw new Error("All mobile reply insertion methods failed");
             }
 
-            // DESKTOP / OWA REPLY PATH
+            // // DESKTOP / OWA REPLY PATH
+            // {
+            //     console.log("[CardByte] Reply Tier 1: Signature-only insert");
+            //     const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
+            //     if (result.success) {
+            //         await stabilizeSelection(item); // ← ADD THIS
+            //         return;
+            //     }
+            // }
+            // {
+            //     console.log("[CardByte] Reply Tier 2: Compress + signature-only insert");
+            //     try {
+            //         const compressed = await compressImagesInHtml(signatureBlock);
+            //         console.log(`[CardByte] Compressed signature: ${(compressed.length / 1024).toFixed(1)} KB`);
+            //         const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
+            //         if (result.success) {
+            //             await stabilizeSelection(item); // ← ADD THIS
+            //             return;
+            //         }
+            //     } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
+            // }
+
+            // {
+            //     console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
+            //     const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
+            //     if (result.success) {
+            //         await stabilizeSelection(item); // ← ADD THIS
+            //         return;
+            //     }
+            // }
+            // {
+            //     console.log("[CardByte] Reply Tier 5: Full body replacement (last resort)");
+            //     const replyMarkers = [
+            //         /<div[^>]*id="?divRplyFwdMsg"?/i,
+            //         /<div[^>]*id="?appendonsend"?/i,
+            //         /<div[^>]*id="?x_divRplyFwdMsg"?/i,
+            //         /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+            //         /<blockquote/i,
+            //         /<!-- OriginalMessage -->/i,
+            //     ];
+            //     let insertIndex = -1;
+            //     for (const marker of replyMarkers) {
+            //         const m = existingBody.search(marker);
+            //         if (m > -1) { insertIndex = m; break; }
+            //     }
+            //     const fullHtml = insertIndex > -1
+            //         ? existingBody.slice(0, insertIndex) + signatureBlock + existingBody.slice(insertIndex)
+            //         : existingBody + signatureBlock;
+            //     const result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "Reply-T5");
+            //     if (result.success) {
+            //         return;
+            //     }
+            // }
+            // ═══════════════════════════════════════════════
+            // PATH A: DESKTOP / OWA REPLY
+            // ═══════════════════════════════════════════════
+
+            // Tier 1: signature-only (setSignatureAsync → prependAsync)
             {
-                console.log("[CardByte] Reply Tier 1: Signature-only insert");
                 const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
-                if (result.success) {
-                    await stabilizeSelection(item); // ← ADD THIS
-                    return;
-                }
-            }
-            {
-                console.log("[CardByte] Reply Tier 2: Compress + signature-only insert");
-                try {
-                    const compressed = await compressImagesInHtml(signatureBlock);
-                    console.log(`[CardByte] Compressed signature: ${(compressed.length / 1024).toFixed(1)} KB`);
-                    const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
-                    if (result.success) {
-                        await stabilizeSelection(item); // ← ADD THIS
-                        return;
-                    }
-                } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
+                if (result.success) { await stabilizeSelection(item); return; }
             }
 
+            // Tier 2: compress + signature-only
             {
-                console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
-                const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
-                if (result.success) {
-                    await stabilizeSelection(item); // ← ADD THIS
-                    return;
-                }
+                try {
+                    const compressed = await compressImagesInHtml(signatureBlock);
+                    const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
+                    if (result.success) { await stabilizeSelection(item); return; }
+                } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
             }
+
+            // ── NEW Tier 3: full-body rebuild with compressed sig above reply chain ──
+            // This avoids strip() entirely by using setAsync/setSelectedDataAsync
+            // on the complete body rather than just the signature fragment.
             {
-                console.log("[CardByte] Reply Tier 5: Full body replacement (last resort)");
-                const replyMarkers = [
-                    /<div[^>]*id="?divRplyFwdMsg"?/i,
-                    /<div[^>]*id="?appendonsend"?/i,
-                    /<div[^>]*id="?x_divRplyFwdMsg"?/i,
-                    /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
-                    /<blockquote/i,
-                    /<!-- OriginalMessage -->/i,
-                ];
-                let insertIndex = -1;
-                for (const marker of replyMarkers) {
-                    const m = existingBody.search(marker);
-                    if (m > -1) { insertIndex = m; break; }
-                }
-                const fullHtml = insertIndex > -1
-                    ? existingBody.slice(0, insertIndex) + signatureBlock + existingBody.slice(insertIndex)
-                    : existingBody + signatureBlock;
-                const result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "Reply-T5");
-                if (result.success) {
-                    return;
-                }
+                try {
+                    const compressed = await compressImagesInHtml(signatureBlock);
+
+                    const replyMarkers = [
+                        /<div[^>]*id="?divRplyFwdMsg"?/i,
+                        /<div[^>]*id="?appendonsend"?/i,
+                        /<div[^>]*id="?x_divRplyFwdMsg"?/i,
+                        /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+                        /<blockquote/i,
+                        /<!-- OriginalMessage -->/i,
+                    ];
+
+                    let insertIndex = -1;
+                    for (const marker of replyMarkers) {
+                        const m = existingBody.search(marker);
+                        if (m > -1 && (insertIndex === -1 || m < insertIndex)) {
+                            insertIndex = m; break;
+                        }
+                    }
+
+                    const fullHtml = insertIndex > -1
+                        ? existingBody.slice(0, insertIndex) + compressed + existingBody.slice(insertIndex)
+                        : existingBody + compressed;
+
+                    console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`);
+                    const result = await tryInsertFullBody(item, fullHtml, "Reply-T3");
+                    if (result.success) { await stabilizeSelection(item); return; }
+                } catch (e) { console.warn("[CardByte] Reply T3:", e.message); }
+            }
+
+            // Tier 4: strip images — last resort only
+            {
+                const result = await tryInsertSignatureOnly(
+                    item, stripBase64Images(signatureBlock), "Reply-T4"
+                );
+                if (result.success) { await stabilizeSelection(item); return; }
             }
 
             throw new Error("All reply insertion tiers failed");
