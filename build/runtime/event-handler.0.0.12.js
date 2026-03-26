@@ -643,26 +643,14 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
             methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) });
         }
     } else if (owa && hasGifs) {
-        // methods = [
-        //     { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-        //     { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-        // ];
         methods = [
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
         ];
     } else {
-        // methods = [
-        //     { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-        //     { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-        // ];
         methods = [
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     }
 
@@ -896,6 +884,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 {
                     const result = await tryInsertSignatureOnly(item, signatureBlock, "MobileReply-T1");
                     if (result.success) {
+                        await stabilizeSelection(item); // ← ADD THIS
                         return;
                     }
                 }
@@ -920,11 +909,13 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
                     let result = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
                     if (result.success) {
+                        await stabilizeSelection(item); // ← ADD THIS
                         return;
                     }
 
                     result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileReply-T3");
                     if (result.success) {
+                        await stabilizeSelection(item); // ← ADD THIS
                         return;
                     }
                 }
@@ -937,6 +928,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 console.log("[CardByte] Reply Tier 1: Signature-only insert");
                 const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
                 if (result.success) {
+                    await stabilizeSelection(item); // ← ADD THIS
                     return;
                 }
             }
@@ -947,6 +939,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     console.log(`[CardByte] Compressed signature: ${(compressed.length / 1024).toFixed(1)} KB`);
                     const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
                     if (result.success) {
+                        await stabilizeSelection(item); // ← ADD THIS
                         return;
                     }
                 } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
@@ -956,6 +949,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
                 const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
                 if (result.success) {
+                    await stabilizeSelection(item); // ← ADD THIS
                     return;
                 }
             }
