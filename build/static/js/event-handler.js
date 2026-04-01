@@ -537,48 +537,31 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
 //         });
 //     });
 // }
-// function bodySetAsync(item, html) {
-//     return new Promise((resolve, reject) => {
-//         item.body.setAsync(
-//             html,
-//             { coercionType: Office.CoercionType.Html },
-//             (r) => {
-//                 if (r.status !== "succeeded") {
-//                     reject(r.error);
-//                     return;
-//                 }
-//                 // setAsync always drops cursor at end.
-//                 // prependAsync("") with empty string reliably repositions
-//                 // the write cursor to position 0 without inserting any
-//                 // visible content — cleaner than the \uFEFF approach.
-//                 if (typeof item.body?.prependAsync === "function") {
-//                     item.body.prependAsync(
-//                         "",
-//                         { coercionType: Office.CoercionType.Html },
-//                         () => resolve()
-//                     );
-//                 } else {
-//                     resolve();
-//                 }
-//             }
-//         );
-//     });
-// }
 function bodySetAsync(item, html) {
     return new Promise((resolve, reject) => {
-        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status !== "succeeded") { reject(r.error); return; }
-            // Mac Outlook: prependAsync("") does not reliably reset the cursor after setAsync.
-            // setSignatureAsync("") is the only method that consistently returns cursor to top on Mac.
-            // On OWA/Windows where setSignatureAsync is unavailable, fall back to prependAsync.
-            if (typeof item.body?.setSignatureAsync === "function") {
-                item.body.setSignatureAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
-            } else if (typeof item.body?.prependAsync === "function") {
-                item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
-            } else {
-                resolve();
+        item.body.setAsync(
+            html,
+            { coercionType: Office.CoercionType.Html },
+            (r) => {
+                if (r.status !== "succeeded") {
+                    reject(r.error);
+                    return;
+                }
+                // setAsync always drops cursor at end.
+                // prependAsync("") with empty string reliably repositions
+                // the write cursor to position 0 without inserting any
+                // visible content — cleaner than the \uFEFF approach.
+                if (typeof item.body?.prependAsync === "function") {
+                    item.body.prependAsync(
+                        "",
+                        { coercionType: Office.CoercionType.Html },
+                        () => resolve()
+                    );
+                } else {
+                    resolve();
+                }
             }
-        });
+        );
     });
 }
 
@@ -664,12 +647,28 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
         ];
+    } else if (owa) {
+        methods = [
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+        ];
     } else {
+        // desktop
         methods = [
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     }
+    // else {
+    //     methods = [
+    //         // { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+    //         // { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+    //         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, signatureBlock) },
+    //         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureBlock) },
+    //         { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureBlock) },
+    //     ];
+    // }
 
     console.log(`[CardByte] ${label} Platform: ${platform}, hasGifs: ${hasGifs}, method order: ${methods.map(m => m.name).join(' -> ')}`);
 
@@ -739,17 +738,11 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
         ];
     } else {
         // Desktop
-        // methods = [
-        //     { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-        //     { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-        //     { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-        //     { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-        // ];
         methods = [
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
         ];
     }
 
@@ -805,6 +798,44 @@ function stabilizeSelection(item) {
     });
 }
 
+
+function _stripDivById(html, idPattern) {
+    const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
+    const openMatch = openTagRegex.exec(html);
+    if (!openMatch) return html;
+
+    const startIndex = openMatch.index;
+    let pos = startIndex + openMatch[0].length;
+    let depth = 1;
+
+    while (pos < html.length && depth > 0) {
+        const nextOpen = html.indexOf("<div", pos);
+        const nextClose = html.indexOf("</div>", pos);
+        if (nextClose === -1) break;
+        if (nextOpen !== -1 && nextOpen < nextClose) {
+            depth++;
+            pos = nextOpen + 4;
+        } else {
+            depth--;
+            pos = nextClose + 6;
+        }
+    }
+
+    return html.slice(0, startIndex) + html.slice(pos);
+}
+
+function _stripSig(html) {
+    let result = html;
+    result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
+    result = result.replace(
+        /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+        ""
+    );
+    // Only trim trailing — never leading
+    result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+    return result;
+}
+
 /* ---------------------------------------------------------
    Main Insertion — Multi-Strategy
    --------------------------------------------------------- */
@@ -851,10 +882,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
             if (alreadyHasSignature) {
                 console.log("[CardByte] Replacing existing CardByte signature in reply");
-                const updatedBody = existingBody.replace(
-                    /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
-                    signatureBlock
-                );
+                // const updatedBody = existingBody.replace(
+                //     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
+                //     signatureBlock
+                // );
+                const updatedBody = _stripSig(existingBody) + signatureBlock;
                 const result = await tryInsertFullBody(item, updatedBody, "Reply-Replace");
                 if (result.success) {
                     return;
@@ -868,6 +900,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 {
                     const result = await tryInsertSignatureOnly(item, signatureBlock, "MobileReply-T1");
                     if (result.success) {
+                        await stabilizeSelection(item); // ← ADD THIS
                         return;
                     }
                 }
@@ -892,11 +925,13 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
                     let result = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
                     if (result.success) {
+                        await stabilizeSelection(item); // ← ADD THIS
                         return;
                     }
 
                     result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileReply-T3");
                     if (result.success) {
+                        await stabilizeSelection(item); // ← ADD THIS
                         return;
                     }
                 }
@@ -904,55 +939,118 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 throw new Error("All mobile reply insertion methods failed");
             }
 
-            // DESKTOP / OWA REPLY PATH
+            // // DESKTOP / OWA REPLY PATH
+            // {
+            //     console.log("[CardByte] Reply Tier 1: Signature-only insert");
+            //     const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
+            //     if (result.success) {
+            //         await stabilizeSelection(item); // ← ADD THIS
+            //         return;
+            //     }
+            // }
+            // {
+            //     console.log("[CardByte] Reply Tier 2: Compress + signature-only insert");
+            //     try {
+            //         const compressed = await compressImagesInHtml(signatureBlock);
+            //         console.log(`[CardByte] Compressed signature: ${(compressed.length / 1024).toFixed(1)} KB`);
+            //         const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
+            //         if (result.success) {
+            //             await stabilizeSelection(item); // ← ADD THIS
+            //             return;
+            //         }
+            //     } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
+            // }
+
+            // {
+            //     console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
+            //     const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
+            //     if (result.success) {
+            //         await stabilizeSelection(item); // ← ADD THIS
+            //         return;
+            //     }
+            // }
+            // {
+            //     console.log("[CardByte] Reply Tier 5: Full body replacement (last resort)");
+            //     const replyMarkers = [
+            //         /<div[^>]*id="?divRplyFwdMsg"?/i,
+            //         /<div[^>]*id="?appendonsend"?/i,
+            //         /<div[^>]*id="?x_divRplyFwdMsg"?/i,
+            //         /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+            //         /<blockquote/i,
+            //         /<!-- OriginalMessage -->/i,
+            //     ];
+            //     let insertIndex = -1;
+            //     for (const marker of replyMarkers) {
+            //         const m = existingBody.search(marker);
+            //         if (m > -1) { insertIndex = m; break; }
+            //     }
+            //     const fullHtml = insertIndex > -1
+            //         ? existingBody.slice(0, insertIndex) + signatureBlock + existingBody.slice(insertIndex)
+            //         : existingBody + signatureBlock;
+            //     const result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "Reply-T5");
+            //     if (result.success) {
+            //         return;
+            //     }
+            // }
+            // ═══════════════════════════════════════════════
+            // PATH A: DESKTOP / OWA REPLY
+            // ═══════════════════════════════════════════════
+
+            // Tier 1: signature-only (setSignatureAsync → prependAsync)
             {
-                console.log("[CardByte] Reply Tier 1: Signature-only insert");
                 const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
-                if (result.success) {
-                    return;
-                }
-            }
-            {
-                console.log("[CardByte] Reply Tier 2: Compress + signature-only insert");
-                try {
-                    const compressed = await compressImagesInHtml(signatureBlock);
-                    console.log(`[CardByte] Compressed signature: ${(compressed.length / 1024).toFixed(1)} KB`);
-                    const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
-                    if (result.success) {
-                        return;
-                    }
-                } catch (e) { console.warn("[CardByte] Reply Tier 2 compression error:", e.message); }
+                if (result.success) { await stabilizeSelection(item); return; }
             }
 
+            // Tier 2: compress + signature-only
             {
-                console.log("[CardByte] Reply Tier 4: Strip images + signature-only");
-                const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
-                if (result.success) {
-                    return;
-                }
+                try {
+                    const compressed = await compressImagesInHtml(signatureBlock);
+                    const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
+                    if (result.success) { await stabilizeSelection(item); return; }
+                } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
             }
+
+            // ── NEW Tier 3: full-body rebuild with compressed sig above reply chain ──
+            // This avoids strip() entirely by using setAsync/setSelectedDataAsync
+            // on the complete body rather than just the signature fragment.
             {
-                console.log("[CardByte] Reply Tier 5: Full body replacement (last resort)");
-                const replyMarkers = [
-                    /<div[^>]*id="?divRplyFwdMsg"?/i,
-                    /<div[^>]*id="?appendonsend"?/i,
-                    /<div[^>]*id="?x_divRplyFwdMsg"?/i,
-                    /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
-                    /<blockquote/i,
-                    /<!-- OriginalMessage -->/i,
-                ];
-                let insertIndex = -1;
-                for (const marker of replyMarkers) {
-                    const m = existingBody.search(marker);
-                    if (m > -1) { insertIndex = m; break; }
-                }
-                const fullHtml = insertIndex > -1
-                    ? existingBody.slice(0, insertIndex) + signatureBlock + existingBody.slice(insertIndex)
-                    : existingBody + signatureBlock;
-                const result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "Reply-T5");
-                if (result.success) {
-                    return;
-                }
+                try {
+                    const compressed = await compressImagesInHtml(signatureBlock);
+
+                    const replyMarkers = [
+                        /<div[^>]*id="?divRplyFwdMsg"?/i,
+                        /<div[^>]*id="?appendonsend"?/i,
+                        /<div[^>]*id="?x_divRplyFwdMsg"?/i,
+                        /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+                        /<blockquote/i,
+                        /<!-- OriginalMessage -->/i,
+                    ];
+
+                    let insertIndex = -1;
+                    for (const marker of replyMarkers) {
+                        const m = existingBody.search(marker);
+                        if (m > -1 && (insertIndex === -1 || m < insertIndex)) {
+                            insertIndex = m; break;
+                        }
+                    }
+
+                    const fullHtml = insertIndex > -1
+                        ? existingBody.slice(0, insertIndex) + compressed + existingBody.slice(insertIndex)
+                        : existingBody + compressed;
+
+                    console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`);
+                    const result = await tryInsertFullBody(item, fullHtml, "Reply-T3");
+                    if (result.success) { await stabilizeSelection(item); return; }
+                } catch (e) { console.warn("[CardByte] Reply T3:", e.message); }
+            }
+
+            // Tier 4: strip images — last resort only
+            {
+                const result = await tryInsertSignatureOnly(
+                    item, stripBase64Images(signatureBlock), "Reply-T4"
+                );
+                if (result.success) { await stabilizeSelection(item); return; }
             }
 
             throw new Error("All reply insertion tiers failed");
@@ -965,10 +1063,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
-            const updatedBody = existingBody.replace(
-                /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
-                signatureBlock
-            );
+            // const updatedBody = existingBody.replace(
+            //     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/,
+            //     signatureBlock
+            // );
+            const updatedBody = _stripSig(existingBody) + signatureBlock;
             const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
             if (result.success) {
                 return;
@@ -1421,43 +1520,6 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         return /id="x?_?cardbyte-signature-block"/i.test(html)
             || html.includes("CARD_BYTE_SIGNATURE_START")
             || html.includes("CARDBYTE_SIGNATURE");
-    }
-
-    function _stripDivById(html, idPattern) {
-        const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
-        const openMatch = openTagRegex.exec(html);
-        if (!openMatch) return html;
-
-        const startIndex = openMatch.index;
-        let pos = startIndex + openMatch[0].length;
-        let depth = 1;
-
-        while (pos < html.length && depth > 0) {
-            const nextOpen = html.indexOf("<div", pos);
-            const nextClose = html.indexOf("</div>", pos);
-            if (nextClose === -1) break;
-            if (nextOpen !== -1 && nextOpen < nextClose) {
-                depth++;
-                pos = nextOpen + 4;
-            } else {
-                depth--;
-                pos = nextClose + 6;
-            }
-        }
-
-        return html.slice(0, startIndex) + html.slice(pos);
-    }
-
-    function _stripSig(html) {
-        let result = html;
-        result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
-        result = result.replace(
-            /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
-            ""
-        );
-        // Only trim trailing — never leading
-        result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
-        return result;
     }
 
     function _findReplyChainIndex(html) {
