@@ -226,30 +226,30 @@ async function renderSignatureOnServer(user) {
             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
-    if (primaryRes.ok) {
-        const data = await primaryRes.text();
-        const decryptedData = await handleAesDecrypt(data);
-        console.log("Using NEW renderer");
-        return JSON.parse(decryptedData)?.html || null;
+        if (primaryRes.ok) {
+            const data = await primaryRes.text();
+            const decryptedData = await handleAesDecrypt(data);
+            console.log("Using NEW renderer");
+            return JSON.parse(decryptedData)?.html || null;
+        }
+        console.warn("Primary failed. Falling back to legacy...");
+    } catch (err) {
+        console.warn("Primary crashed. Falling back to legacy...", err);
     }
-    console.warn("Primary failed. Falling back to legacy...");
-} catch (err) {
-    console.warn("Primary crashed. Falling back to legacy...", err);
-}
 
-try {
-    const legacyRes = await fetch(
-        "https://qa-renderer.cardbyte.ai/render-signature",
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
-    );
-    if (!legacyRes.ok) throw new Error("Legacy renderer failed");
-    const legacyData = await legacyRes.json();
-    console.log("Using LEGACY renderer", legacyData);
-    return legacyData?.finalHtml || null;
-} catch (legacyError) {
-    console.error("Both primary and legacy failed:", legacyError);
-    return null;
-}
+    try {
+        const legacyRes = await fetch(
+            "https://qa-renderer.cardbyte.ai/render-signature",
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
+        );
+        if (!legacyRes.ok) throw new Error("Legacy renderer failed");
+        const legacyData = await legacyRes.json();
+        console.log("Using LEGACY renderer", legacyData);
+        return legacyData?.finalHtml || null;
+    } catch (legacyError) {
+        console.error("Both primary and legacy failed:", legacyError);
+        return null;
+    }
 }
 
 /* ---------------------------------------------------------
@@ -537,31 +537,48 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
 //         });
 //     });
 // }
+// function bodySetAsync(item, html) {
+//     return new Promise((resolve, reject) => {
+//         item.body.setAsync(
+//             html,
+//             { coercionType: Office.CoercionType.Html },
+//             (r) => {
+//                 if (r.status !== "succeeded") {
+//                     reject(r.error);
+//                     return;
+//                 }
+//                 // setAsync always drops cursor at end.
+//                 // prependAsync("") with empty string reliably repositions
+//                 // the write cursor to position 0 without inserting any
+//                 // visible content — cleaner than the \uFEFF approach.
+//                 if (typeof item.body?.prependAsync === "function") {
+//                     item.body.prependAsync(
+//                         "",
+//                         { coercionType: Office.CoercionType.Html },
+//                         () => resolve()
+//                     );
+//                 } else {
+//                     resolve();
+//                 }
+//             }
+//         );
+//     });
+// }
 function bodySetAsync(item, html) {
     return new Promise((resolve, reject) => {
-        item.body.setAsync(
-            html,
-            { coercionType: Office.CoercionType.Html },
-            (r) => {
-                if (r.status !== "succeeded") {
-                    reject(r.error);
-                    return;
-                }
-                // setAsync always drops cursor at end.
-                // prependAsync("") with empty string reliably repositions
-                // the write cursor to position 0 without inserting any
-                // visible content — cleaner than the \uFEFF approach.
-                if (typeof item.body?.prependAsync === "function") {
-                    item.body.prependAsync(
-                        "",
-                        { coercionType: Office.CoercionType.Html },
-                        () => resolve()
-                    );
-                } else {
-                    resolve();
-                }
+        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+            if (r.status !== "succeeded") { reject(r.error); return; }
+            // Mac Outlook: prependAsync("") does not reliably reset the cursor after setAsync.
+            // setSignatureAsync("") is the only method that consistently returns cursor to top on Mac.
+            // On OWA/Windows where setSignatureAsync is unavailable, fall back to prependAsync.
+            if (typeof item.body?.setSignatureAsync === "function") {
+                item.body.setSignatureAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
+            } else if (typeof item.body?.prependAsync === "function") {
+                item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
+            } else {
+                resolve();
             }
-        );
+        });
     });
 }
 
@@ -722,11 +739,17 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
         ];
     } else {
         // Desktop
+        // methods = [
+        //     { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+        //     { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+        //     { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+        //     { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+        // ];
         methods = [
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
         ];
     }
 
