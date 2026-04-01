@@ -701,7 +701,26 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
    Outlook Wrapper
    --------------------------------------------------------- */
 
+// function wrapForOutlook(innerHtml) {
+//     if (isMobile()) {
+//         return `
+//     <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Arial, sans-serif; font-size: 14px;">
+//       <table contenteditable="false" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:100%;">
+//         <tbody><tr><td style="padding: 0; margin: 0;">${innerHtml}</td></tr></tbody>
+//       </table>
+//     </div>`;
+//     }
+//     return `
+//     <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
+//       <table contenteditable="false" cellpadding="0" cellspacing="0" border="0" style="font-family: inherit; font-size: inherit; color: inherit;">
+//         <tbody><tr><td style="padding: 0; margin: 0;">${innerHtml}</td></tr></tbody>
+//       </table>
+//     </div>`;
+// }
 function wrapForOutlook(innerHtml) {
+    const platform = detectPlatform();
+    const isMacPlatform = platform === "mac";
+
     if (isMobile()) {
         return `
     <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Arial, sans-serif; font-size: 14px;">
@@ -710,6 +729,17 @@ function wrapForOutlook(innerHtml) {
       </table>
     </div>`;
     }
+
+    // For Mac, use a simpler wrapper without the nested table structure
+    // that might be causing the additional class to be injected
+    if (isMacPlatform) {
+        return `
+    <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
+      ${innerHtml}
+    </div>`;
+    }
+
+    // Windows desktop original wrapper
     return `
     <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
       <table contenteditable="false" cellpadding="0" cellspacing="0" border="0" style="font-family: inherit; font-size: inherit; color: inherit;">
