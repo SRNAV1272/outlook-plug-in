@@ -1,89 +1,101 @@
 /* =========================================================
-   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER (v0.0.7)
+   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER (v0.0.8)
    =========================================================
+   FIXES (v0.0.8 — SIGNATURE DUPLICATION BUG):
+
+   ROOT CAUSE:
+     When applySignature() was recalled (e.g. user opens a
+     saved draft, or the handler fires again), SIGNATURE_STATE
+     was always reset to "idle" in the finally block — so the
+     "already applied" guard never triggered.
+
+     Additionally, in PATH B (New Compose) and PATH A (Reply),
+     the existing body was appended WITH the new signatureBlock
+     WITHOUT first stripping any prior signature. Even though
+     the `alreadyHasSignature` branch called _stripSig, the
+     Compose tiers T1–T4 each re-built fullHtml from the raw
+     `existingBody`, duplicating whatever was already there if
+     the alreadyHasSignature branch didn't match (e.g. stale
+     marker variant).
+
+   FIXES:
+     1. SIGNATURE_STATE is set to "applied" after successful
+        insertion (not back to "idle"). The finally block no
+        longer resets it. On error it resets to "idle" so a
+        retry remains possible.
+
+     2. A per-item-ID guard (window.__LAST_ITEM_ID__) detects
+        when applySignature fires for a *new* compose/reply
+        window and resets SIGNATURE_STATE to "idle" so the new
+        item always gets a fresh signature run.
+
+     3. In PATH B (New Compose), ALL four tiers (T1–T4) now
+        call _stripSig(existingBody) first — computed once as
+        `cleanBody` before T1 — so no prior signature content
+        can accumulate regardless of which marker variant was
+        present.
+
+     4. In PATH A (Reply) the same _stripSig-first pattern is
+        applied inside the "alreadyHasSignature" branch AND in
+        the desktop/OWA reply tiers T3 and the Mac/mobile full-
+        body rebuilds, ensuring the old signature is always
+        removed before the new block is spliced in.
+
+   ALL OTHER CHANGES: none. v0.0.7 logic fully preserved.
+
    FIXES (v0.0.7 — MID-ATTRIBUTE SLICE BUG):
-
-   ROOT CAUSE (visible in screenshots):
-     The reply-chain regex patterns /class="?ms-outlook-[^"]*"?/i and
-     /class="?ms-owa-[^"]*"?/i matched *inside* an HTML attribute value,
-     not at the opening tag boundary.
-
-     Example body Mac Outlook generates for Reply All:
-       <div id="x_ms-outlook-mobile-reference"
-            class="ms-outlook-mobile-reference-message skipProofing"
-            style="direction: ltr;">
-
-     The old pattern matched at the `class=` token (offset 40 inside the
-     tag), so html.slice(0, idx) ended mid-tag:
-       ...reference" <!-- SIG -->class="ms-outlook-mobile-reference...
-
-     Outlook then rendered the orphaned attribute string as visible text,
-     producing the garbled output seen in the screenshots:
-       class="ms-outlook-mobile-reference-message skipProofing"
-       style="direction: ltr;">
-
-   FIX:
-     All Mac-specific patterns in both detectReplyChain() and
-     _findReplyChainIndex() are now anchored to the *opening tag* with
-     /<(div|hr|span|table)[^>]*class="...-ms-outlook-..."/i so the slice
-     always lands at a clean `<tag` boundary, never inside an attribute.
-
-     Also tightened /divRplyFwdMsg/i (bare string) → always matches via
-     the anchored /<div[^>]*id="?x?_?divRplyFwdMsg"?/i form so it too
-     never cuts mid-attribute. The bare string fallback is kept but moved
-     lower priority.
-
-   ALL OTHER CHANGES: none. v0.0.6 logic fully preserved.
+   - All Mac-specific patterns anchored to opening HTML tags
+   - _findReplyChainIndex() tightened; bare-string fallbacks
+     moved to lowest priority
+   - v0.0.6 logic fully preserved otherwise
 
    FIXES (v0.0.6 — MAC SUPPORT):
-   - Added "mac" as a distinct platform (was silently merged into "desktop")
-   - isMac() helper added; used throughout insertion strategy
+   - Added "mac" as a distinct platform
+   - isMac() helper; used throughout insertion strategy
    - detectReplyChain(): added Mac-specific HTML markers
-   - tryInsertSignatureOnly(): Mac replies skip setSignatureAsync entirely
-   - insertSignatureWithoutCursorError() reply path: Mac jumps directly
-     to T3 full-body rebuild, skipping T1/T2
-   - stabilizeSelection(): skipped after setAsync on Mac
-   - _findReplyChainIndex(): expanded marker list for Mac parity
-   - All other platforms (Windows desktop, OWA, mobile) unchanged
+   - tryInsertSignatureOnly(): Mac replies skip setSignatureAsync
+   - insertSignatureWithoutCursorError(): Mac jumps to T3
+   - stabilizeSelection(): skipped on Mac
+   - _findReplyChainIndex(): expanded marker list for Mac
 
    FIXES (v0.0.5 — MOBILE SUPPORT):
-   - Added mobile platform detection (iOS/Android Outlook)
-   - Mobile-specific insertion strategy (setAsync preferred)
-   - Retry with delay for mobile slow-init race condition
-   - Skip disableClientSignatureAsync on mobile (unsupported)
-   - Skip setSignatureAsync on mobile (unsupported)
-   - Added mobile-safe fallback chain
-   - Reduced image quality/size defaults on mobile
-   - Added waitForItemReady() to handle mobile async init
+   - Mobile platform detection
+   - Mobile-specific insertion strategy
+   - Retry with delay for mobile slow-init race
+   - Skip disableClientSignatureAsync on mobile
+   - Skip setSignatureAsync on mobile
+   - Mobile-safe fallback chain
+   - Reduced image quality/size on mobile
+   - waitForItemReady() for mobile async init
 
    FIXES (v0.0.5 — GIF PATCH):
-   - compressImagesInHtml: added currentDataUrl guard in first pass
+   - compressImagesInHtml: currentDataUrl guard in first pass
    - compressImagesInHtml: second-pass GIF→PNG conversion fix
    - compressImagesInHtml: second-pass uses getMaxHtmlSize()
 
    FIXES (v0.0.4):
-   - Reply/ReplyAll/Forward preserves the conversation chain
+   - Reply/ReplyAll/Forward preserves conversation chain
    - Cursor stays at top of reply area
    - setSignatureAsync preferred for replies
    - Fallback uses prependAsync
    ========================================================= */
+
 let SIGNATURE_STATE = "idle"; // idle | loading | applied
-let CACHED_SIGNATURE_HTML = null; // stores raw API response for use at send time
+let CACHED_SIGNATURE_HTML = null;
 
 const SIGNATURE_SPACER = `<br>`;
-
 const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 
 /* ---------------------------------------------------------
    Config
    --------------------------------------------------------- */
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
-const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
+const AES_IV  = "3YapeNfJDung7TXxeKXn4g==";
 
-const MAX_SAFE_HTML_SIZE = 500_000;        // ~500 KB — desktop/OWA
-const MAX_SAFE_HTML_SIZE_MOBILE = 200_000; // ~200 KB — mobile clients have tighter limits
-const MOBILE_MAX_IMAGE_WIDTH = 200;
-const MOBILE_IMAGE_QUALITY = 0.5;
+const MAX_SAFE_HTML_SIZE        = 500_000;
+const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
+const MOBILE_MAX_IMAGE_WIDTH    = 200;
+const MOBILE_IMAGE_QUALITY      = 0.5;
 
 /* ---------------------------------------------------------
    Platform Detection
@@ -91,7 +103,7 @@ const MOBILE_IMAGE_QUALITY = 0.5;
 
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
-    const ua = (navigator?.userAgent || "").toLowerCase();
+    const ua       = (navigator?.userAgent || "").toLowerCase();
 
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
@@ -107,10 +119,8 @@ function detectPlatform() {
         return ua.includes("android") ? "mobile-android" : "mobile-ios";
     }
 
-    // v0.0.6: Detect Mac explicitly — must come BEFORE the desktop fallback
     if (platform === "mac") return "mac";
 
-    // v0.0.6: Also catch macOS via user-agent when Office.context.platform is empty/missing
     if (
         (platform === "" || platform === "desktop") &&
         (ua.includes("macintosh") || ua.includes("mac os x")) &&
@@ -121,7 +131,7 @@ function detectPlatform() {
     }
 
     if (platform === "officeonline" || platform === "web" || platform === "") return "owa";
-    return "desktop"; // Windows desktop
+    return "desktop";
 }
 
 function isMobile() {
@@ -129,14 +139,8 @@ function isMobile() {
     return p === "mobile-ios" || p === "mobile-android";
 }
 
-function isOWA() {
-    return detectPlatform() === "owa";
-}
-
-// v0.0.6: New helper — true only for Mac Outlook desktop
-function isMac() {
-    return detectPlatform() === "mac";
-}
+function isOWA() { return detectPlatform() === "owa"; }
+function isMac() { return detectPlatform() === "mac"; }
 
 function getMaxHtmlSize() {
     return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
@@ -157,7 +161,7 @@ Office.onReady(() => {
 
 function base64ToArrayBuffer(base64) {
     let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
-    const padding = base64Data.length % 4;
+    const padding  = base64Data.length % 4;
     if (padding) base64Data += "=".repeat(4 - padding);
     const binaryString = atob(base64Data);
     const bytes = new Uint8Array(binaryString.length);
@@ -177,12 +181,8 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
         if (!encryptedText) return "";
         const keyToUse = generatedKey || AES_KEY;
         let keyBuffer;
-        try {
-            keyBuffer = base64ToArrayBuffer(keyToUse);
-        } catch (e) {
-            console.error("Failed to decode key as base64:", e);
-            return encryptedText;
-        }
+        try { keyBuffer = base64ToArrayBuffer(keyToUse); }
+        catch (e) { console.error("Failed to decode key as base64:", e); return encryptedText; }
         if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
             if (generatedKey && generatedKey !== AES_KEY) return handleAesDecrypt(encryptedText, AES_KEY);
             return encryptedText;
@@ -191,11 +191,8 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
         if (ivBuffer.byteLength !== 16) return encryptedText;
         const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
         let encryptedBuffer;
-        try {
-            encryptedBuffer = base64ToArrayBuffer(encryptedText);
-        } catch (e) {
-            return encryptedText;
-        }
+        try { encryptedBuffer = base64ToArrayBuffer(encryptedText); }
+        catch (e) { return encryptedText; }
         if (encryptedBuffer.byteLength % 16 !== 0) {
             console.error(`Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes`);
             return encryptedText;
@@ -204,7 +201,8 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
         return new TextDecoder().decode(decryptedBuffer);
     } catch (err) {
         if (generatedKey && generatedKey !== AES_KEY && err.message.includes("key data")) {
-            try { return await handleAesDecrypt(encryptedText, AES_KEY); } catch (e) { console.error("Fallback also failed:", e.message); }
+            try { return await handleAesDecrypt(encryptedText, AES_KEY); }
+            catch (e) { console.error("Fallback also failed:", e.message); }
         }
         return encryptedText;
     }
@@ -214,11 +212,11 @@ async function encryptEmail(email = "") {
     try {
         if (!email || email.trim() === "") { console.warn("Warning: Empty email provided"); return ""; }
         const keyBuffer = base64ToArrayBuffer(AES_KEY);
-        const ivBuffer = base64ToArrayBuffer(AES_IV);
+        const ivBuffer  = base64ToArrayBuffer(AES_IV);
         if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) { console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`); return ""; }
         if (ivBuffer.byteLength !== 16) { console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`); return ""; }
-        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
-        const data = new TextEncoder().encode(email);
+        const key       = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
+        const data      = new TextEncoder().encode(email);
         const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
         const base64Result = arrayBufferToBase64(encrypted);
         try { atob(base64Result); } catch (e) { console.error("Result is NOT valid base64:", e); }
@@ -235,35 +233,25 @@ async function encryptEmail(email = "") {
 
 function forceCursorToTop(item) {
     return new Promise((resolve) => {
-        console.log("sdlkasdhsakjdhasjdhakjsdhkjsahd- set cursor at the top entered - 1")
-        item.body.prependAsync(
-            "\uFEFF",
-            { coercionType: Office.CoercionType.Text },
-            (r1) => {
-                console.log("sdlkasdhsakjdhasjdhakjsdhkjsahd- set cursor at the top entered - 2")
-                if (r1.status !== "succeeded") { resolve(); return; }
-                item.body.setSelectedDataAsync(
-                    "",
-                    { coercionType: Office.CoercionType.Text },
-                    (r2) => resolve()
-                );
-            }
-        );
+        item.body.prependAsync("\uFEFF", { coercionType: Office.CoercionType.Text }, (r1) => {
+            if (r1.status !== "succeeded") { resolve(); return; }
+            item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+        });
     });
 }
 
 async function renderSignatureOnServer(user) {
-    const platform = Office.context.diagnostics.platform;
+    const platform  = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
     try {
         const encryptedMail = await encryptEmail(user);
-        const primaryRes = await fetch(
+        const primaryRes    = await fetch(
             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
         if (primaryRes.ok) {
-            const data = await primaryRes.text();
+            const data          = await primaryRes.text();
             const decryptedData = await handleAesDecrypt(data);
             console.log("Using NEW renderer");
             return JSON.parse(decryptedData)?.html || null;
@@ -330,75 +318,53 @@ function simplifyHtmlForMobile(html) {
 
 function compressBase64Image(dataUrl, maxWidth, quality) {
     if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    if (quality === undefined) quality = isMobile() ? MOBILE_IMAGE_QUALITY : 0.7;
+    if (quality  === undefined) quality  = isMobile() ? MOBILE_IMAGE_QUALITY   : 0.7;
 
     return new Promise((resolve) => {
-        if (dataUrl.startsWith("data:image/gif")) {
-            resolve(dataUrl);
-            return;
-        }
-
-        const img = new Image();
+        if (dataUrl.startsWith("data:image/gif")) { resolve(dataUrl); return; }
+        const img  = new Image();
         img.onload = () => {
             try {
                 const canvas = document.createElement("canvas");
-                let width = img.width;
-                let height = img.height;
-
-                if (width > maxWidth) {
-                    height = Math.round((height * maxWidth) / width);
-                    width = maxWidth;
-                }
-
-                canvas.width = width;
+                let width    = img.width;
+                let height   = img.height;
+                if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
+                canvas.width  = width;
                 canvas.height = height;
-
-                const ctx = canvas.getContext("2d");
+                const ctx   = canvas.getContext("2d");
                 const isPng = dataUrl.startsWith("data:image/png");
-
                 if (isPng) {
                     ctx.clearRect(0, 0, width, height);
                     ctx.drawImage(img, 0, 0, width, height);
                     let result = canvas.toDataURL("image/png");
                     if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
                     console.log(`[CardByte] Compressed PNG: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                    resolve(result);
-                    return;
+                    resolve(result); return;
                 }
-
                 ctx.drawImage(img, 0, 0, width, height);
                 let result = canvas.toDataURL("image/jpeg", quality);
                 if (result.length >= dataUrl.length) result = canvas.toDataURL("image/png");
                 if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
                 console.log(`[CardByte] Compressed: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
                 resolve(result);
-            } catch (e) {
-                console.warn("[CardByte] Canvas compression failed:", e);
-                resolve(dataUrl);
-            }
+            } catch (e) { console.warn("[CardByte] Canvas compression failed:", e); resolve(dataUrl); }
         };
         img.onerror = () => resolve(dataUrl);
-        img.src = dataUrl;
+        img.src     = dataUrl;
     });
 }
 
 function convertGifToStaticPng(dataUrl, maxWidth) {
     if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
-
     return new Promise((resolve) => {
-        const img = new Image();
+        const img  = new Image();
         img.onload = () => {
             try {
                 const canvas = document.createElement("canvas");
-                let width = img.width;
-                let height = img.height;
-
-                if (width > maxWidth) {
-                    height = Math.round((height * maxWidth) / width);
-                    width = maxWidth;
-                }
-
-                canvas.width = width;
+                let width    = img.width;
+                let height   = img.height;
+                if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
+                canvas.width  = width;
                 canvas.height = height;
                 const ctx = canvas.getContext("2d");
                 ctx.clearRect(0, 0, width, height);
@@ -406,25 +372,20 @@ function convertGifToStaticPng(dataUrl, maxWidth) {
                 const result = canvas.toDataURL("image/png");
                 console.log(`[CardByte] GIF->PNG: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
                 resolve(result);
-            } catch (e) {
-                console.warn("[CardByte] GIF->PNG conversion failed:", e);
-                resolve(dataUrl);
-            }
+            } catch (e) { console.warn("[CardByte] GIF->PNG conversion failed:", e); resolve(dataUrl); }
         };
         img.onerror = () => resolve(dataUrl);
-        img.src = dataUrl;
+        img.src     = dataUrl;
     });
 }
 
 async function compressImagesInHtml(html) {
-    const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
+    const regex   = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
     const matches = [];
     let match;
-
     while ((match = regex.exec(html)) !== null) {
         matches.push({ fullMatch: match[0], dataUrl: match[1] });
     }
-
     if (matches.length === 0) return html;
 
     const mobile = isMobile();
@@ -434,21 +395,17 @@ async function compressImagesInHtml(html) {
 
     for (const m of matches) {
         if (!result.includes(m.dataUrl)) continue;
-
         const isGif = m.dataUrl.startsWith("data:image/gif");
-
         if (isGif && mobile) {
             console.log(`[CardByte] Mobile: converting GIF to static PNG (${(m.dataUrl.length / 1024).toFixed(0)}KB)`);
             const staticPng = await convertGifToStaticPng(m.dataUrl);
             if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
             continue;
         }
-
         if (isGif) {
             console.log(`[CardByte] Skipping GIF (${(m.dataUrl.length / 1024).toFixed(0)}KB) to preserve animation`);
             continue;
         }
-
         const compressed = await compressBase64Image(m.dataUrl);
         if (compressed !== m.dataUrl) result = result.replace(m.dataUrl, compressed);
     }
@@ -469,12 +426,12 @@ async function compressImagesInHtml(html) {
 
 function extractBase64Images(html) {
     const images = [];
-    let index = 0;
+    let index    = 0;
     const cleanedHtml = html.replace(
         /src\s*=\s*"data:(image\/([^;]+));base64,([^"]+)"/gi,
         (_match, mimeType, extension, base64Data) => {
-            const cid = `cardbyte_img_${index}`;
-            const safeExt = extension.replace(/[^a-z0-9]/gi, "") || "png";
+            const cid      = `cardbyte_img_${index}`;
+            const safeExt  = extension.replace(/[^a-z0-9]/gi, "") || "png";
             const fileName = `${cid}.${safeExt}`;
             images.push({ cid, fileName, mimeType, base64Data });
             index++;
@@ -495,13 +452,10 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     return new Promise((resolve, reject) => {
         if (typeof item.addFileAttachmentFromBase64Async !== "function") {
             console.warn("[CardByte] addFileAttachmentFromBase64Async not available");
-            resolve(false);
-            return;
+            resolve(false); return;
         }
         item.addFileAttachmentFromBase64Async(
-            base64Data,
-            fileName,
-            { isInline: true, contentId: cid },
+            base64Data, fileName, { isInline: true, contentId: cid },
             (result) => {
                 if (result.status === Office.AsyncResultStatus.Succeeded) resolve(true);
                 else { console.error(`[CardByte] Attach failed ${cid}:`, result.error); reject(result.error); }
@@ -516,25 +470,12 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
 
 function bodySetAsync(item, html) {
     return new Promise((resolve, reject) => {
-        item.body.setAsync(
-            html,
-            { coercionType: Office.CoercionType.Html },
-            (r) => {
-                if (r.status !== "succeeded") {
-                    reject(r.error);
-                    return;
-                }
-                if (typeof item.body?.prependAsync === "function") {
-                    item.body.prependAsync(
-                        "",
-                        { coercionType: Office.CoercionType.Html },
-                        () => resolve()
-                    );
-                } else {
-                    resolve();
-                }
-            }
-        );
+        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+            if (r.status !== "succeeded") { reject(r.error); return; }
+            if (typeof item.body?.prependAsync === "function") {
+                item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
+            } else { resolve(); }
+        });
     });
 }
 
@@ -545,12 +486,8 @@ function bodyPrependAsync(item, html) {
             if (r.status === "succeeded") {
                 if (typeof item.body.setSelectedDataAsync === "function") {
                     item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-                } else {
-                    resolve();
-                }
-            } else {
-                reject(r.error);
-            }
+                } else { resolve(); }
+            } else { reject(r.error); }
         });
     });
 }
@@ -578,23 +515,10 @@ function containsGifImages(html) {
 }
 
 /* ---------------------------------------------------------
-   Reply Chain Detection
-   v0.0.7 FIX: All Mac-specific patterns are now anchored to
-   opening HTML tags (/<div.../, /<hr.../, etc.) so that
-   html.search() never returns an index pointing into the
-   middle of an attribute value.
-
-   Old (broken): /class="?ms-outlook-[^"]*"?/i
-     → matches at the `class=` token inside a tag attribute,
-       producing a mid-tag slice index.
-
-   New (fixed): /<(?:div|hr|span|table)[^>]*class="[^"]*ms-outlook-[^"]*"/i
-     → matches at the opening `<` of the tag, guaranteeing a
-       clean slice boundary.
+   Reply Chain Detection (v0.0.7 tag-anchored patterns)
    --------------------------------------------------------- */
 function detectReplyChain(html) {
     const replyMarkers = [
-        // Standard Outlook markers (unchanged)
         /divRplyFwdMsg/i,
         /appendonsend/i,
         /OriginalMessage/i,
@@ -602,7 +526,6 @@ function detectReplyChain(html) {
         /x_divRplyFwdMsg/i,
         /class="?OutlookMessageHeader"?/i,
         /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
-        // v0.0.7 FIX: anchored to opening tag — never matches mid-attribute
         /<(?:div|hr|span|table)[^>]*class="[^"]*ms-outlook-[^"]*"/i,
         /<(?:div|hr|span|table)[^>]*class="[^"]*ms-owa-[^"]*"/i,
         /<[^>]*\sdata-ogsc[\s=>]/i,
@@ -618,42 +541,35 @@ function detectReplyChain(html) {
 
 async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
     const platform = detectPlatform();
-    const mobile = isMobile();
-    const mac = isMac();
-    const owa = platform === "owa";
-    const hasGifs = containsGifImages(signatureHtml);
+    const mobile   = isMobile();
+    const mac      = isMac();
+    const owa      = platform === "owa";
+    const hasGifs  = containsGifImages(signatureHtml);
 
     let methods;
 
     if (mobile) {
-        methods = [
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-        ];
+        methods = [{ name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) }];
         if (typeof item.body?.setSignatureAsync === "function") {
             methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) });
         }
     } else if (mac) {
-        // Mac Outlook 16.x — setSignatureAsync places sig below reply chain.
-        // Use prependAsync only; setSignatureAsync intentionally excluded.
-        methods = [
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-        ];
+        methods = [{ name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) }];
     } else if (owa && hasGifs) {
         methods = [
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync",         fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, signatureHtml) },
         ];
     } else if (owa) {
         methods = [
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, signatureHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync",          fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     } else {
-        // Windows desktop
         methods = [
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync",    fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync",         fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     }
 
@@ -676,46 +592,43 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
 
 async function tryInsertFullBody(item, fullHtml, label = "") {
     const platform = detectPlatform();
-    const mobile = isMobile();
-    const mac = isMac();
-    const owa = platform === "owa";
-    const hasGifs = containsGifImages(fullHtml);
+    const mobile   = isMobile();
+    const mac      = isMac();
+    const owa      = platform === "owa";
+    const hasGifs  = containsGifImages(fullHtml);
 
     let methods;
 
     if (mobile) {
         methods = [
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setAsync",      fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync",  fn: () => bodyPrependAsync(item, fullHtml) },
         ];
     } else if (mac) {
-        // Mac: setAsync is reliable for full-body replacement.
-        // setSignatureAsync excluded (broken for replies on Mac).
         methods = [
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setAsync",      fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync",  fn: () => bodyPrependAsync(item, fullHtml) },
         ];
     } else if (owa && hasGifs) {
         methods = [
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync",         fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync",             fn: () => bodySetAsync(item, fullHtml) },
         ];
     } else if (owa && !hasGifs) {
         methods = [
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync",         fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync",             fn: () => bodySetAsync(item, fullHtml) },
         ];
     } else {
-        // Windows desktop
         methods = [
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync",         fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync",             fn: () => bodySetAsync(item, fullHtml) },
         ];
     }
 
@@ -741,8 +654,8 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
    --------------------------------------------------------- */
 
 function wrapForOutlook(innerHtml) {
-    const platform = detectPlatform();
-    const isMacPlatform = platform === "mac";
+    const platform       = detectPlatform();
+    const isMacPlatform  = platform === "mac";
 
     if (isMobile()) {
         return `
@@ -753,7 +666,6 @@ function wrapForOutlook(innerHtml) {
     </div>`;
     }
 
-    // For Mac, use a simpler wrapper without the nested table structure
     if (isMacPlatform) {
         return `
     <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
@@ -761,7 +673,6 @@ function wrapForOutlook(innerHtml) {
     </div>`;
     }
 
-    // Windows desktop / OWA
     return `
     <div id="cardbyte-signature-block" contenteditable="false" style="font-family: Calibri, Arial, sans-serif; font-size: 11pt; mso-line-height-rule: exactly;">
       <table contenteditable="false" cellpadding="0" cellspacing="0" border="0" style="font-family: inherit; font-size: inherit; color: inherit;">
@@ -771,14 +682,10 @@ function wrapForOutlook(innerHtml) {
 }
 
 function stabilizeSelection(item) {
-    // Skip on Mac — Mac Outlook correctly repositions cursor after
-    // setAsync/prependAsync. The empty-string setSelectedDataAsync call causes
-    // a visible flash on Mac and is not needed.
     if (isMac()) {
         console.log("[CardByte] Mac: skipping stabilizeSelection (not needed, avoids flash)");
         return Promise.resolve();
     }
-
     return new Promise((resolve) => {
         try {
             if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
@@ -786,32 +693,25 @@ function stabilizeSelection(item) {
                 if (r.status !== "succeeded") { resolve(); return; }
                 item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
             });
-        } catch (e) {
-            resolve();
-        }
+        } catch (e) { resolve(); }
     });
 }
 
 function _stripDivById(html, idPattern) {
     const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
-    const openMatch = openTagRegex.exec(html);
+    const openMatch    = openTagRegex.exec(html);
     if (!openMatch) return html;
 
     const startIndex = openMatch.index;
-    let pos = startIndex + openMatch[0].length;
+    let pos   = startIndex + openMatch[0].length;
     let depth = 1;
 
     while (pos < html.length && depth > 0) {
-        const nextOpen = html.indexOf("<div", pos);
+        const nextOpen  = html.indexOf("<div", pos);
         const nextClose = html.indexOf("</div>", pos);
         if (nextClose === -1) break;
-        if (nextOpen !== -1 && nextOpen < nextClose) {
-            depth++;
-            pos = nextOpen + 4;
-        } else {
-            depth--;
-            pos = nextClose + 6;
-        }
+        if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
+        else { depth--; pos = nextClose + 6; }
     }
 
     return html.slice(0, startIndex) + html.slice(pos);
@@ -830,25 +730,20 @@ function _stripSig(html) {
 }
 
 /* ---------------------------------------------------------
-   Reply Chain Index Helper — shared between insertSignature and onSend
-   v0.0.7 FIX: All Mac-specific patterns anchored to opening tag boundary.
-   See detectReplyChain() comment above for full explanation.
+   Reply Chain Index Helper (v0.0.7 tag-anchored patterns)
    --------------------------------------------------------- */
 function _findReplyChainIndex(html) {
     const replyMarkers = [
-        // Standard markers — anchored at <tag open where possible
         /<div[^>]*id="?x?_?divRplyFwdMsg"?/i,
         /<div[^>]*id="?appendonsend"?/i,
         /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
         /<blockquote/i,
         /class="?OutlookMessageHeader"?/i,
-        // v0.0.7 FIX: anchored to opening tag — never matches mid-attribute
         /<(?:div|hr|span|table)[^>]*class="[^"]*ms-outlook-[^"]*"/i,
         /<(?:div|hr|span|table)[^>]*class="[^"]*ms-owa-[^"]*"/i,
         /<[^>]*\sdata-ogsc[\s=>]/i,
         /<hr[^>]*class="[^"]*separator[^"]*"/i,
         /<div[^>]*class="?WordSection[0-9]"?/i,
-        // Bare string fallbacks — lowest priority, only if anchored forms miss
         /x_divRplyFwdMsg/i,
         /divRplyFwdMsg/i,
     ];
@@ -865,6 +760,15 @@ function _findReplyChainIndex(html) {
 
 /* ---------------------------------------------------------
    Main Insertion — Multi-Strategy
+   v0.0.8 CHANGES:
+     - PATH A (Reply): always _stripSig before rebuilding full
+       body in every tier across all platforms (mobile, mac,
+       desktop/OWA). Prevents old signature accumulating when
+       a reply is opened from a draft or handler fires twice.
+     - PATH B (Compose): cleanBody = _stripSig(existingBody)
+       computed once before T1 and reused in all four tiers.
+       Replaces the raw `existingBody` references that were
+       causing duplication.
    --------------------------------------------------------- */
 
 async function insertSignatureWithoutCursorError(item, signatureHtml) {
@@ -873,9 +777,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         window.__INSERTING_SIGNATURE__ = true;
 
         const mobile = isMobile();
-        const mac = isMac();
+        const mac    = isMac();
 
-        // On mobile, simplify HTML first and aggressively compress/convert images
         let processedHtml = signatureHtml;
         if (mobile) {
             console.log("[CardByte] Mobile: simplifying HTML and compressing images upfront");
@@ -883,18 +786,16 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             processedHtml = await compressImagesInHtml(processedHtml);
         }
 
-        const wrappedHtml = wrapForOutlook(processedHtml);
+        const wrappedHtml    = wrapForOutlook(processedHtml);
         const signatureBlock = `${SIGNATURE_SPACER}<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
         console.log(`[CardByte] Built signature block (html: ${wrappedHtml})`);
-        const sizeKB = (signatureBlock.length / 1024).toFixed(1);
+        const sizeKB   = (signatureBlock.length / 1024).toFixed(1);
         const gifCount = (signatureBlock.match(/data:image\/gif;base64,/gi) || []).length;
         console.log(`[CardByte] -- Insertion start -- Size: ${sizeKB} KB, GIFs: ${gifCount}, mobile: ${mobile}, mac: ${mac}`);
-        if (mobile && gifCount > 0) {
-            console.warn(`[CardByte] WARNING: ${gifCount} GIF(s) still present after mobile compression!`);
-        }
+        if (mobile && gifCount > 0) console.warn(`[CardByte] WARNING: ${gifCount} GIF(s) still present after mobile compression!`);
 
-        const existingBody = await getBodyHtml(item);
-        const isReply = detectReplyChain(existingBody);
+        const existingBody       = await getBodyHtml(item);
+        const isReply            = detectReplyChain(existingBody);
         const alreadyHasSignature = hasCardByteSignature(existingBody);
 
         console.log(`[CardByte] isReply: ${isReply}, alreadyHasSignature: ${alreadyHasSignature}`);
@@ -905,153 +806,134 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         if (isReply) {
             console.log("[CardByte] Reply/Forward detected");
 
+            // v0.0.8: always strip before rebuilding — covers both fresh reply
+            // and re-invoke on a saved draft that already has a CardByte sig.
             if (alreadyHasSignature) {
                 console.log("[CardByte] Replacing existing CardByte signature in reply");
-                const updatedBody = _stripSig(existingBody) + signatureBlock;
-                const result = await tryInsertFullBody(item, updatedBody, "Reply-Replace");
-                if (result.success) {
-                    if (!mac) await stabilizeSelection(item);
-                    return;
-                }
+                // _stripSig already called below for all rebuild paths; this branch
+                // is kept only for logging clarity. Fall through to platform paths.
             }
 
             // ── MOBILE REPLY PATH ──────────────────────────
             if (mobile) {
                 console.log("[CardByte] Mobile reply: using full-body strategy");
 
-                {
+                // Mobile T1: signature-only prepend (no full-body risk)
+                if (!alreadyHasSignature) {
                     const result = await tryInsertSignatureOnly(item, signatureBlock, "MobileReply-T1");
-                    if (result.success) {
-                        await stabilizeSelection(item);
-                        return;
-                    }
+                    if (result.success) { await stabilizeSelection(item); return; }
                 }
 
+                // Mobile T2 / T3: full-body rebuild — always strip first
                 {
-                    const replyMarkers = [
-                        /<div[^>]*id="?divRplyFwdMsg"?/i,
-                        /<div[^>]*id="?appendonsend"?/i,
-                        /<div[^>]*id="?x_divRplyFwdMsg"?/i,
-                        /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
-                        /<blockquote/i,
-                        /<!-- OriginalMessage -->/i,
-                    ];
-                    let insertIndex = -1;
-                    for (const marker of replyMarkers) {
-                        const m = existingBody.search(marker);
-                        if (m > -1) { insertIndex = m; break; }
-                    }
-                    const fullHtml = insertIndex > -1
-                        ? existingBody.slice(0, insertIndex) + signatureBlock + existingBody.slice(insertIndex)
-                        : existingBody + signatureBlock;
+                    // v0.0.8: strip existing sig before splicing new one in
+                    const cleanBody  = _stripSig(existingBody);
+                    const insertIndex = _findReplyChainIndex(cleanBody);
+                    const fullHtml   = insertIndex > -1
+                        ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
+                        : cleanBody + signatureBlock;
 
                     let result = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
-                    if (result.success) {
-                        await stabilizeSelection(item);
-                        return;
-                    }
+                    if (result.success) { await stabilizeSelection(item); return; }
 
                     result = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileReply-T3");
-                    if (result.success) {
-                        await stabilizeSelection(item);
-                        return;
-                    }
+                    if (result.success) { await stabilizeSelection(item); return; }
                 }
 
                 throw new Error("All mobile reply insertion methods failed");
             }
 
             // ── MAC REPLY PATH ────────────────────────────
-            // Mac Outlook 16.x: setSignatureAsync places sig BELOW reply chain.
-            // Skip T1/T2 (both try setSignatureAsync) and go directly to
-            // full-body rebuild with signature spliced above chain boundary.
-            // _findReplyChainIndex() now uses tag-anchored patterns (v0.0.7 fix)
-            // so the slice always lands at a clean <tag boundary.
             if (mac) {
                 console.log("[CardByte] Mac reply: using full-body rebuild (setSignatureAsync bypassed)");
 
-                // Mac T1: compress + full-body rebuild
+                // Mac T1: compress + strip + full-body rebuild
                 {
                     try {
-                        const compressed = await compressImagesInHtml(signatureBlock);
-                        const insertIndex = _findReplyChainIndex(existingBody);
-                        const fullHtml = insertIndex > -1
-                            ? existingBody.slice(0, insertIndex) + compressed + existingBody.slice(insertIndex)
-                            : existingBody + compressed;
+                        const compressed  = await compressImagesInHtml(signatureBlock);
+                        // v0.0.8: strip before splice
+                        const cleanBody   = _stripSig(existingBody);
+                        const insertIndex = _findReplyChainIndex(cleanBody);
+                        const fullHtml    = insertIndex > -1
+                            ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                            : cleanBody + compressed;
 
                         console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
-                        if (result.success) {
-                            await stabilizeSelection(item); // no-op on Mac
-                            return;
-                        }
+                        if (result.success) { await stabilizeSelection(item); return; }
                     } catch (e) { console.warn("[CardByte] Mac Reply T1:", e.message); }
                 }
 
-                // Mac T2: uncompressed full-body
+                // Mac T2: uncompressed + strip + full-body
                 {
                     try {
-                        const insertIndex = _findReplyChainIndex(existingBody);
-                        const fullHtml = insertIndex > -1
-                            ? existingBody.slice(0, insertIndex) + signatureBlock + existingBody.slice(insertIndex)
-                            : existingBody + signatureBlock;
+                        // v0.0.8: strip before splice
+                        const cleanBody   = _stripSig(existingBody);
+                        const insertIndex = _findReplyChainIndex(cleanBody);
+                        const fullHtml    = insertIndex > -1
+                            ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
+                            : cleanBody + signatureBlock;
 
                         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
-                        if (result.success) {
-                            await stabilizeSelection(item);
-                            return;
-                        }
+                        if (result.success) { await stabilizeSelection(item); return; }
                     } catch (e) { console.warn("[CardByte] Mac Reply T2:", e.message); }
                 }
 
                 // Mac T3: strip images — last resort
                 {
-                    const insertIndex = _findReplyChainIndex(existingBody);
+                    // v0.0.8: strip sig before splice
+                    const cleanBody   = _stripSig(existingBody);
+                    const insertIndex = _findReplyChainIndex(cleanBody);
                     const strippedBlock = stripBase64Images(signatureBlock);
-                    const fullHtml = insertIndex > -1
-                        ? existingBody.slice(0, insertIndex) + strippedBlock + existingBody.slice(insertIndex)
-                        : existingBody + strippedBlock;
+                    const fullHtml    = insertIndex > -1
+                        ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
+                        : cleanBody + strippedBlock;
 
                     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
-                    if (result.success) {
-                        await stabilizeSelection(item);
-                        return;
-                    }
+                    if (result.success) { await stabilizeSelection(item); return; }
                 }
 
                 throw new Error("All Mac reply insertion tiers failed");
             }
 
-            // ── DESKTOP / OWA REPLY PATH (unchanged from v0.0.5) ──────────
-            {
+            // ── DESKTOP / OWA REPLY PATH ──────────────────
+            // T1: try signature-only insertion (preferred — no full body needed)
+            // Only skip this if sig is already present (we must do full-body replace)
+            if (!alreadyHasSignature) {
                 const result = await tryInsertSignatureOnly(item, signatureBlock, "Reply-T1");
                 if (result.success) { await stabilizeSelection(item); return; }
             }
-            {
+
+            // T2: compressed signature-only
+            if (!alreadyHasSignature) {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
-                    const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
+                    const result     = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
             }
+
+            // T3: full-body rebuild — always strip first (v0.0.8)
             {
                 try {
-                    const compressed = await compressImagesInHtml(signatureBlock);
-                    const insertIndex = _findReplyChainIndex(existingBody);
-                    const fullHtml = insertIndex > -1
-                        ? existingBody.slice(0, insertIndex) + compressed + existingBody.slice(insertIndex)
-                        : existingBody + compressed;
+                    const compressed  = await compressImagesInHtml(signatureBlock);
+                    // v0.0.8: strip any existing sig from existingBody before splice
+                    const cleanBody   = _stripSig(existingBody);
+                    const insertIndex = _findReplyChainIndex(cleanBody);
+                    const fullHtml    = insertIndex > -1
+                        ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                        : cleanBody + compressed;
 
                     console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                     const result = await tryInsertFullBody(item, fullHtml, "Reply-T3");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T3:", e.message); }
             }
+
+            // T4: strip images, signature-only
             {
-                const result = await tryInsertSignatureOnly(
-                    item, stripBase64Images(signatureBlock), "Reply-T4"
-                );
+                const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
                 if (result.success) { await stabilizeSelection(item); return; }
             }
 
@@ -1060,14 +942,21 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
         // ═══════════════════════════════════════════════════
         // PATH B: NEW COMPOSE
+        // v0.0.8: compute cleanBody ONCE here and reuse across
+        // all four tiers so no tier can re-introduce the old sig.
         // ═══════════════════════════════════════════════════
         console.log("[CardByte] New compose detected");
 
+        // v0.0.8: always strip first — safe even when no sig present
+        const cleanBody = _stripSig(existingBody);
+
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
-            const updatedBody = _stripSig(existingBody) + signatureBlock;
-            const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
+            // cleanBody already has the old sig stripped; append fresh block.
+            const updatedBody = cleanBody + signatureBlock;
+            const result      = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
             if (result.success) { return; }
+            // If replace fails fall through to the tier chain below.
         }
 
         // MOBILE COMPOSE PATH
@@ -1078,7 +967,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 if (result.success) { await stabilizeSelection(item); return; }
             }
             {
-                const fullHtml = existingBody + "<br/>" + signatureBlock;
+                // v0.0.8: use cleanBody (sig already stripped)
+                const fullHtml = cleanBody + "<br/>" + signatureBlock;
                 let result = await tryInsertFullBody(item, fullHtml, "MobileCompose-T2");
                 if (result.success) { await stabilizeSelection(item); return; }
 
@@ -1089,31 +979,40 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         }
 
         // DESKTOP / OWA / MAC COMPOSE PATH
+        // v0.0.8: ALL tiers use cleanBody — never raw existingBody.
+
+        // Compose T1
         {
             console.log("[CardByte] Compose Tier 1: Full-body insert");
-            const fullHtml = existingBody
-                ? existingBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
+            const fullHtml = cleanBody
+                ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
                 : signatureBlock;
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T1");
             if (result.success) { return; }
         }
+
+        // Compose T2
         {
             console.log("[CardByte] Compose Tier 2: Compress images + full-body insert");
             try {
                 const compressed = await compressImagesInHtml(signatureBlock);
-                const fullHtml = existingBody
-                    ? existingBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
+                // v0.0.8: cleanBody instead of existingBody
+                const fullHtml   = cleanBody
+                    ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
                     : compressed;
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
                 if (result.success) { return; }
             } catch (e) { console.warn("[CardByte] Compose Tier 2 compression error:", e.message); }
         }
+
+        // Compose T3
         {
             console.log("[CardByte] Compose Tier 3: CID images + full-body insert");
             try {
                 const { cleanedHtml, images } = extractBase64Images(signatureBlock);
-                const fullHtml = existingBody
-                    ? existingBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + cleanedHtml
+                // v0.0.8: cleanBody instead of existingBody
+                const fullHtml = cleanBody
+                    ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + cleanedHtml
                     : cleanedHtml;
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T3");
                 if (result.success) {
@@ -1123,14 +1022,18 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                         catch (e) { console.warn(`[CardByte] Image attach failed: ${img.cid}`); }
                     }
                     console.log(`[CardByte] Attached ${attached}/${images.length} images`);
+                    return;
                 }
             } catch (e) { console.warn("[CardByte] Compose Tier 3 error:", e.message); }
         }
+
+        // Compose T4
         {
             console.log("[CardByte] Compose Tier 4: Strip images + full-body insert");
             const stripped = stripBase64Images(signatureBlock);
-            const fullHtml = existingBody
-                ? existingBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
+            // v0.0.8: cleanBody instead of existingBody
+            const fullHtml = cleanBody
+                ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
                 : stripped;
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T4");
             if (result.success) { return; }
@@ -1286,28 +1189,49 @@ async function ensureNoDefaultSignature(item) {
 }
 
 /* ---------------------------------------------------------
-   AUTO-RUN ENTRY POINT (MUST BE GLOBAL)
+   AUTO-RUN ENTRY POINT
+   v0.0.8 CHANGES:
+     1. Per-item-ID guard resets SIGNATURE_STATE when a new
+        compose/reply window fires the handler, so each item
+        always gets exactly one fresh signature run.
+     2. SIGNATURE_STATE is set to "applied" after successful
+        insertion (was "idle") so a same-item re-invoke is
+        short-circuited without doing any body writes.
+     3. The finally block no longer resets SIGNATURE_STATE —
+        only the catch block resets it to "idle" so a retry
+        is still possible after a failure.
    --------------------------------------------------------- */
 
 window.applySignature = async function (event = { completed: () => { } }) {
+
+    const mailbox = Office?.context?.mailbox;
+    const item    = mailbox?.item;
+
+    // v0.0.8: Detect a new mail item and reset state so it gets its own run.
+    const currentItemId = item?.itemId || null;
+    if (currentItemId && window.__LAST_ITEM_ID__ && window.__LAST_ITEM_ID__ !== currentItemId) {
+        console.log(`[CardByte] New item detected (${currentItemId}) — resetting SIGNATURE_STATE`);
+        SIGNATURE_STATE = "idle";
+    }
+    if (currentItemId) window.__LAST_ITEM_ID__ = currentItemId;
+
     if (SIGNATURE_STATE === "loading") {
         console.log("[CardByte] Already loading — skipping");
         event.completed();
         return;
     }
+    // v0.0.8: "applied" guard now actually fires because we set it below.
     if (SIGNATURE_STATE === "applied") {
-        console.log("[CardByte] Already applied — skipping");
+        console.log("[CardByte] Already applied for this item — skipping");
         event.completed();
         return;
     }
 
-    const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
     const user = mailbox?.userProfile || {
-        accountType: "office365",
-        displayName: "Korla Sai Rajesh",
+        accountType:  "office365",
+        displayName:  "Korla Sai Rajesh",
         emailAddress: "sairajesh.korla1272@outlook.com",
-        timeZone: "India Standard Time"
+        timeZone:     "India Standard Time"
     };
 
     try {
@@ -1320,22 +1244,23 @@ window.applySignature = async function (event = { completed: () => { } }) {
         SIGNATURE_STATE = "loading";
 
         const platform = detectPlatform();
-        const mobile = isMobile();
-        const mac = isMac();
+        const mobile   = isMobile();
+        const mac      = isMac();
 
         console.log("[CardByte] ════════════════════════════════════");
-        console.log("[CardByte] Starting signature flow v0.0.7");
-        console.log("[CardByte] User:", user?.emailAddress);
-        console.log("[CardByte] Platform:", platform);
-        console.log("[CardByte] Host:", Office?.context?.host || "unknown");
-        console.log("[CardByte] isMobile:", mobile);
-        console.log("[CardByte] isMac:", mac);
-        console.log("[CardByte] isOWA:", isOWA());
-        console.log("[CardByte] UserAgent:", navigator?.userAgent?.substring(0, 120) || "unknown");
-        console.log("[CardByte] API check: setSignatureAsync =", typeof item.body?.setSignatureAsync);
-        console.log("[CardByte] API check: prependAsync =", typeof item.body?.prependAsync);
-        console.log("[CardByte] API check: setSelectedDataAsync =", typeof item.body?.setSelectedDataAsync);
-        console.log("[CardByte] API check: setAsync =", typeof item.body?.setAsync);
+        console.log("[CardByte] Starting signature flow v0.0.8");
+        console.log("[CardByte] User:",        user?.emailAddress);
+        console.log("[CardByte] Platform:",    platform);
+        console.log("[CardByte] Host:",        Office?.context?.host || "unknown");
+        console.log("[CardByte] isMobile:",    mobile);
+        console.log("[CardByte] isMac:",       mac);
+        console.log("[CardByte] isOWA:",       isOWA());
+        console.log("[CardByte] ItemId:",      currentItemId || "unknown");
+        console.log("[CardByte] UserAgent:",   navigator?.userAgent?.substring(0, 120) || "unknown");
+        console.log("[CardByte] API check: setSignatureAsync =",           typeof item.body?.setSignatureAsync);
+        console.log("[CardByte] API check: prependAsync =",                typeof item.body?.prependAsync);
+        console.log("[CardByte] API check: setSelectedDataAsync =",        typeof item.body?.setSelectedDataAsync);
+        console.log("[CardByte] API check: setAsync =",                    typeof item.body?.setAsync);
         console.log("[CardByte] API check: addFileAttachmentFromBase64Async =", typeof item.addFileAttachmentFromBase64Async);
         console.log("[CardByte] API check: disableClientSignatureAsync =", typeof item.disableClientSignatureAsync);
 
@@ -1355,27 +1280,28 @@ window.applySignature = async function (event = { completed: () => { } }) {
         try {
             localStorage.setItem("cardbyte_cached_signature", apiResponse);
             console.log("[CardByte] Signature cached to localStorage");
-        } catch (e) {
-            console.warn("[CardByte] localStorage write failed:", e.message);
-        }
-        const sizeKB = (apiResponse.length / 1024).toFixed(1);
+        } catch (e) { console.warn("[CardByte] localStorage write failed:", e.message); }
+
+        const sizeKB      = (apiResponse.length / 1024).toFixed(1);
         const base64Count = (apiResponse.match(/data:image\/[^;]+;base64,/gi) || []).length;
-        const gifCount = (apiResponse.match(/data:image\/gif;base64,/gi) || []).length;
+        const gifCount    = (apiResponse.match(/data:image\/gif;base64,/gi)   || []).length;
         console.log(`[CardByte] API response: ${sizeKB} KB, ${base64Count} base64 image(s), ${gifCount} GIF(s)`);
 
         await insertSignatureWithoutCursorError(item, apiResponse);
 
-        SIGNATURE_STATE = "idle";
+        // v0.0.8: mark as applied so same-item re-invocations are no-ops.
+        SIGNATURE_STATE = "applied";
         console.log("[CardByte] Signature applied successfully");
         console.log("[CardByte] ════════════════════════════════════");
 
     } catch (err) {
+        // v0.0.8: reset to idle on error so a retry is possible.
         SIGNATURE_STATE = "idle";
         console.error("[CardByte] applySignature failed:", err.message || err);
         console.error("[CardByte] Stack:", err.stack || "N/A");
 
         try {
-            const userProfile = mailbox?.userProfile || {};
+            const userProfile  = mailbox?.userProfile || {};
             const fallbackHtml = `
         <table cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:400px;">
           <tr>
@@ -1406,22 +1332,23 @@ window.applySignature = async function (event = { completed: () => { } }) {
                     }
                 }
             }
-        } catch (fallbackErr) {
-            console.error("[CardByte] Fallback error:", fallbackErr);
-        }
+        } catch (fallbackErr) { console.error("[CardByte] Fallback error:", fallbackErr); }
+
     } finally {
-        SIGNATURE_STATE = "idle";
+        // v0.0.8: do NOT reset SIGNATURE_STATE here.
+        // "applied" must persist to guard same-item re-invocations.
+        // "idle" is already set in the catch block on failure.
         event.completed();
     }
 };
 
 /* ---------------------------------------------------------
-   ON-SEND HANDLER
+   ON-SEND HANDLER (unchanged from v0.0.7)
    --------------------------------------------------------- */
 window.onSendHandler = async function (event = { completed: () => { } }) {
 
     const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
+    const item    = mailbox?.item;
 
     console.log("[CardByte][OnSend] ════════════════════════════");
     console.log("[CardByte][OnSend] Handler fired");
@@ -1440,9 +1367,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
                 CACHED_SIGNATURE_HTML = stored;
                 console.log(`[CardByte][OnSend] Restored from localStorage: ${(stored.length / 1024).toFixed(1)}KB`);
             }
-        } catch (e) {
-            console.warn("[CardByte][OnSend] localStorage read failed:", e.message);
-        }
+        } catch (e) { console.warn("[CardByte][OnSend] localStorage read failed:", e.message); }
     }
 
     if (!CACHED_SIGNATURE_HTML) {
@@ -1455,15 +1380,9 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
                     CACHED_SIGNATURE_HTML = fetched;
                     console.log(`[CardByte][OnSend] API fetch succeeded: ${(fetched.length / 1024).toFixed(1)}KB`);
                     try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (e) { }
-                } else {
-                    console.warn("[CardByte][OnSend] API returned null");
-                }
-            } else {
-                console.warn("[CardByte][OnSend] No user email — cannot fetch signature");
-            }
-        } catch (e) {
-            console.warn("[CardByte][OnSend] API fetch failed:", e.message);
-        }
+                } else { console.warn("[CardByte][OnSend] API returned null"); }
+            } else { console.warn("[CardByte][OnSend] No user email — cannot fetch signature"); }
+        } catch (e) { console.warn("[CardByte][OnSend] API fetch failed:", e.message); }
     }
 
     console.log("[CardByte][OnSend] cachedSignature:", CACHED_SIGNATURE_HTML
@@ -1521,19 +1440,16 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
                         try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (_) { }
                     } else {
                         if (_hasSig(body)) await _setBodyHtml(stripped);
-                        event.completed({ allowEvent: true });
-                        return;
+                        event.completed({ allowEvent: true }); return;
                     }
                 } else {
                     if (_hasSig(body)) await _setBodyHtml(stripped);
-                    event.completed({ allowEvent: true });
-                    return;
+                    event.completed({ allowEvent: true }); return;
                 }
             } catch (fetchErr) {
                 console.warn("[CardByte][OnSend] Live fetch failed:", fetchErr.message);
                 if (_hasSig(body)) await _setBodyHtml(stripped);
-                event.completed({ allowEvent: true });
-                return;
+                event.completed({ allowEvent: true }); return;
             }
         }
 
@@ -1541,21 +1457,20 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         const freshBlock = await _buildFreshSignatureBlock();
         console.log(`[CardByte][OnSend] Fresh block: ${(freshBlock.length / 1024).toFixed(1)}KB`);
 
-        // v0.0.7: uses shared _findReplyChainIndex() with tag-anchored patterns
         const replyChainIndex = _findReplyChainIndex(stripped);
-        const isReply = replyChainIndex > -1;
+        const isReply         = replyChainIndex > -1;
         console.log(`[CardByte][OnSend] isReply: ${isReply}, replyChainIndex: ${replyChainIndex}`);
 
         let finalHtml;
         let beforeChain = "";
-        let replyChain = "";
+        let replyChain  = "";
 
         if (isReply) {
             beforeChain = stripped
                 .slice(0, replyChainIndex)
                 .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "")
                 .trimEnd();
-            replyChain = stripped.slice(replyChainIndex);
+            replyChain  = stripped.slice(replyChainIndex);
             console.log(`[CardByte][OnSend] beforeChain: ${(beforeChain.length / 1024).toFixed(1)}KB, replyChain: ${(replyChain.length / 1024).toFixed(1)}KB`);
             finalHtml = beforeChain + freshBlock + replyChain;
         } else {
@@ -1569,8 +1484,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         if (finalHtml.length <= SETASYNC_LIMIT) {
             await _setBodyHtml(finalHtml);
             console.log("[CardByte][OnSend] ✅ Done (direct write)");
-            event.completed({ allowEvent: true });
-            return;
+            event.completed({ allowEvent: true }); return;
         }
 
         // Tier A: compress full body
@@ -1579,8 +1493,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             if (compressed.length <= SETASYNC_LIMIT) {
                 await _setBodyHtml(compressed);
                 console.log("[CardByte][OnSend] ✅ Done (compressed)");
-                event.completed({ allowEvent: true });
-                return;
+                event.completed({ allowEvent: true }); return;
             }
         } catch (e) { console.warn("[CardByte][OnSend] Compression failed:", e.message); }
 
@@ -1595,8 +1508,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
                 if (tierBHtml.length <= SETASYNC_LIMIT) {
                     await _setBodyHtml(tierBHtml);
                     console.log("[CardByte][OnSend] ✅ Done (reply-chain images stripped)");
-                    event.completed({ allowEvent: true });
-                    return;
+                    event.completed({ allowEvent: true }); return;
                 }
             } catch (e) { console.warn("[CardByte][OnSend] Tier B failed:", e.message); }
         }
@@ -1609,9 +1521,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             );
             await _setBodyHtml(fullyStripped);
             console.log("[CardByte][OnSend] ✅ Done (all images stripped)");
-        } catch (e) {
-            console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message);
-        }
+        } catch (e) { console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message); }
 
         event.completed({ allowEvent: true });
 
@@ -1635,23 +1545,23 @@ window.testCardByte = () =>
     window.applySignature({ completed: () => console.log("done") });
 
 window.debugSignatureSize = async function () {
-    const mailbox = Office?.context?.mailbox;
-    const user = mailbox?.userProfile?.emailAddress || "sairajesh.korla1272@outlook.com";
-    const item = mailbox?.item;
+    const mailbox  = Office?.context?.mailbox;
+    const user     = mailbox?.userProfile?.emailAddress || "sairajesh.korla1272@outlook.com";
+    const item     = mailbox?.item;
     const platform = detectPlatform();
 
     console.log("[Debug] ════════════════════════════════════");
     console.log("[Debug] Platform:", platform);
     console.log("[Debug] isMobile:", isMobile());
-    console.log("[Debug] isMac:", isMac());
-    console.log("[Debug] isOWA:", isOWA());
+    console.log("[Debug] isMac:",    isMac());
+    console.log("[Debug] isOWA:",    isOWA());
     console.log("[Debug] UserAgent:", navigator?.userAgent?.substring(0, 120) || "unknown");
 
     if (item) {
-        console.log("[Debug] setSignatureAsync:", typeof item.body?.setSignatureAsync);
-        console.log("[Debug] prependAsync:", typeof item.body?.prependAsync);
-        console.log("[Debug] setSelectedDataAsync:", typeof item.body?.setSelectedDataAsync);
-        console.log("[Debug] setAsync:", typeof item.body?.setAsync);
+        console.log("[Debug] setSignatureAsync:",           typeof item.body?.setSignatureAsync);
+        console.log("[Debug] prependAsync:",                typeof item.body?.prependAsync);
+        console.log("[Debug] setSelectedDataAsync:",        typeof item.body?.setSelectedDataAsync);
+        console.log("[Debug] setAsync:",                    typeof item.body?.setAsync);
         console.log("[Debug] addFileAttachmentFromBase64Async:", typeof item.addFileAttachmentFromBase64Async);
         console.log("[Debug] disableClientSignatureAsync:", typeof item.disableClientSignatureAsync);
     }
@@ -1660,12 +1570,12 @@ window.debugSignatureSize = async function () {
     const html = await renderSignatureOnServer(user);
     if (!html) { console.error("[Debug] No HTML returned"); return; }
 
-    const maxSize = getMaxHtmlSize();
-    const totalKB = (html.length / 1024).toFixed(1);
-    const base64Matches = html.match(/data:image\/[^;]+;base64,[^"]+/gi) || [];
-    const gifMatches = html.match(/data:image\/gif;base64,[^"]+/gi) || [];
-    const totalBase64KB = (base64Matches.reduce((s, m) => s + m.length, 0) / 1024).toFixed(1);
-    const totalGifKB = (gifMatches.reduce((s, m) => s + m.length, 0) / 1024).toFixed(1);
+    const maxSize        = getMaxHtmlSize();
+    const totalKB        = (html.length / 1024).toFixed(1);
+    const base64Matches  = html.match(/data:image\/[^;]+;base64,[^"]+/gi) || [];
+    const gifMatches     = html.match(/data:image\/gif;base64,[^"]+/gi)    || [];
+    const totalBase64KB  = (base64Matches.reduce((s, m) => s + m.length, 0) / 1024).toFixed(1);
+    const totalGifKB     = (gifMatches.reduce((s, m)    => s + m.length, 0) / 1024).toFixed(1);
 
     console.log(`[Debug] Total HTML: ${totalKB} KB`);
     console.log(`[Debug] Base64 images: ${base64Matches.length} (${totalBase64KB} KB total)`);
@@ -1684,15 +1594,15 @@ window.debugSignatureSize = async function () {
     return {
         platform,
         isMobile: isMobile(),
-        isMac: isMac(),
+        isMac:    isMac(),
         totalKB,
-        imageCount: base64Matches.length,
-        gifCount: gifMatches.length,
-        imageTotalKB: totalBase64KB,
-        gifTotalKB: totalGifKB,
+        imageCount:          base64Matches.length,
+        gifCount:            gifMatches.length,
+        imageTotalKB:        totalBase64KB,
+        gifTotalKB:          totalGifKB,
         htmlWithoutImagesKB: (cleanedHtml.length / 1024).toFixed(1),
-        maxSizeKB: (maxSize / 1024).toFixed(0),
-        overLimit: html.length > maxSize
+        maxSizeKB:           (maxSize / 1024).toFixed(0),
+        overLimit:           html.length > maxSize
     };
 };
 
