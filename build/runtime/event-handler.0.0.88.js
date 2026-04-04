@@ -1290,7 +1290,7 @@ window.applySignature = async function (event = { completed: () => { } }) {
         await insertSignatureWithoutCursorError(item, apiResponse);
 
         // v0.0.8: mark as applied so same-item re-invocations are no-ops.
-        SIGNATURE_STATE = "applied";
+        SIGNATURE_STATE = "idle";
         console.log("[CardByte] Signature applied successfully");
         console.log("[CardByte] ════════════════════════════════════");
 
