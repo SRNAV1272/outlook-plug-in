@@ -1022,7 +1022,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
             // cleanBody already has the old sig stripped; append fresh block.
-            const updatedBody = cleanBody + signatureBlock;
+            const updatedBody = signatureBlock;
             console.log("[CardByte] Attempting full-body replace to update existing signature", cleanBody, signatureBlock)
             const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
             if (result.success) { return; }
