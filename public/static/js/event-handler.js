@@ -90,12 +90,12 @@ const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
    Config
    --------------------------------------------------------- */
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
-const AES_IV  = "3YapeNfJDung7TXxeKXn4g==";
+const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
-const MAX_SAFE_HTML_SIZE        = 500_000;
+const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
-const MOBILE_MAX_IMAGE_WIDTH    = 200;
-const MOBILE_IMAGE_QUALITY      = 0.5;
+const MOBILE_MAX_IMAGE_WIDTH = 200;
+const MOBILE_IMAGE_QUALITY = 0.5;
 
 /* ---------------------------------------------------------
    Platform Detection
@@ -103,7 +103,7 @@ const MOBILE_IMAGE_QUALITY      = 0.5;
 
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
-    const ua       = (navigator?.userAgent || "").toLowerCase();
+    const ua = (navigator?.userAgent || "").toLowerCase();
 
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
@@ -161,7 +161,7 @@ Office.onReady(() => {
 
 function base64ToArrayBuffer(base64) {
     let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
-    const padding  = base64Data.length % 4;
+    const padding = base64Data.length % 4;
     if (padding) base64Data += "=".repeat(4 - padding);
     const binaryString = atob(base64Data);
     const bytes = new Uint8Array(binaryString.length);
@@ -212,11 +212,11 @@ async function encryptEmail(email = "") {
     try {
         if (!email || email.trim() === "") { console.warn("Warning: Empty email provided"); return ""; }
         const keyBuffer = base64ToArrayBuffer(AES_KEY);
-        const ivBuffer  = base64ToArrayBuffer(AES_IV);
+        const ivBuffer = base64ToArrayBuffer(AES_IV);
         if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) { console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`); return ""; }
         if (ivBuffer.byteLength !== 16) { console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`); return ""; }
-        const key       = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
-        const data      = new TextEncoder().encode(email);
+        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
+        const data = new TextEncoder().encode(email);
         const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
         const base64Result = arrayBufferToBase64(encrypted);
         try { atob(base64Result); } catch (e) { console.error("Result is NOT valid base64:", e); }
@@ -241,17 +241,17 @@ function forceCursorToTop(item) {
 }
 
 async function renderSignatureOnServer(user) {
-    const platform  = Office.context.diagnostics.platform;
+    const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
     try {
         const encryptedMail = await encryptEmail(user);
-        const primaryRes    = await fetch(
+        const primaryRes = await fetch(
             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
         if (primaryRes.ok) {
-            const data          = await primaryRes.text();
+            const data = await primaryRes.text();
             const decryptedData = await handleAesDecrypt(data);
             console.log("Using NEW renderer");
             return JSON.parse(decryptedData)?.html || null;
@@ -318,20 +318,20 @@ function simplifyHtmlForMobile(html) {
 
 function compressBase64Image(dataUrl, maxWidth, quality) {
     if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    if (quality  === undefined) quality  = isMobile() ? MOBILE_IMAGE_QUALITY   : 0.7;
+    if (quality === undefined) quality = isMobile() ? MOBILE_IMAGE_QUALITY : 0.7;
 
     return new Promise((resolve) => {
         if (dataUrl.startsWith("data:image/gif")) { resolve(dataUrl); return; }
-        const img  = new Image();
+        const img = new Image();
         img.onload = () => {
             try {
                 const canvas = document.createElement("canvas");
-                let width    = img.width;
-                let height   = img.height;
+                let width = img.width;
+                let height = img.height;
                 if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
-                canvas.width  = width;
+                canvas.width = width;
                 canvas.height = height;
-                const ctx   = canvas.getContext("2d");
+                const ctx = canvas.getContext("2d");
                 const isPng = dataUrl.startsWith("data:image/png");
                 if (isPng) {
                     ctx.clearRect(0, 0, width, height);
@@ -350,21 +350,21 @@ function compressBase64Image(dataUrl, maxWidth, quality) {
             } catch (e) { console.warn("[CardByte] Canvas compression failed:", e); resolve(dataUrl); }
         };
         img.onerror = () => resolve(dataUrl);
-        img.src     = dataUrl;
+        img.src = dataUrl;
     });
 }
 
 function convertGifToStaticPng(dataUrl, maxWidth) {
     if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
     return new Promise((resolve) => {
-        const img  = new Image();
+        const img = new Image();
         img.onload = () => {
             try {
                 const canvas = document.createElement("canvas");
-                let width    = img.width;
-                let height   = img.height;
+                let width = img.width;
+                let height = img.height;
                 if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
-                canvas.width  = width;
+                canvas.width = width;
                 canvas.height = height;
                 const ctx = canvas.getContext("2d");
                 ctx.clearRect(0, 0, width, height);
@@ -375,12 +375,12 @@ function convertGifToStaticPng(dataUrl, maxWidth) {
             } catch (e) { console.warn("[CardByte] GIF->PNG conversion failed:", e); resolve(dataUrl); }
         };
         img.onerror = () => resolve(dataUrl);
-        img.src     = dataUrl;
+        img.src = dataUrl;
     });
 }
 
 async function compressImagesInHtml(html) {
-    const regex   = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
+    const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
     const matches = [];
     let match;
     while ((match = regex.exec(html)) !== null) {
@@ -426,12 +426,12 @@ async function compressImagesInHtml(html) {
 
 function extractBase64Images(html) {
     const images = [];
-    let index    = 0;
+    let index = 0;
     const cleanedHtml = html.replace(
         /src\s*=\s*"data:(image\/([^;]+));base64,([^"]+)"/gi,
         (_match, mimeType, extension, base64Data) => {
-            const cid      = `cardbyte_img_${index}`;
-            const safeExt  = extension.replace(/[^a-z0-9]/gi, "") || "png";
+            const cid = `cardbyte_img_${index}`;
+            const safeExt = extension.replace(/[^a-z0-9]/gi, "") || "png";
             const fileName = `${cid}.${safeExt}`;
             images.push({ cid, fileName, mimeType, base64Data });
             index++;
@@ -541,10 +541,10 @@ function detectReplyChain(html) {
 
 async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
     const platform = detectPlatform();
-    const mobile   = isMobile();
-    const mac      = isMac();
-    const owa      = platform === "owa";
-    const hasGifs  = containsGifImages(signatureHtml);
+    const mobile = isMobile();
+    const mac = isMac();
+    const owa = platform === "owa";
+    const hasGifs = containsGifImages(signatureHtml);
 
     let methods;
 
@@ -557,19 +557,19 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
         methods = [{ name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) }];
     } else if (owa && hasGifs) {
         methods = [
-            { name: "prependAsync",         fn: () => bodyPrependAsync(item, signatureHtml) },
-            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
         ];
     } else if (owa) {
         methods = [
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, signatureHtml) },
-            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, signatureHtml) },
-            { name: "prependAsync",          fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     } else {
         methods = [
-            { name: "setSignatureAsync",    fn: () => bodySetSignatureAsync(item, signatureHtml) },
-            { name: "prependAsync",         fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     }
 
@@ -592,43 +592,43 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
 
 async function tryInsertFullBody(item, fullHtml, label = "") {
     const platform = detectPlatform();
-    const mobile   = isMobile();
-    const mac      = isMac();
-    const owa      = platform === "owa";
-    const hasGifs  = containsGifImages(fullHtml);
+    const mobile = isMobile();
+    const mac = isMac();
+    const owa = platform === "owa";
+    const hasGifs = containsGifImages(fullHtml);
 
     let methods;
 
     if (mobile) {
         methods = [
-            { name: "setAsync",      fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync",  fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
         ];
     } else if (mac) {
         methods = [
-            { name: "setAsync",      fn: () => bodySetAsync(item, fullHtml) },
-            { name: "prependAsync",  fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
         ];
     } else if (owa && hasGifs) {
         methods = [
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync",         fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "setAsync",             fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
         ];
     } else if (owa && !hasGifs) {
         methods = [
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync",         fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "setAsync",             fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
         ];
     } else {
         methods = [
             { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
-            { name: "prependAsync",         fn: () => bodyPrependAsync(item, fullHtml) },
-            { name: "setSignatureAsync",     fn: () => bodySetSignatureAsync(item, fullHtml) },
-            { name: "setAsync",             fn: () => bodySetAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
         ];
     }
 
@@ -654,8 +654,8 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
    --------------------------------------------------------- */
 
 function wrapForOutlook(innerHtml) {
-    const platform       = detectPlatform();
-    const isMacPlatform  = platform === "mac";
+    const platform = detectPlatform();
+    const isMacPlatform = platform === "mac";
 
     if (isMobile()) {
         return `
@@ -699,15 +699,15 @@ function stabilizeSelection(item) {
 
 function _stripDivById(html, idPattern) {
     const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
-    const openMatch    = openTagRegex.exec(html);
+    const openMatch = openTagRegex.exec(html);
     if (!openMatch) return html;
 
     const startIndex = openMatch.index;
-    let pos   = startIndex + openMatch[0].length;
+    let pos = startIndex + openMatch[0].length;
     let depth = 1;
 
     while (pos < html.length && depth > 0) {
-        const nextOpen  = html.indexOf("<div", pos);
+        const nextOpen = html.indexOf("<div", pos);
         const nextClose = html.indexOf("</div>", pos);
         if (nextClose === -1) break;
         if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
@@ -715,6 +715,25 @@ function _stripDivById(html, idPattern) {
     }
 
     return html.slice(0, startIndex) + html.slice(pos);
+}
+
+function _stripOutlookWrappers(html) {
+    // Remove Word/Outlook-generated wrapper divs that get injected
+    // around plain body text (MsoNormal, WordSection, etc.)
+    // These cause text duplication when body is re-set via setAsync.
+    let result = html;
+
+    // Remove MsoNormal paragraph wrappers but keep their inner text
+    result = result.replace(/<p[^>]*class="?MsoNormal"?[^>]*>([\s\S]*?)<\/p>/gi, '$1<br>');
+
+    // Remove WordSection wrapper divs
+    result = result.replace(/<div[^>]*class="?WordSection[0-9]+"?[^>]*>([\s\S]*?)<\/div>/gi, '$1');
+
+    // Remove o:p tags (Outlook paragraph markers)
+    result = result.replace(/<o:p[^>]*>[\s\S]*?<\/o:p>/gi, '');
+    result = result.replace(/<\/o:p>/gi, '');
+
+    return result;
 }
 
 function _stripSig(html) {
@@ -777,7 +796,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         window.__INSERTING_SIGNATURE__ = true;
 
         const mobile = isMobile();
-        const mac    = isMac();
+        const mac = isMac();
 
         let processedHtml = signatureHtml;
         if (mobile) {
@@ -786,16 +805,16 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             processedHtml = await compressImagesInHtml(processedHtml);
         }
 
-        const wrappedHtml    = wrapForOutlook(processedHtml);
+        const wrappedHtml = wrapForOutlook(processedHtml);
         const signatureBlock = `${SIGNATURE_SPACER}<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
         console.log(`[CardByte] Built signature block (html: ${wrappedHtml})`);
-        const sizeKB   = (signatureBlock.length / 1024).toFixed(1);
+        const sizeKB = (signatureBlock.length / 1024).toFixed(1);
         const gifCount = (signatureBlock.match(/data:image\/gif;base64,/gi) || []).length;
         console.log(`[CardByte] -- Insertion start -- Size: ${sizeKB} KB, GIFs: ${gifCount}, mobile: ${mobile}, mac: ${mac}`);
         if (mobile && gifCount > 0) console.warn(`[CardByte] WARNING: ${gifCount} GIF(s) still present after mobile compression!`);
 
-        const existingBody       = await getBodyHtml(item);
-        const isReply            = detectReplyChain(existingBody);
+        const existingBody = await getBodyHtml(item);
+        const isReply = detectReplyChain(existingBody);
         const alreadyHasSignature = hasCardByteSignature(existingBody);
 
         console.log(`[CardByte] isReply: ${isReply}, alreadyHasSignature: ${alreadyHasSignature}`);
@@ -827,9 +846,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 // Mobile T2 / T3: full-body rebuild — always strip first
                 {
                     // v0.0.8: strip existing sig before splicing new one in
-                    const cleanBody  = _stripSig(existingBody);
+                    const cleanBody = _stripSig(existingBody);
                     const insertIndex = _findReplyChainIndex(cleanBody);
-                    const fullHtml   = insertIndex > -1
+                    const fullHtml = insertIndex > -1
                         ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
                         : cleanBody + signatureBlock;
 
@@ -850,11 +869,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 // Mac T1: compress + strip + full-body rebuild
                 {
                     try {
-                        const compressed  = await compressImagesInHtml(signatureBlock);
+                        const compressed = await compressImagesInHtml(signatureBlock);
                         // v0.0.8: strip before splice
-                        const cleanBody   = _stripSig(existingBody);
+                        const cleanBody = _stripSig(existingBody);
                         const insertIndex = _findReplyChainIndex(cleanBody);
-                        const fullHtml    = insertIndex > -1
+                        const fullHtml = insertIndex > -1
                             ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
                             : cleanBody + compressed;
 
@@ -868,9 +887,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 {
                     try {
                         // v0.0.8: strip before splice
-                        const cleanBody   = _stripSig(existingBody);
+                        const cleanBody = _stripSig(existingBody);
                         const insertIndex = _findReplyChainIndex(cleanBody);
-                        const fullHtml    = insertIndex > -1
+                        const fullHtml = insertIndex > -1
                             ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
                             : cleanBody + signatureBlock;
 
@@ -883,10 +902,10 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 // Mac T3: strip images — last resort
                 {
                     // v0.0.8: strip sig before splice
-                    const cleanBody   = _stripSig(existingBody);
+                    const cleanBody = _stripSig(existingBody);
                     const insertIndex = _findReplyChainIndex(cleanBody);
                     const strippedBlock = stripBase64Images(signatureBlock);
-                    const fullHtml    = insertIndex > -1
+                    const fullHtml = insertIndex > -1
                         ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
                         : cleanBody + strippedBlock;
 
@@ -909,7 +928,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             if (!alreadyHasSignature) {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
-                    const result     = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
+                    const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
             }
@@ -917,11 +936,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             // T3: full-body rebuild — always strip first (v0.0.8)
             {
                 try {
-                    const compressed  = await compressImagesInHtml(signatureBlock);
+                    const compressed = await compressImagesInHtml(signatureBlock);
                     // v0.0.8: strip any existing sig from existingBody before splice
-                    const cleanBody   = _stripSig(existingBody);
+                    const cleanBody = _stripOutlookWrappers(_stripSig(existingBody));
                     const insertIndex = _findReplyChainIndex(cleanBody);
-                    const fullHtml    = insertIndex > -1
+                    const fullHtml = insertIndex > -1
                         ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
                         : cleanBody + compressed;
 
@@ -948,13 +967,13 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         console.log("[CardByte] New compose detected");
 
         // v0.0.8: always strip first — safe even when no sig present
-        const cleanBody = _stripSig(existingBody);
+        const cleanBody = _stripOutlookWrappers(_stripSig(existingBody));
 
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
             // cleanBody already has the old sig stripped; append fresh block.
             const updatedBody = cleanBody + signatureBlock;
-            const result      = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
+            const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
             if (result.success) { return; }
             // If replace fails fall through to the tier chain below.
         }
@@ -997,7 +1016,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             try {
                 const compressed = await compressImagesInHtml(signatureBlock);
                 // v0.0.8: cleanBody instead of existingBody
-                const fullHtml   = cleanBody
+                const fullHtml = cleanBody
                     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
                     : compressed;
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
@@ -1205,7 +1224,7 @@ async function ensureNoDefaultSignature(item) {
 window.applySignature = async function (event = { completed: () => { } }) {
 
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
 
     // v0.0.8: Detect a new mail item and reset state so it gets its own run.
     const currentItemId = item?.itemId || null;
@@ -1228,10 +1247,10 @@ window.applySignature = async function (event = { completed: () => { } }) {
     }
 
     const user = mailbox?.userProfile || {
-        accountType:  "office365",
-        displayName:  "Korla Sai Rajesh",
+        accountType: "office365",
+        displayName: "Korla Sai Rajesh",
         emailAddress: "sairajesh.korla1272@outlook.com",
-        timeZone:     "India Standard Time"
+        timeZone: "India Standard Time"
     };
 
     try {
@@ -1244,23 +1263,23 @@ window.applySignature = async function (event = { completed: () => { } }) {
         SIGNATURE_STATE = "loading";
 
         const platform = detectPlatform();
-        const mobile   = isMobile();
-        const mac      = isMac();
+        const mobile = isMobile();
+        const mac = isMac();
 
         console.log("[CardByte] ════════════════════════════════════");
         console.log("[CardByte] Starting signature flow v0.0.8");
-        console.log("[CardByte] User:",        user?.emailAddress);
-        console.log("[CardByte] Platform:",    platform);
-        console.log("[CardByte] Host:",        Office?.context?.host || "unknown");
-        console.log("[CardByte] isMobile:",    mobile);
-        console.log("[CardByte] isMac:",       mac);
-        console.log("[CardByte] isOWA:",       isOWA());
-        console.log("[CardByte] ItemId:",      currentItemId || "unknown");
-        console.log("[CardByte] UserAgent:",   navigator?.userAgent?.substring(0, 120) || "unknown");
-        console.log("[CardByte] API check: setSignatureAsync =",           typeof item.body?.setSignatureAsync);
-        console.log("[CardByte] API check: prependAsync =",                typeof item.body?.prependAsync);
-        console.log("[CardByte] API check: setSelectedDataAsync =",        typeof item.body?.setSelectedDataAsync);
-        console.log("[CardByte] API check: setAsync =",                    typeof item.body?.setAsync);
+        console.log("[CardByte] User:", user?.emailAddress);
+        console.log("[CardByte] Platform:", platform);
+        console.log("[CardByte] Host:", Office?.context?.host || "unknown");
+        console.log("[CardByte] isMobile:", mobile);
+        console.log("[CardByte] isMac:", mac);
+        console.log("[CardByte] isOWA:", isOWA());
+        console.log("[CardByte] ItemId:", currentItemId || "unknown");
+        console.log("[CardByte] UserAgent:", navigator?.userAgent?.substring(0, 120) || "unknown");
+        console.log("[CardByte] API check: setSignatureAsync =", typeof item.body?.setSignatureAsync);
+        console.log("[CardByte] API check: prependAsync =", typeof item.body?.prependAsync);
+        console.log("[CardByte] API check: setSelectedDataAsync =", typeof item.body?.setSelectedDataAsync);
+        console.log("[CardByte] API check: setAsync =", typeof item.body?.setAsync);
         console.log("[CardByte] API check: addFileAttachmentFromBase64Async =", typeof item.addFileAttachmentFromBase64Async);
         console.log("[CardByte] API check: disableClientSignatureAsync =", typeof item.disableClientSignatureAsync);
 
@@ -1282,9 +1301,9 @@ window.applySignature = async function (event = { completed: () => { } }) {
             console.log("[CardByte] Signature cached to localStorage");
         } catch (e) { console.warn("[CardByte] localStorage write failed:", e.message); }
 
-        const sizeKB      = (apiResponse.length / 1024).toFixed(1);
+        const sizeKB = (apiResponse.length / 1024).toFixed(1);
         const base64Count = (apiResponse.match(/data:image\/[^;]+;base64,/gi) || []).length;
-        const gifCount    = (apiResponse.match(/data:image\/gif;base64,/gi)   || []).length;
+        const gifCount = (apiResponse.match(/data:image\/gif;base64,/gi) || []).length;
         console.log(`[CardByte] API response: ${sizeKB} KB, ${base64Count} base64 image(s), ${gifCount} GIF(s)`);
 
         await insertSignatureWithoutCursorError(item, apiResponse);
@@ -1301,7 +1320,7 @@ window.applySignature = async function (event = { completed: () => { } }) {
         console.error("[CardByte] Stack:", err.stack || "N/A");
 
         try {
-            const userProfile  = mailbox?.userProfile || {};
+            const userProfile = mailbox?.userProfile || {};
             const fallbackHtml = `
         <table cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:400px;">
           <tr>
@@ -1348,7 +1367,7 @@ window.applySignature = async function (event = { completed: () => { } }) {
 window.onSendHandler = async function (event = { completed: () => { } }) {
 
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
 
     console.log("[CardByte][OnSend] ════════════════════════════");
     console.log("[CardByte][OnSend] Handler fired");
@@ -1458,19 +1477,19 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         console.log(`[CardByte][OnSend] Fresh block: ${(freshBlock.length / 1024).toFixed(1)}KB`);
 
         const replyChainIndex = _findReplyChainIndex(stripped);
-        const isReply         = replyChainIndex > -1;
+        const isReply = replyChainIndex > -1;
         console.log(`[CardByte][OnSend] isReply: ${isReply}, replyChainIndex: ${replyChainIndex}`);
 
         let finalHtml;
         let beforeChain = "";
-        let replyChain  = "";
+        let replyChain = "";
 
         if (isReply) {
             beforeChain = stripped
                 .slice(0, replyChainIndex)
                 .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "")
                 .trimEnd();
-            replyChain  = stripped.slice(replyChainIndex);
+            replyChain = stripped.slice(replyChainIndex);
             console.log(`[CardByte][OnSend] beforeChain: ${(beforeChain.length / 1024).toFixed(1)}KB, replyChain: ${(replyChain.length / 1024).toFixed(1)}KB`);
             finalHtml = beforeChain + freshBlock + replyChain;
         } else {
@@ -1545,23 +1564,23 @@ window.testCardByte = () =>
     window.applySignature({ completed: () => console.log("done") });
 
 window.debugSignatureSize = async function () {
-    const mailbox  = Office?.context?.mailbox;
-    const user     = mailbox?.userProfile?.emailAddress || "sairajesh.korla1272@outlook.com";
-    const item     = mailbox?.item;
+    const mailbox = Office?.context?.mailbox;
+    const user = mailbox?.userProfile?.emailAddress || "sairajesh.korla1272@outlook.com";
+    const item = mailbox?.item;
     const platform = detectPlatform();
 
     console.log("[Debug] ════════════════════════════════════");
     console.log("[Debug] Platform:", platform);
     console.log("[Debug] isMobile:", isMobile());
-    console.log("[Debug] isMac:",    isMac());
-    console.log("[Debug] isOWA:",    isOWA());
+    console.log("[Debug] isMac:", isMac());
+    console.log("[Debug] isOWA:", isOWA());
     console.log("[Debug] UserAgent:", navigator?.userAgent?.substring(0, 120) || "unknown");
 
     if (item) {
-        console.log("[Debug] setSignatureAsync:",           typeof item.body?.setSignatureAsync);
-        console.log("[Debug] prependAsync:",                typeof item.body?.prependAsync);
-        console.log("[Debug] setSelectedDataAsync:",        typeof item.body?.setSelectedDataAsync);
-        console.log("[Debug] setAsync:",                    typeof item.body?.setAsync);
+        console.log("[Debug] setSignatureAsync:", typeof item.body?.setSignatureAsync);
+        console.log("[Debug] prependAsync:", typeof item.body?.prependAsync);
+        console.log("[Debug] setSelectedDataAsync:", typeof item.body?.setSelectedDataAsync);
+        console.log("[Debug] setAsync:", typeof item.body?.setAsync);
         console.log("[Debug] addFileAttachmentFromBase64Async:", typeof item.addFileAttachmentFromBase64Async);
         console.log("[Debug] disableClientSignatureAsync:", typeof item.disableClientSignatureAsync);
     }
@@ -1570,12 +1589,12 @@ window.debugSignatureSize = async function () {
     const html = await renderSignatureOnServer(user);
     if (!html) { console.error("[Debug] No HTML returned"); return; }
 
-    const maxSize        = getMaxHtmlSize();
-    const totalKB        = (html.length / 1024).toFixed(1);
-    const base64Matches  = html.match(/data:image\/[^;]+;base64,[^"]+/gi) || [];
-    const gifMatches     = html.match(/data:image\/gif;base64,[^"]+/gi)    || [];
-    const totalBase64KB  = (base64Matches.reduce((s, m) => s + m.length, 0) / 1024).toFixed(1);
-    const totalGifKB     = (gifMatches.reduce((s, m)    => s + m.length, 0) / 1024).toFixed(1);
+    const maxSize = getMaxHtmlSize();
+    const totalKB = (html.length / 1024).toFixed(1);
+    const base64Matches = html.match(/data:image\/[^;]+;base64,[^"]+/gi) || [];
+    const gifMatches = html.match(/data:image\/gif;base64,[^"]+/gi) || [];
+    const totalBase64KB = (base64Matches.reduce((s, m) => s + m.length, 0) / 1024).toFixed(1);
+    const totalGifKB = (gifMatches.reduce((s, m) => s + m.length, 0) / 1024).toFixed(1);
 
     console.log(`[Debug] Total HTML: ${totalKB} KB`);
     console.log(`[Debug] Base64 images: ${base64Matches.length} (${totalBase64KB} KB total)`);
@@ -1594,15 +1613,15 @@ window.debugSignatureSize = async function () {
     return {
         platform,
         isMobile: isMobile(),
-        isMac:    isMac(),
+        isMac: isMac(),
         totalKB,
-        imageCount:          base64Matches.length,
-        gifCount:            gifMatches.length,
-        imageTotalKB:        totalBase64KB,
-        gifTotalKB:          totalGifKB,
+        imageCount: base64Matches.length,
+        gifCount: gifMatches.length,
+        imageTotalKB: totalBase64KB,
+        gifTotalKB: totalGifKB,
         htmlWithoutImagesKB: (cleanedHtml.length / 1024).toFixed(1),
-        maxSizeKB:           (maxSize / 1024).toFixed(0),
-        overLimit:           html.length > maxSize
+        maxSizeKB: (maxSize / 1024).toFixed(0),
+        overLimit: html.length > maxSize
     };
 };
 
