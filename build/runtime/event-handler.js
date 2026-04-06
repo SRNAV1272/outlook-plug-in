@@ -923,9 +923,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                         // v0.0.8: strip before splice
                         const cleanBody = _stripSig(existingBody);
                         const insertIndex = _findReplyChainIndex(cleanBody);
-                        const fullHtml = insertIndex > -1
-                            ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
-                            : cleanBody + compressed;
+                        const fullHtml =
+                            // insertIndex > -1
+                            //     ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                            //     : cleanBody + 
+                            compressed;
 
                         console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
@@ -939,9 +941,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                         // v0.0.8: strip before splice
                         const cleanBody = _stripSig(existingBody);
                         const insertIndex = _findReplyChainIndex(cleanBody);
-                        const fullHtml = insertIndex > -1
-                            ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
-                            : cleanBody + signatureBlock;
+                        const fullHtml =
+                            // insertIndex > -1
+                            //     ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
+                            //     : cleanBody + 
+                            signatureBlock;
 
                         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
@@ -955,9 +959,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     const cleanBody = _stripSig(existingBody);
                     const insertIndex = _findReplyChainIndex(cleanBody);
                     const strippedBlock = stripBase64Images(signatureBlock);
-                    const fullHtml = insertIndex > -1
-                        ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
-                        : cleanBody + strippedBlock;
+                    const fullHtml =
+                        // insertIndex > -1
+                        //     ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
+                        //     : cleanBody + 
+                        strippedBlock;
 
                     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
                     if (result.success) { await stabilizeSelection(item); return; }
@@ -990,10 +996,10 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     // v0.0.8: strip any existing sig from existingBody before splice
                     const cleanBody = _stripSig(existingBody);
                     const insertIndex = _findReplyChainIndex(cleanBody);
-                    const fullHtml = 
-                    // insertIndex > -1
-                    //     ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
-                    //     : 
+                    const fullHtml =
+                        // insertIndex > -1
+                        //     ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                        //     : 
                         compressed;
 
                     console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`, cleanBody, "---", fullHtml);
@@ -1069,9 +1075,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             try {
                 const compressed = await compressImagesInHtml(signatureBlock);
                 // v0.0.8: cleanBody instead of existingBody
-                const fullHtml = cleanBody
-                    ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
-                    : compressed;
+                const fullHtml =
+                    // cleanBody
+                    //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
+                    //     : 
+                    compressed;
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
                 if (result.success) { return; }
             } catch (e) { console.warn("[CardByte] Compose Tier 2 compression error:", e.message); }
@@ -1083,9 +1091,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             try {
                 const { cleanedHtml, images } = extractBase64Images(signatureBlock);
                 // v0.0.8: cleanBody instead of existingBody
-                const fullHtml = cleanBody
-                    ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + cleanedHtml
-                    : cleanedHtml;
+                const fullHtml =
+                    // cleanBody
+                    //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + cleanedHtml
+                    //     : 
+                    cleanedHtml;
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T3");
                 if (result.success) {
                     let attached = 0;
