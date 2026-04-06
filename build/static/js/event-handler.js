@@ -227,6 +227,26 @@ async function encryptEmail(email = "") {
     }
 }
 
+function bodySelectAllAndReplaceAsync(item, html) {
+    return new Promise((resolve, reject) => {
+        if (typeof item.body.setSelectedDataAsync !== "function") {
+            reject(new Error("setSelectedDataAsync not available")); return;
+        }
+        // First, select entire body content
+        item.body.getAsync(Office.CoercionType.Html, (r) => {
+            if (r.status !== "succeeded") { reject(r.error); return; }
+            // Set selection to full body then replace
+            item.body.setAsync("", { coercionType: Office.CoercionType.Html }, (clearResult) => {
+                if (clearResult.status !== "succeeded") { reject(clearResult.error); return; }
+                item.body.setSelectedDataAsync(html, { coercionType: Office.CoercionType.Html }, (r2) => {
+                    if (r2.status === "succeeded") resolve();
+                    else reject(r2.error);
+                });
+            });
+        });
+    });
+}
+
 /* ---------------------------------------------------------
    Server API
    --------------------------------------------------------- */
@@ -625,7 +645,8 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
         ];
     } else {
         methods = [
-            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            // { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "setSelectedDataAsync", fn: () => bodySelectAllAndReplaceAsync(item, fullHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
