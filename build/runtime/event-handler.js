@@ -994,7 +994,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                         ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
                         : cleanBody + compressed;
 
-                    console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`);
+                    console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`, cleanBody, "---", fullHtml);
                     const result = await tryInsertFullBody(item, fullHtml, "Reply-T3");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T3:", e.message); }
