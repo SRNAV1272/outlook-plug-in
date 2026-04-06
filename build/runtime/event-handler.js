@@ -718,13 +718,43 @@ function stabilizeSelection(item) {
     });
 }
 
-function _stripDivById(html, idPattern) {
-    const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
-    const openMatch = openTagRegex.exec(html);
-    if (!openMatch) return html;
+// function _stripDivById(html, idPattern) {
+//     const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
+//     const openMatch = openTagRegex.exec(html);
+//     if (!openMatch) return html;
 
-    const startIndex = openMatch.index;
-    let pos = startIndex + openMatch[0].length;
+//     const startIndex = openMatch.index;
+//     let pos = startIndex + openMatch[0].length;
+//     let depth = 1;
+
+//     while (pos < html.length && depth > 0) {
+//         const nextOpen = html.indexOf("<div", pos);
+//         const nextClose = html.indexOf("</div>", pos);
+//         if (nextClose === -1) break;
+//         if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
+//         else { depth--; pos = nextClose + 6; }
+//     }
+
+//     return html.slice(0, startIndex) + html.slice(pos);
+// }
+function _stripDivById(html, idPattern) {
+    // Find the opening div tag that matches the id pattern
+    const tempRegex = new RegExp(`<div[^>]*id="([^"]*)"[^>]*>`, "gi");
+    let openMatch;
+    let matchedIndex = -1;
+    let matchedLength = 0;
+
+    while ((openMatch = tempRegex.exec(html)) !== null) {
+        if (idPattern.test(openMatch[1])) {
+            matchedIndex = openMatch.index;
+            matchedLength = openMatch[0].length;
+            break;
+        }
+    }
+
+    if (matchedIndex === -1) return html;
+
+    let pos = matchedIndex + matchedLength;
     let depth = 1;
 
     while (pos < html.length && depth > 0) {
@@ -735,7 +765,19 @@ function _stripDivById(html, idPattern) {
         else { depth--; pos = nextClose + 6; }
     }
 
-    return html.slice(0, startIndex) + html.slice(pos);
+    return html.slice(0, matchedIndex) + html.slice(pos);
+}
+
+function _stripSig(html) {
+    let result = html;
+    result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
+    result = result.replace(
+        /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+        ""
+    );
+    // Only trim trailing — never leading
+    result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+    return result;
 }
 
 function _stripOutlookWrappers(html) {
@@ -756,19 +798,6 @@ function _stripOutlookWrappers(html) {
 
     return result;
 }
-
-function _stripSig(html) {
-    let result = html;
-    result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
-    result = result.replace(
-        /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
-        ""
-    );
-    // Only trim trailing — never leading
-    result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
-    return result;
-}
-
 /* ---------------------------------------------------------
    Reply Chain Index Helper (v0.0.7 tag-anchored patterns)
    --------------------------------------------------------- */
@@ -959,7 +988,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
                     // v0.0.8: strip any existing sig from existingBody before splice
-                    const cleanBody = _stripOutlookWrappers(_stripSig(existingBody));
+                    const cleanBody = _stripSig(existingBody);
                     const insertIndex = _findReplyChainIndex(cleanBody);
                     const fullHtml = insertIndex > -1
                         ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
@@ -988,7 +1017,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
         console.log("[CardByte] New compose detected");
 
         // v0.0.8: always strip first — safe even when no sig present
-        const cleanBody = _stripOutlookWrappers(_stripSig(existingBody));
+        const cleanBody = _stripSig(existingBody);
 
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
