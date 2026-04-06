@@ -990,9 +990,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     // v0.0.8: strip any existing sig from existingBody before splice
                     const cleanBody = _stripSig(existingBody);
                     const insertIndex = _findReplyChainIndex(cleanBody);
-                    const fullHtml = insertIndex > -1
-                        ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
-                        : cleanBody + compressed;
+                    const fullHtml = 
+                    // insertIndex > -1
+                    //     ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                    //     : 
+                        compressed;
 
                     console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`, cleanBody, "---", fullHtml);
                     const result = await tryInsertFullBody(item, fullHtml, "Reply-T3");
