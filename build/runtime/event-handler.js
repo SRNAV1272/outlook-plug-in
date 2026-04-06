@@ -995,7 +995,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             // cleanBody already has the old sig stripped; append fresh block.
             const updatedBody = cleanBody + signatureBlock;
             // const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
-            await bodySetAsync(item, updatedBody);
+            const result = await bodySetAsync(item, updatedBody);
             if (result.success) { return; }
             // If replace fails fall through to the tier chain below.
         }
