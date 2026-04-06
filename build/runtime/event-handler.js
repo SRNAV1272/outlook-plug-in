@@ -899,8 +899,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                             : cleanBody + compressed;
 
                         console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
-                        const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
-                        if (result.success) { await stabilizeSelection(item); return; }
+                        const result = await bodySetAsync(item, fullHtml, "MacReply-T1");
+                        if (result?.success) { await stabilizeSelection(item); return; }
                     } catch (e) { console.warn("[CardByte] Mac Reply T1:", e.message); }
                 }
 
@@ -915,8 +915,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                             : cleanBody + signatureBlock;
 
                         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
-                        const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
-                        if (result.success) { await stabilizeSelection(item); return; }
+                        const result = await bodySetAsync(item, fullHtml, "MacReply-T2");
+                        if (result?.success) { await stabilizeSelection(item); return; }
                     } catch (e) { console.warn("[CardByte] Mac Reply T2:", e.message); }
                 }
 
@@ -930,8 +930,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                         ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
                         : cleanBody + strippedBlock;
 
-                    const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
-                    if (result.success) { await stabilizeSelection(item); return; }
+                    const result = await bodySetAsync(item, fullHtml, "MacReply-T3");
+                    if (result?.success) { await stabilizeSelection(item); return; }
                 }
 
                 throw new Error("All Mac reply insertion tiers failed");
@@ -950,7 +950,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
                     const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
-                    if (result.success) { await stabilizeSelection(item); return; }
+                    if (result?.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
             }
 
@@ -966,7 +966,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                         : cleanBody + compressed;
 
                     console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`);
-                    const result = await tryInsertFullBody(item, fullHtml, "Reply-T3");
+                    const result = await bodySetAsync(item, fullHtml, "Reply-T3");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T3:", e.message); }
             }
@@ -1043,8 +1043,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 const fullHtml = cleanBody
                     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
                     : compressed;
-                const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
-                if (result.success) { return; }
+                const result = await bodySetAsync(item, fullHtml, "Compose-T2");
+                if (result?.success) { return; }
+                else return;
             } catch (e) { console.warn("[CardByte] Compose Tier 2 compression error:", e.message); }
         }
 
@@ -1057,8 +1058,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                 const fullHtml = cleanBody
                     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + cleanedHtml
                     : cleanedHtml;
-                const result = await tryInsertFullBody(item, fullHtml, "Compose-T3");
-                if (result.success) {
+                const result = await bodySetAsync(item, fullHtml, "Compose-T3");
+                if (result?.success) {
                     let attached = 0;
                     for (const img of images) {
                         try { await addInlineImageAttachment(item, img); attached++; }
@@ -1078,8 +1079,8 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             const fullHtml = cleanBody
                 ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
                 : stripped;
-            const result = await tryInsertFullBody(item, fullHtml, "Compose-T4");
-            if (result.success) { return; }
+            const result = await bodySetAsync(item, fullHtml, "Compose-T4");
+            if (result?.success) { return; }
         }
 
         throw new Error("All compose insertion tiers failed");
