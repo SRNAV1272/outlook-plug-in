@@ -1434,7 +1434,12 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
 
     async function _buildFreshSignatureBlock() {
         let processedHtml = CACHED_SIGNATURE_HTML;
-        processedHtml = await compressImagesInHtml(processedHtml);
+        try {
+            processedHtml = await compressImagesInHtml(processedHtml);
+        } catch (e) {
+            console.warn("[CardByte][OnSend] Image compression skipped:", e.message);
+            // proceed with uncompressed — better than blocking send
+        }
         if (isMobile()) processedHtml = simplifyHtmlForMobile(processedHtml);
         const wrappedHtml = wrapForOutlook(processedHtml);
         return `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
