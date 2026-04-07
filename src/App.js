@@ -7,10 +7,10 @@ import SignatureView from "./components/SignatureView";
 // ─────────────────────────────────────────────────────────────────────────────
 // SIZE LIMITS
 // ─────────────────────────────────────────────────────────────────────────────
-const MAX_SAFE_HTML_SIZE        = 500_000;   // ~500 KB — desktop / OWA
+const MAX_SAFE_HTML_SIZE = 500_000;   // ~500 KB — desktop / OWA
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;   // ~200 KB — iOS / Android
-const MOBILE_MAX_IMAGE_WIDTH    = 200;       // px — shrink images on mobile
-const MOBILE_IMAGE_QUALITY      = 0.5;       // JPEG quality on mobile
+const MOBILE_MAX_IMAGE_WIDTH = 200;       // px — shrink images on mobile
+const MOBILE_IMAGE_QUALITY = 0.5;       // JPEG quality on mobile
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PLATFORM DETECTION
@@ -19,7 +19,7 @@ const MOBILE_IMAGE_QUALITY      = 0.5;       // JPEG quality on mobile
 export function detectPlatform() {
   try {
     const platform = (Office?.context?.platform || "").toLowerCase();
-    const ua       = (navigator?.userAgent   || "").toLowerCase();
+    const ua = (navigator?.userAgent || "").toLowerCase();
 
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
@@ -84,12 +84,12 @@ function isAutoApplyContext() {
 function stripDivById(html, idPattern) {
   const tempRegex = new RegExp(`<div[^>]*id="([^"]*)"[^>]*>`, "gi");
   let openMatch;
-  let matchedIndex  = -1;
+  let matchedIndex = -1;
   let matchedLength = 0;
 
   while ((openMatch = tempRegex.exec(html)) !== null) {
     if (idPattern.test(openMatch[1])) {
-      matchedIndex  = openMatch.index;
+      matchedIndex = openMatch.index;
       matchedLength = openMatch[0].length;
       break;
     }
@@ -97,15 +97,15 @@ function stripDivById(html, idPattern) {
 
   if (matchedIndex === -1) return html;
 
-  let pos   = matchedIndex + matchedLength;
+  let pos = matchedIndex + matchedLength;
   let depth = 1;
 
   while (pos < html.length && depth > 0) {
-    const nextOpen  = html.indexOf("<div",  pos);
+    const nextOpen = html.indexOf("<div", pos);
     const nextClose = html.indexOf("</div>", pos);
     if (nextClose === -1) break;
-    if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen  + 4; }
-    else                                         { depth--; pos = nextClose + 6; }
+    if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
+    else { depth--; pos = nextClose + 6; }
   }
 
   return html.slice(0, matchedIndex) + html.slice(pos);
@@ -203,14 +203,14 @@ function wrapForOutlook(innerHtml) {
 // APP
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App({ user }) {
-  const [mode,    setMode]    = useState("init");
+  const [mode, setMode] = useState("init");
   const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState("");
+  const [error, setError] = useState("");
 
   const autoApply = isAutoApplyContext();
-  const mobile    = isMobilePlatform();
-  const mac       = isMacPlatform();
-  const platform  = detectPlatform();
+  const mobile = isMobilePlatform();
+  const mac = isMacPlatform();
+  const platform = detectPlatform();
 
   const init = useCallback(async () => {
     setLoading(true);
@@ -218,7 +218,7 @@ export default function App({ user }) {
     const cached = getToken();
     if (cached) { await loadSignature(); return; }
     try {
-      const token   = await getOfficeToken();
+      const token = await getOfficeToken();
       const payload = decodeJwt(token);
       setToken(token, payload.exp, "aad");
       await loadSignature();
@@ -317,7 +317,7 @@ export default function App({ user }) {
       /id="x?_?cardbyte-signature-block"/i.test(html);
   }
 
-  function containsGifImages(html)  { return /data:image\/gif;base64,/i.test(html); }
+  function containsGifImages(html) { return /data:image\/gif;base64,/i.test(html); }
 
   function detectReplyChain(html) {
     return [
@@ -464,7 +464,7 @@ export default function App({ user }) {
   }
 
   async function compressImagesInHtml(html) {
-    const regex   = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
+    const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
     const matches = []; let m;
     while ((m = regex.exec(html)) !== null) matches.push({ dataUrl: m[1] });
     if (!matches.length) return html;
@@ -547,21 +547,21 @@ export default function App({ user }) {
 
     } else if (isOWAPlatform() && containsGifImages(html)) {
       methods = [
-        { name: "prependAsync",      fn: () => bodyPrependAsync(item, html)      },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
       ];
 
     } else if (isOWAPlatform()) {
       methods = [
         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
-        { name: "setSignatureAsync",    fn: () => bodySetSignatureAsync(item, html)    },
-        { name: "prependAsync",         fn: () => bodyPrependAsync(item, html)         },
+        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
       ];
 
     } else {
       methods = [
         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
-        { name: "prependAsync",      fn: () => bodyPrependAsync(item, html)      },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
       ];
     }
 
@@ -594,30 +594,30 @@ export default function App({ user }) {
 
     if (mobile) {
       methods = [
-        { name: "setAsync",      fn: () => bodySetAsync(item, html)      },
-        { name: "prependAsync",  fn: () => bodyPrependAsync(item, html)  },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
       ];
 
     } else if (mac) {
       methods = [
-        { name: "setAsync",      fn: () => bodySetAsync(item, html)      },
-        { name: "prependAsync",  fn: () => bodyPrependAsync(item, html)  },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
       ];
 
     } else if (isOWAPlatform()) {
       methods = [
-        { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html)     },
-        { name: "prependAsync",         fn: () => bodyPrependAsync(item, html)             },
-        { name: "setSignatureAsync",    fn: () => bodySetSignatureAsync(item, html)        },
-        { name: "setAsync",             fn: () => bodySetAsync(item, html)                 },
+        { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
+        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
       ];
 
     } else {
       methods = [
         { name: "setSelectedDataAsync", fn: () => bodySelectAllAndReplaceAsync(item, html) },
-        { name: "prependAsync",         fn: () => bodyPrependAsync(item, html)             },
-        { name: "setSignatureAsync",    fn: () => bodySetSignatureAsync(item, html)        },
-        { name: "setAsync",             fn: () => bodySetAsync(item, html)                 },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
+        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
       ];
     }
 
@@ -670,9 +670,9 @@ export default function App({ user }) {
         processed = await compressImagesInHtml(processed);
       }
 
-      const wrapped        = wrapForOutlook(processed);
+      const wrapped = wrapForOutlook(processed);
       const signatureBlock = `<!-- CARD_BYTE_SIGNATURE_START -->${wrapped}<!-- CARD_BYTE_SIGNATURE_END -->`;
-      const isReply        = detectReplyChain(existingBody);
+      const isReply = detectReplyChain(existingBody);
 
       console.log(`[CardByte] isReply: ${isReply}, platform: ${platform}, size: ${(signatureBlock.length / 1024).toFixed(1)}KB`);
 
@@ -691,7 +691,7 @@ export default function App({ user }) {
           }
           // T2: full-body rebuild — always strip first
           const insertIndex = findReplyChainIndex(cleanBody);
-          const fullHtml    = insertIndex > -1
+          const fullHtml = insertIndex > -1
             ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
             : cleanBody + signatureBlock;
           let r = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
@@ -702,24 +702,66 @@ export default function App({ user }) {
         }
 
         // ── MAC REPLY ──
+        // if (mac) {
+        //   console.log("[CardByte] Mac reply: full-body rebuild (setSignatureAsync bypassed)");
+        //   // Mac T1: compressed signature-only
+        //   try {
+        //     const compressed = await compressImagesInHtml(signatureBlock);
+        //     const r = await tryInsertFullBody(item, compressed, "MacReply-T1");
+        //     if (r.success) { await stabilizeSelection(item); return; }
+        //   } catch (e) { console.warn("[CardByte] MacReply-T1:", e.message); }
+        //   // Mac T2: uncompressed
+        //   {
+        //     const r = await tryInsertFullBody(item, signatureBlock, "MacReply-T2");
+        //     if (r.success) { await stabilizeSelection(item); return; }
+        //   }
+        //   // Mac T3: strip images — last resort
+        //   {
+        //     const r = await tryInsertFullBody(item, stripBase64Images(signatureBlock), "MacReply-T3");
+        //     if (r.success) { await stabilizeSelection(item); return; }
+        //   }
+        //   throw new Error("All Mac reply insertion tiers failed");
+        // }
+        // ── MAC REPLY ──
         if (mac) {
-          console.log("[CardByte] Mac reply: full-body rebuild (setSignatureAsync bypassed)");
-          // Mac T1: compressed signature-only
+          console.log("[CardByte] Mac reply: trying signature insertion without breaking reply chain");
+
+          // T1: Use signature-only insertion first (preserves reply chain)
+          for (const v of variants) {
+            const r = await tryInsertSignatureOnly(item, v.html, `MacReply-T1-${v.label}`);
+            if (r.success) {
+              await stabilizeSelection(item);
+              return;
+            }
+          }
+
+          // T2: If signature-only fails, try compressed version
           try {
             const compressed = await compressImagesInHtml(signatureBlock);
-            const r = await tryInsertFullBody(item, compressed, "MacReply-T1");
+            const r = await tryInsertSignatureOnly(item, compressed, "MacReply-T2");
+            if (r.success) {
+              await stabilizeSelection(item);
+              return;
+            }
+          } catch (e) { console.warn("[CardByte] MacReply-T2:", e.message); }
+
+          // T3: Last resort - strip images and try signature-only
+          try {
+            const r = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacReply-T3");
+            if (r.success) {
+              await stabilizeSelection(item);
+              return;
+            }
+          } catch (e) { console.warn("[CardByte] MacReply-T3:", e.message); }
+
+          // T4: If all signature-only methods fail, fall back to full-body
+          console.log("[CardByte] Mac reply: falling back to full-body rebuild");
+          try {
+            const compressed = await compressImagesInHtml(signatureBlock);
+            const r = await tryInsertFullBody(item, compressed, "MacReply-T4");
             if (r.success) { await stabilizeSelection(item); return; }
-          } catch (e) { console.warn("[CardByte] MacReply-T1:", e.message); }
-          // Mac T2: uncompressed
-          {
-            const r = await tryInsertFullBody(item, signatureBlock, "MacReply-T2");
-            if (r.success) { await stabilizeSelection(item); return; }
-          }
-          // Mac T3: strip images — last resort
-          {
-            const r = await tryInsertFullBody(item, stripBase64Images(signatureBlock), "MacReply-T3");
-            if (r.success) { await stabilizeSelection(item); return; }
-          }
+          } catch (e) { console.warn("[CardByte] MacReply-T4:", e.message); }
+
           throw new Error("All Mac reply insertion tiers failed");
         }
 
@@ -735,9 +777,9 @@ export default function App({ user }) {
         }
         // T2: full-body rebuild
         try {
-          const compressed  = await compressImagesInHtml(signatureBlock);
+          const compressed = await compressImagesInHtml(signatureBlock);
           const insertIndex = findReplyChainIndex(cleanBody);
-          const fullHtml    = insertIndex > -1
+          const fullHtml = insertIndex > -1
             ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
             : cleanBody + compressed;
           const r = await tryInsertFullBody(item, fullHtml, "Reply-T2");
@@ -818,8 +860,8 @@ export default function App({ user }) {
       } catch (e) { console.warn("[CardByte] Compose-T3:", e.message); }
       // T4: strip images — last resort
       {
-        const stripped  = stripBase64Images(signatureBlock);
-        const fullHtml  = cleanBody
+        const stripped = stripBase64Images(signatureBlock);
+        const fullHtml = cleanBody
           ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
           : stripped;
         const r = await tryInsertFullBody(item, fullHtml, "Compose-T4");
@@ -860,14 +902,14 @@ export default function App({ user }) {
     const variants = [];
 
     if (signatureBlock.length <= maxSize)
-      variants.push({ label: "Original",   html: signatureBlock, images: null });
+      variants.push({ label: "Original", html: signatureBlock, images: null });
     try {
       const c = await compressImagesInHtml(signatureBlock);
       if (c.length <= maxSize) variants.push({ label: "Compressed", html: c, images: null });
     } catch { /* non-fatal */ }
     try {
       const { cleanedHtml, images } = extractBase64Images(signatureBlock);
-      if (images.length) variants.push({ label: "CID",        html: cleanedHtml, images });
+      if (images.length) variants.push({ label: "CID", html: cleanedHtml, images });
     } catch { /* non-fatal */ }
 
     variants.push({ label: "Stripped", html: stripBase64Images(signatureBlock), images: null });
