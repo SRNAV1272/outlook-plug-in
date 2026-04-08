@@ -973,18 +973,34 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             // }
             // ── MAC REPLY PATH ────────────────────────────
             if (mac) {
-                console.log("[CardByte] Mac reply: using signature insertion without breaking reply chain");
+                console.log("[CardByte] Mac reply: trying signature insertion without breaking reply chain");
 
-                // Mac T1: try signature-only insertion first (preserves reply chain)
+                // Build variants upfront (mirrors App.jsx buildSignatureVariants)
+                const macVariants = [];
+                const maxSize = getMaxHtmlSize();
+
+                if (signatureBlock.length <= maxSize)
+                    macVariants.push({ label: "Original", html: signatureBlock });
+                try {
+                    const c = await compressImagesInHtml(signatureBlock);
+                    if (c.length <= maxSize) macVariants.push({ label: "Compressed", html: c });
+                } catch { /* non-fatal */ }
+                macVariants.push({ label: "Stripped", html: stripBase64Images(signatureBlock) });
+
+                console.log(`[CardByte] MacReply variants: ${macVariants.map(v => `${v.label}(${(v.html.length / 1024).toFixed(1)}KB)`).join(", ")}`);
+
+                // T1: signature-only across all variants (preserves reply chain entirely)
                 if (!alreadyHasSignature) {
-                    const result = await tryInsertSignatureOnly(item, signatureBlock, "MacReply-T1");
-                    if (result.success) {
-                        await stabilizeSelection(item);
-                        return;
+                    for (const v of macVariants) {
+                        const result = await tryInsertSignatureOnly(item, v.html, `MacReply-T1-${v.label}`);
+                        if (result.success) {
+                            await stabilizeSelection(item);
+                            return;
+                        }
                     }
                 }
 
-                // Mac T2: try compressed version with signature-only
+                // T2: compressed signature-only (explicit — covers case where variants build failed)
                 if (!alreadyHasSignature) {
                     try {
                         const compressed = await compressImagesInHtml(signatureBlock);
@@ -996,10 +1012,14 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     } catch (e) { console.warn("[CardByte] MacReply-T2:", e.message); }
                 }
 
-                // Mac T3: try stripped images version with signature-only
+                // T3: stripped images signature-only
                 if (!alreadyHasSignature) {
                     try {
-                        const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacReply-T3");
+                        const result = await tryInsertSignatureOnly(
+                            item,
+                            stripBase64Images(signatureBlock),
+                            "MacReply-T3"
+                        );
                         if (result.success) {
                             await stabilizeSelection(item);
                             return;
@@ -1007,18 +1027,41 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
                     } catch (e) { console.warn("[CardByte] MacReply-T3:", e.message); }
                 }
 
-                // Mac T4: last resort - full-body rebuild (may break reply chain)
-                console.log("[CardByte] Mac reply: falling back to full-body rebuild");
+                // T4: full-body rebuild — MUST preserve reply chain
+                console.log("[CardByte] Mac reply: falling back to full-body rebuild (preserving reply chain)");
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
+                    // Always strip old sig first, then splice new sig BEFORE reply chain
                     const cleanBody = _stripSig(existingBody);
-                    const fullHtml = compressed;
+                    const insertIndex = _findReplyChainIndex(cleanBody);
+                    const fullHtml = insertIndex > -1
+                        ? cleanBody.slice(0, insertIndex).replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd()
+                        + compressed
+                        + cleanBody.slice(insertIndex)
+                        : cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd()
+                        + compressed;
+
+                    console.log(`[CardByte] MacReply-T4: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
                     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T4");
-                    if (result.success) {
-                        await stabilizeSelection(item);
-                        return;
-                    }
+                    if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] MacReply-T4:", e.message); }
+
+                // T5: strip images from signature + full-body rebuild with reply chain
+                try {
+                    const cleanBody = _stripSig(existingBody);
+                    const insertIndex = _findReplyChainIndex(cleanBody);
+                    const strippedBlock = stripBase64Images(signatureBlock);
+                    const fullHtml = insertIndex > -1
+                        ? cleanBody.slice(0, insertIndex).replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd()
+                        + strippedBlock
+                        + cleanBody.slice(insertIndex)
+                        : cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd()
+                        + strippedBlock;
+
+                    console.log(`[CardByte] MacReply-T5: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
+                    const result = await tryInsertFullBody(item, fullHtml, "MacReply-T5");
+                    if (result.success) { await stabilizeSelection(item); return; }
+                } catch (e) { console.warn("[CardByte] MacReply-T5:", e.message); }
 
                 throw new Error("All Mac reply insertion tiers failed");
             }
