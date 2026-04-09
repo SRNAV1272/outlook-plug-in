@@ -138,13 +138,15 @@ export default function SignatureView({
     async function renderSignatureOnServer(userEmail) {
         try {
             const encryptedMail = await encryptEmail(userEmail);
+            const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
             const primaryRes = await fetch(
                 "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
                 {
                     method: "GET",
                     headers: {
                         'Content-Type': 'application/json',
-                        username: encryptedMail
+                        username: encryptedMail,
+                        "X-Platform": xPlatform
                     }
                 }
             )
