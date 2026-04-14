@@ -626,7 +626,7 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
         ];
     } else if (mac) {
         methods = [
-            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsyncMac(item, fullHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
         ];
     } else if (owa && hasGifs) {
@@ -840,6 +840,15 @@ function _findReplyChainIndex(html) {
        causing duplication.
    --------------------------------------------------------- */
 
+function bodySetAsyncMac(item, html) {
+    return new Promise((resolve, reject) => {
+        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+            if (r.status !== "succeeded") { reject(r.error); return; }
+            resolve(); // No prependAsync — avoids cursor loss on Mac
+        });
+    });
+}
+
 async function insertSignatureWithoutCursorError(item, signatureHtml) {
     try {
         if (window.__INSERTING_SIGNATURE__) return;
@@ -916,57 +925,101 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             if (mac) {
                 console.log("[CardByte] Mac reply: using full-body rebuild (setSignatureAsync bypassed)");
 
-                // Mac T1: compress + strip + full-body rebuild
+                // // Mac T1: compress + strip + full-body rebuild
+                // {
+                //     try {
+                //         const compressed = await compressImagesInHtml(signatureBlock);
+                //         // v0.0.8: strip before splice
+                //         const cleanBody = _stripSig(existingBody);
+                //         const insertIndex = _findReplyChainIndex(cleanBody);
+                //         const fullHtml =
+                //             // insertIndex > -1
+                //             //     ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                //             //     : cleanBody + 
+                //             compressed;
+
+                //         console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
+                //         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
+                //         if (result.success) { await stabilizeSelection(item); return; }
+                //     } catch (e) { console.warn("[CardByte] Mac Reply T1:", e.message); }
+                // }
+
+                // // Mac T2: uncompressed + strip + full-body
+                // {
+                //     try {
+                //         // v0.0.8: strip before splice
+                //         const cleanBody = _stripSig(existingBody);
+                //         const insertIndex = _findReplyChainIndex(cleanBody);
+                //         const fullHtml =
+                //             // insertIndex > -1
+                //             //     ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
+                //             //     : cleanBody + 
+                //             signatureBlock;
+
+                //         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
+                //         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
+                //         if (result.success) { await stabilizeSelection(item); return; }
+                //     } catch (e) { console.warn("[CardByte] Mac Reply T2:", e.message); }
+                // }
+
+                // // Mac T3: strip images — last resort
+                // {
+                //     // v0.0.8: strip sig before splice
+                //     const cleanBody = _stripSig(existingBody);
+                //     const insertIndex = _findReplyChainIndex(cleanBody);
+                //     const strippedBlock = stripBase64Images(signatureBlock);
+                //     const fullHtml =
+                //         // insertIndex > -1
+                //         //     ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
+                //         //     : cleanBody + 
+                //         strippedBlock;
+
+                //     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
+                //     if (result.success) { await stabilizeSelection(item); return; }
+                // }
+
+                // Mac Reply T1
                 {
                     try {
                         const compressed = await compressImagesInHtml(signatureBlock);
-                        // v0.0.8: strip before splice
                         const cleanBody = _stripSig(existingBody);
                         const insertIndex = _findReplyChainIndex(cleanBody);
-                        const fullHtml =
-                            // insertIndex > -1
-                            //     ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
-                            //     : cleanBody + 
-                            compressed;
+                        const fullHtml = insertIndex > -1
+                            ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                            : compressed + cleanBody;  // sig before body if no chain found
 
                         console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
-                        if (result.success) { await stabilizeSelection(item); return; }
+                        if (result.success) { return; }  // No stabilizeSelection on Mac
                     } catch (e) { console.warn("[CardByte] Mac Reply T1:", e.message); }
                 }
 
-                // Mac T2: uncompressed + strip + full-body
+                // Mac Reply T2
                 {
                     try {
-                        // v0.0.8: strip before splice
                         const cleanBody = _stripSig(existingBody);
                         const insertIndex = _findReplyChainIndex(cleanBody);
-                        const fullHtml =
-                            // insertIndex > -1
-                            //     ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
-                            //     : cleanBody + 
-                            signatureBlock;
+                        const fullHtml = insertIndex > -1
+                            ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
+                            : signatureBlock + cleanBody;
 
                         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
-                        if (result.success) { await stabilizeSelection(item); return; }
+                        if (result.success) { return; }
                     } catch (e) { console.warn("[CardByte] Mac Reply T2:", e.message); }
                 }
 
-                // Mac T3: strip images — last resort
+                // Mac Reply T3
                 {
-                    // v0.0.8: strip sig before splice
                     const cleanBody = _stripSig(existingBody);
                     const insertIndex = _findReplyChainIndex(cleanBody);
                     const strippedBlock = stripBase64Images(signatureBlock);
-                    const fullHtml =
-                        // insertIndex > -1
-                        //     ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
-                        //     : cleanBody + 
-                        strippedBlock;
+                    const fullHtml = insertIndex > -1
+                        ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
+                        : strippedBlock + cleanBody;
 
                     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
-                    if (result.success) { await stabilizeSelection(item); return; }
+                    if (result.success) { return; }
                 }
 
                 throw new Error("All Mac reply insertion tiers failed");
