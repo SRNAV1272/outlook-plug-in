@@ -1127,10 +1127,10 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T3");
                 if (result.success) {
                     let attached = 0;
-                    for (const img of images) {
-                        try { await addInlineImageAttachment(item, img); attached++; }
-                        catch (e) { console.warn(`[CardByte] Image attach failed: ${img.cid}`); }
-                    }
+                    // for (const img of images) {
+                    //     try { await addInlineImageAttachment(item, img); attached++; }
+                    //     catch (e) { console.warn(`[CardByte] Image attach failed: ${img.cid}`); }
+                    // }
                     console.log(`[CardByte] Attached ${attached}/${images.length} images`);
                     return;
                 }
@@ -1311,146 +1311,6 @@ async function ensureNoDefaultSignature(item) {
         only the catch block resets it to "idle" so a retry
         is still possible after a failure.
    --------------------------------------------------------- */
-
-// window.applySignature = async function (event = { completed: () => { } }) {
-
-//     const mailbox = Office?.context?.mailbox;
-//     const item = mailbox?.item;
-
-//     // v0.0.8: Detect a new mail item and reset state so it gets its own run.
-//     const currentItemId = item?.itemId || null;
-//     if (currentItemId && window.__LAST_ITEM_ID__ && window.__LAST_ITEM_ID__ !== currentItemId) {
-//         console.log(`[CardByte] New item detected (${currentItemId}) — resetting SIGNATURE_STATE`);
-//         SIGNATURE_STATE = "idle";
-//     }
-//     if (currentItemId) window.__LAST_ITEM_ID__ = currentItemId;
-
-//     if (SIGNATURE_STATE === "loading") {
-//         console.log("[CardByte] Already loading — skipping");
-//         event.completed();
-//         return;
-//     }
-//     // v0.0.8: "applied" guard now actually fires because we set it below.
-//     if (SIGNATURE_STATE === "applied") {
-//         console.log("[CardByte] Already applied for this item — skipping");
-//         event.completed();
-//         return;
-//     }
-
-//     const user = mailbox?.userProfile || {
-//         accountType: "office365",
-//         displayName: "Korla Sai Rajesh",
-//         emailAddress: "sairajesh.korla1272@outlook.com",
-//         timeZone: "India Standard Time"
-//     };
-
-//     try {
-//         if (!item) {
-//             console.warn("[CardByte] No mail item found");
-//             event.completed();
-//             return;
-//         }
-
-//         SIGNATURE_STATE = "loading";
-
-//         const platform = detectPlatform();
-//         const mobile = isMobile();
-//         const mac = isMac();
-
-//         console.log("[CardByte] ════════════════════════════════════");
-//         console.log("[CardByte] Starting signature flow v0.0.8");
-//         console.log("[CardByte] User:", user?.emailAddress);
-//         console.log("[CardByte] Platform:", platform);
-//         console.log("[CardByte] Host:", Office?.context?.host || "unknown");
-//         console.log("[CardByte] isMobile:", mobile);
-//         console.log("[CardByte] isMac:", mac);
-//         console.log("[CardByte] isOWA:", isOWA());
-//         console.log("[CardByte] ItemId:", currentItemId || "unknown");
-//         console.log("[CardByte] UserAgent:", navigator?.userAgent?.substring(0, 120) || "unknown");
-//         console.log("[CardByte] API check: setSignatureAsync =", typeof item.body?.setSignatureAsync);
-//         console.log("[CardByte] API check: prependAsync =", typeof item.body?.prependAsync);
-//         console.log("[CardByte] API check: setSelectedDataAsync =", typeof item.body?.setSelectedDataAsync);
-//         console.log("[CardByte] API check: setAsync =", typeof item.body?.setAsync);
-//         console.log("[CardByte] API check: addFileAttachmentFromBase64Async =", typeof item.addFileAttachmentFromBase64Async);
-//         console.log("[CardByte] API check: disableClientSignatureAsync =", typeof item.disableClientSignatureAsync);
-
-//         if (mobile) {
-//             console.log("[CardByte] Mobile: waiting for item readiness...");
-//             const ready = await waitForItemReady(item);
-//             if (!ready) throw new Error("Mail item not ready on mobile after retries");
-//         }
-
-//         const removedDefault = await ensureNoDefaultSignature(item);
-//         if (removedDefault) console.log("[CardByte] Default signature was removed before applying CardByte");
-
-//         const apiResponse = await renderSignatureOnServer(user?.emailAddress);
-//         if (!apiResponse) throw new Error("API returned empty or null response");
-
-//         CACHED_SIGNATURE_HTML = apiResponse;
-//         try {
-//             localStorage.setItem("cardbyte_cached_signature", apiResponse);
-//             console.log("[CardByte] Signature cached to localStorage");
-//         } catch (e) { console.warn("[CardByte] localStorage write failed:", e.message); }
-
-//         const sizeKB = (apiResponse.length / 1024).toFixed(1);
-//         const base64Count = (apiResponse.match(/data:image\/[^;]+;base64,/gi) || []).length;
-//         const gifCount = (apiResponse.match(/data:image\/gif;base64,/gi) || []).length;
-//         console.log(`[CardByte] API response: ${sizeKB} KB, ${base64Count} base64 image(s), ${gifCount} GIF(s)`);
-
-//         await insertSignatureWithoutCursorError(item, apiResponse);
-
-//         // v0.0.8: mark as applied so same-item re-invocations are no-ops.
-//         SIGNATURE_STATE = "applied";
-//         console.log("[CardByte] Signature applied successfully");
-//         console.log("[CardByte] ════════════════════════════════════");
-
-//     } catch (err) {
-//         // v0.0.8: reset to idle on error so a retry is possible.
-//         SIGNATURE_STATE = "idle";
-//         console.error("[CardByte] applySignature failed:", err.message || err);
-//         console.error("[CardByte] Stack:", err.stack || "N/A");
-
-//         try {
-//             const userProfile = mailbox?.userProfile || {};
-//             const fallbackHtml = `
-//         <table cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:400px;">
-//           <tr>
-//             <td style="font-family:Arial,sans-serif;font-size:${isMobile() ? '14' : '12'}px;">
-//               <strong>${userProfile.displayName || ""}</strong><br/>
-//               ${userProfile.emailAddress || ""}<br/>
-//               <span style="color:#999;">Sent via CardByte</span>
-//             </td>
-//           </tr>
-//         </table>`.trim();
-
-//             const fallbackItem = mailbox?.item;
-//             if (fallbackItem) {
-//                 if (isMobile()) {
-//                     const fbResult = await tryInsertFullBody(fallbackItem, fallbackHtml, "Fallback-Mobile");
-//                     console.log(fbResult.success
-//                         ? `[CardByte] Mobile fallback applied via ${fbResult.method}`
-//                         : "[CardByte] Mobile fallback also failed entirely");
-//                 } else {
-//                     const fbResult = await tryInsertSignatureOnly(fallbackItem, fallbackHtml, "Fallback");
-//                     if (fbResult.success) {
-//                         console.log("[CardByte] Fallback applied via", fbResult.method);
-//                     } else {
-//                         const fbResult2 = await tryInsertFullBody(fallbackItem, fallbackHtml, "Fallback-Full");
-//                         console.log(fbResult2.success
-//                             ? `[CardByte] Fallback applied via ${fbResult2.method}`
-//                             : "[CardByte] Fallback also failed entirely");
-//                     }
-//                 }
-//             }
-//         } catch (fallbackErr) { console.error("[CardByte] Fallback error:", fallbackErr); }
-
-//     } finally {
-//         // v0.0.8: do NOT reset SIGNATURE_STATE here.
-//         // "applied" must persist to guard same-item re-invocations.
-//         // "idle" is already set in the catch block on failure.
-//         event.completed();
-//     }
-// };
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
     // options.forceApply = true when called from taskpane button click
