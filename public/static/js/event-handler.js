@@ -574,7 +574,10 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
             methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) });
         }
     } else if (mac) {
-        methods = [{ name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) }];
+        methods = [
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+        ];
     } else if (owa && hasGifs) {
         methods = [
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
@@ -849,7 +852,8 @@ function bodySetAsyncMac(item, html) {
     });
 }
 
-async function insertSignatureWithoutCursorError(item, signatureHtml) {
+async function insertSignatureWithoutCursorError(item, signatureHtml, options = {}) {
+    const isManualApply = options?.manualApply === true;
     try {
         if (window.__INSERTING_SIGNATURE__) return;
         window.__INSERTING_SIGNATURE__ = true;
@@ -924,6 +928,18 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
             // ── MAC REPLY PATH ────────────────────────────
             if (mac) {
                 console.log("[CardByte] Mac reply: using full-body rebuild (setSignatureAsync bypassed)");
+                // v0.0.9: Manual apply on Mac — never rebuild full body (destroys draft)
+                if (isManualApply) {
+                    console.log("[CardByte] Mac manual apply: using signature-only path");
+                    const result = await tryInsertSignatureOnly(item, signatureBlock, "MacManual-T1");
+                    if (result.success) { return; }
+                    const compressed = await compressImagesInHtml(signatureBlock);
+                    const result2 = await tryInsertSignatureOnly(item, compressed, "MacManual-T2");
+                    if (result2.success) { return; }
+                    const result3 = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacManual-T3");
+                    if (result3.success) { return; }
+                    throw new Error("Mac manual apply: all signature-only tiers failed");
+                }
 
                 // Mac Reply T1
                 {
@@ -1058,7 +1074,17 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
         // DESKTOP / OWA / MAC COMPOSE PATH
         // v0.0.8: ALL tiers use cleanBody — never raw existingBody.
-
+        if (mac && isManualApply) {
+            console.log("[CardByte] Mac manual compose apply: signature-only");
+            const result = await tryInsertSignatureOnly(item, signatureBlock, "MacManualCompose-T1");
+            if (result.success) { return; }
+            const compressed = await compressImagesInHtml(signatureBlock);
+            const result2 = await tryInsertSignatureOnly(item, compressed, "MacManualCompose-T2");
+            if (result2.success) { return; }
+            const result3 = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacManualCompose-T3");
+            if (result3.success) { return; }
+            throw new Error("Mac manual compose: all signature-only tiers failed");
+        }
         // Compose T1
         {
             const fullHtml =
