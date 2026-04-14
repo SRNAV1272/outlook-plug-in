@@ -1061,9 +1061,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml) {
 
         // Compose T1
         {
-            const fullHtml = cleanBody
-                ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
-                : signatureBlock;
+            const fullHtml =
+                // cleanBody
+                //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
+                //     : 
+                signatureBlock;
             console.log("[CardByte] Compose Tier 1: Full-body insert", signatureBlock, "fullHtml", fullHtml, "cleanBody", cleanBody);
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T1");
             if (result.success) { return; }
