@@ -81,7 +81,57 @@ function isAutoApplyContext() {
 //   Handles Outlook's habit of prefixing ids with "x_" in replies/forwards.
 // stripSig — full CardByte signature removal
 // ─────────────────────────────────────────────────────────────────────────────
+// function stripDivById(html, idPattern) {
+//   const tempRegex = new RegExp(`<div[^>]*id="([^"]*)"[^>]*>`, "gi");
+//   let openMatch;
+//   let matchedIndex = -1;
+//   let matchedLength = 0;
+
+//   while ((openMatch = tempRegex.exec(html)) !== null) {
+//     if (idPattern.test(openMatch[1])) {
+//       matchedIndex = openMatch.index;
+//       matchedLength = openMatch[0].length;
+//       break;
+//     }
+//   }
+
+//   if (matchedIndex === -1) return html;
+
+//   let pos = matchedIndex + matchedLength;
+//   let depth = 1;
+
+//   while (pos < html.length && depth > 0) {
+//     const nextOpen = html.indexOf("<div", pos);
+//     const nextClose = html.indexOf("</div>", pos);
+//     if (nextClose === -1) break;
+//     if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
+//     else { depth--; pos = nextClose + 6; }
+//   }
+
+//   return html.slice(0, matchedIndex) + html.slice(pos);
+// }
+
 function stripDivById(html, idPattern) {
+  // On Mac, try multiple strategies
+  if (isMacPlatform()) {
+    // Strategy 1: Direct removal by exact ID match (Mac sometimes doesn't add x_ prefix)
+    let directMatch = html.match(new RegExp(`<div[^>]*id="cardbyte-signature-block"[^>]*>.*?</div>`, 'is'));
+    if (directMatch) {
+      return html.replace(directMatch[0], '');
+    }
+
+    // Strategy 2: Look for the signature block by content markers
+    const startMarker = '<!-- CARD_BYTE_SIGNATURE_START -->';
+    const endMarker = '<!-- CARD_BYTE_SIGNATURE_END -->';
+    const startIdx = html.indexOf(startMarker);
+    const endIdx = html.indexOf(endMarker);
+
+    if (startIdx !== -1 && endIdx !== -1) {
+      const endPos = endIdx + endMarker.length;
+      return html.slice(0, startIdx) + html.slice(endPos);
+    }
+  }
+
   const tempRegex = new RegExp(`<div[^>]*id="([^"]*)"[^>]*>`, "gi");
   let openMatch;
   let matchedIndex = -1;
@@ -104,26 +154,64 @@ function stripDivById(html, idPattern) {
     const nextOpen = html.indexOf("<div", pos);
     const nextClose = html.indexOf("</div>", pos);
     if (nextClose === -1) break;
-    if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
-    else { depth--; pos = nextClose + 6; }
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth++;
+      pos = nextOpen + 4;
+    } else {
+      depth--;
+      pos = nextClose + 6;
+    }
   }
 
   return html.slice(0, matchedIndex) + html.slice(pos);
 }
 
+// function stripSig(html) {
+//   let result = html;
+//   // 1. depth-aware div strip (handles x_ prefix Outlook adds in replies)
+//   result = stripDivById(result, /x?_?cardbyte-signature-block/i);
+//   // 2. comment-marker block
+//   result = result.replace(
+//     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+//     ""
+//   );
+//   // 3. legacy marker
+//   result = result.replace(/<!-- CARDBYTE_SIGNATURE -->/gi, "");
+//   // 4. trim trailing only — never leading
+//   result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+//   return result;
+// }
 function stripSig(html) {
   let result = html;
+
+  // For Mac, also strip any signature-like content before the reply chain
+  if (isMacPlatform()) {
+    // Mac often wraps signatures in additional divs
+    result = result.replace(/<div\s+class="[^"]*signature[^"]*"[^>]*>[\s\S]*?<\/div>/gi, "");
+    result = result.replace(/<div\s+id="[^"]*Signature[^"]*"[^>]*>[\s\S]*?<\/div>/gi, "");
+  }
+
   // 1. depth-aware div strip (handles x_ prefix Outlook adds in replies)
   result = stripDivById(result, /x?_?cardbyte-signature-block/i);
+
   // 2. comment-marker block
   result = result.replace(
     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
     ""
   );
+
   // 3. legacy marker
   result = result.replace(/<!-- CARDBYTE_SIGNATURE -->/gi, "");
-  // 4. trim trailing only — never leading
+
+  // 4. Mac-specific: remove any empty divs that might remain
+  if (isMacPlatform()) {
+    result = result.replace(/<div[^>]*>\s*<\/div>/gi, "");
+    result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+  }
+
+  // 5. trim trailing only — never leading
   result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+
   return result;
 }
 
@@ -310,11 +398,32 @@ export default function App({ user }) {
 
   // ── Detection helpers ────────────────────────────────────────────────────
 
+  // function hasCardByteSignature(html) {
+  //   return html.includes("CARD_BYTE_SIGNATURE_START") ||
+  //     html.includes("CARDBYTE_SIGNATURE") ||
+  //     html.includes("CB_SIG_START") ||
+  //     /id="x?_?cardbyte-signature-block"/i.test(html);
+  // }
   function hasCardByteSignature(html) {
-    return html.includes("CARD_BYTE_SIGNATURE_START") ||
+    // Standard detection
+    if (html.includes("CARD_BYTE_SIGNATURE_START") ||
       html.includes("CARDBYTE_SIGNATURE") ||
       html.includes("CB_SIG_START") ||
-      /id="x?_?cardbyte-signature-block"/i.test(html);
+      /id="x?_?cardbyte-signature-block"/i.test(html)) {
+      return true;
+    }
+
+    // Mac-specific detection - check for wrapped signature blocks
+    if (isMacPlatform()) {
+      // Mac might have the signature without the typical markers
+      const macPatterns = [
+        /<div[^>]*style="[^"]*font-family:Calibri[^"]*"[^>]*>[\s\S]*?CardByte/i,
+        /<div[^>]*contenteditable="false"[^>]*>[\s\S]*?<!-- CARD_BYTE/i,
+      ];
+      return macPatterns.some(pattern => pattern.test(html));
+    }
+
+    return false;
   }
 
   function containsGifImages(html) { return /data:image\/gif;base64,/i.test(html); }
@@ -723,46 +832,95 @@ export default function App({ user }) {
         //   throw new Error("All Mac reply insertion tiers failed");
         // }
         // ── MAC REPLY ──
-        if (mac) {
-          console.log("[CardByte] Mac reply: trying signature insertion without breaking reply chain");
+        // if (mac) {
+        //   console.log("[CardByte] Mac reply: trying signature insertion without breaking reply chain");
 
-          // T1: Use signature-only insertion first (preserves reply chain)
-          for (const v of variants) {
-            const r = await tryInsertSignatureOnly(item, v.html, `MacReply-T1-${v.label}`);
-            if (r.success) {
-              await stabilizeSelection(item);
-              return;
-            }
+        //   // T1: Use signature-only insertion first (preserves reply chain)
+        //   for (const v of variants) {
+        //     const r = await tryInsertSignatureOnly(item, v.html, `MacReply-T1-${v.label}`);
+        //     if (r.success) {
+        //       await stabilizeSelection(item);
+        //       return;
+        //     }
+        //   }
+
+        //   // T2: If signature-only fails, try compressed version
+        //   try {
+        //     const compressed = await compressImagesInHtml(signatureBlock);
+        //     const r = await tryInsertSignatureOnly(item, compressed, "MacReply-T2");
+        //     if (r.success) {
+        //       await stabilizeSelection(item);
+        //       return;
+        //     }
+        //   } catch (e) { console.warn("[CardByte] MacReply-T2:", e.message); }
+
+        //   // T3: Last resort - strip images and try signature-only
+        //   try {
+        //     const r = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacReply-T3");
+        //     if (r.success) {
+        //       await stabilizeSelection(item);
+        //       return;
+        //     }
+        //   } catch (e) { console.warn("[CardByte] MacReply-T3:", e.message); }
+
+        //   // T4: If all signature-only methods fail, fall back to full-body
+        //   console.log("[CardByte] Mac reply: falling back to full-body rebuild");
+        //   try {
+        //     const compressed = await compressImagesInHtml(signatureBlock);
+        //     const r = await tryInsertFullBody(item, compressed, "MacReply-T4");
+        //     if (r.success) { await stabilizeSelection(item); return; }
+        //   } catch (e) { console.warn("[CardByte] MacReply-T4:", e.message); }
+
+        //   throw new Error("All Mac reply insertion tiers failed");
+        // }
+        // ── MAC REPLY ──
+        if (mac) {
+          console.log("[CardByte] Mac reply: ensuring clean removal before insertion");
+
+          // First, ensure any existing signature is completely removed
+          let cleanExisting = stripSig(existingBody);
+
+          // On Mac, we need to be more aggressive - remove multiple times if needed
+          let previousLength = cleanExisting.length;
+          let maxIterations = 3;
+          for (let i = 0; i < maxIterations; i++) {
+            cleanExisting = stripSig(cleanExisting);
+            if (cleanExisting.length === previousLength) break;
+            previousLength = cleanExisting.length;
           }
 
-          // T2: If signature-only fails, try compressed version
-          try {
-            const compressed = await compressImagesInHtml(signatureBlock);
-            const r = await tryInsertSignatureOnly(item, compressed, "MacReply-T2");
-            if (r.success) {
-              await stabilizeSelection(item);
-              return;
-            }
-          } catch (e) { console.warn("[CardByte] MacReply-T2:", e.message); }
+          // Find where to insert the signature (above reply chain)
+          const insertIndex = findReplyChainIndex(cleanExisting);
+          let finalHtml;
 
-          // T3: Last resort - strip images and try signature-only
-          try {
-            const r = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacReply-T3");
-            if (r.success) {
-              await stabilizeSelection(item);
-              return;
-            }
-          } catch (e) { console.warn("[CardByte] MacReply-T3:", e.message); }
+          if (insertIndex > -1) {
+            finalHtml = cleanExisting.slice(0, insertIndex) + signatureBlock + cleanExisting.slice(insertIndex);
+          } else {
+            finalHtml = cleanExisting + signatureBlock;
+          }
 
-          // T4: If all signature-only methods fail, fall back to full-body
-          console.log("[CardByte] Mac reply: falling back to full-body rebuild");
+          // Try multiple insertion methods
           try {
-            const compressed = await compressImagesInHtml(signatureBlock);
-            const r = await tryInsertFullBody(item, compressed, "MacReply-T4");
-            if (r.success) { await stabilizeSelection(item); return; }
-          } catch (e) { console.warn("[CardByte] MacReply-T4:", e.message); }
+            // Method 1: Direct setAsync (most reliable on Mac)
+            await bodySetAsync(item, finalHtml);
+            console.log("[CardByte] ✅ Mac reply: setAsync succeeded");
+            await stabilizeSelection(item);
+            return;
+          } catch (e) {
+            console.warn("[CardByte] Mac reply setAsync failed:", e.message);
+          }
 
-          throw new Error("All Mac reply insertion tiers failed");
+          // Method 2: setSelectedDataAsync with selection cleared
+          try {
+            await bodySetSelectedDataAsync(item, finalHtml);
+            console.log("[CardByte] ✅ Mac reply: setSelectedDataAsync succeeded");
+            await stabilizeSelection(item);
+            return;
+          } catch (e) {
+            console.warn("[CardByte] Mac reply setSelectedDataAsync failed:", e.message);
+          }
+
+          throw new Error("All Mac reply insertion methods failed");
         }
 
         // ── DESKTOP / OWA REPLY ──
@@ -810,27 +968,53 @@ export default function App({ user }) {
         throw new Error("All mobile compose strategies failed");
       }
 
+      // // ── MAC COMPOSE ──
+      // if (mac) {
+      //   // Mac T1: try signature-only with prependAsync
+      //   for (const v of variants) {
+      //     const r = await tryInsertSignatureOnly(item, v.html, `MacCompose-T1-${v.label}`);
+      //     if (r.success) { await stabilizeSelection(item); return; }
+      //   }
+      //   // Mac T2: full-body
+      //   {
+      //     const body = cleanBody
+      //       ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
+      //       : signatureBlock;
+      //     const r = await tryInsertFullBody(item, body, "MacCompose-T2");
+      //     if (r.success) { await stabilizeSelection(item); return; }
+      //   }
+      //   // Mac T3: strip images
+      //   {
+      //     const r = await tryInsertFullBody(item, stripBase64Images(signatureBlock), "MacCompose-T3");
+      //     if (r.success) { await stabilizeSelection(item); return; }
+      //   }
+      //   return;
+      // }
       // ── MAC COMPOSE ──
       if (mac) {
-        // Mac T1: try signature-only with prependAsync
-        for (const v of variants) {
-          const r = await tryInsertSignatureOnly(item, v.html, `MacCompose-T1-${v.label}`);
-          if (r.success) { await stabilizeSelection(item); return; }
+        console.log("[CardByte] Mac compose: replacing signature");
+
+        // Aggressively strip any existing signature first
+        let cleanBody = stripSig(existingBody);
+        for (let i = 0; i < 3; i++) {
+          const newClean = stripSig(cleanBody);
+          if (newClean === cleanBody) break;
+          cleanBody = newClean;
         }
-        // Mac T2: full-body
-        {
-          const body = cleanBody
-            ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
-            : signatureBlock;
-          const r = await tryInsertFullBody(item, body, "MacCompose-T2");
-          if (r.success) { await stabilizeSelection(item); return; }
+
+        // Build final HTML
+        const body = cleanBody
+          ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
+          : signatureBlock;
+
+        // Use setAsync for most reliable replacement on Mac
+        const r = await tryInsertFullBody(item, body, "MacCompose");
+        if (r.success) {
+          await stabilizeSelection(item);
+          return;
         }
-        // Mac T3: strip images
-        {
-          const r = await tryInsertFullBody(item, stripBase64Images(signatureBlock), "MacCompose-T3");
-          if (r.success) { await stabilizeSelection(item); return; }
-        }
-        return;
+
+        throw new Error("Mac compose insertion failed");
       }
 
       // ── DESKTOP / OWA COMPOSE ──

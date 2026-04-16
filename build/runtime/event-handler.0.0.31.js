@@ -1312,8 +1312,154 @@ async function ensureNoDefaultSignature(item) {
         is still possible after a failure.
    --------------------------------------------------------- */
 
+// window.applySignature = async function (event = { completed: () => { } }, options = {}) {
+//     // options.forceApply = true when called from taskpane button click
+//     const isManualApply = options?.forceApply === true;
+
+//     const mailbox = Office?.context?.mailbox;
+//     const item = mailbox?.item;
+
+//     const currentItemId = item?.itemId || null;
+//     if (currentItemId && window.__LAST_ITEM_ID__ && window.__LAST_ITEM_ID__ !== currentItemId) {
+//         console.log(`[CardByte] New item detected (${currentItemId}) — resetting SIGNATURE_STATE`);
+//         SIGNATURE_STATE = "idle";
+//     }
+//     if (currentItemId) window.__LAST_ITEM_ID__ = currentItemId;
+
+//     if (SIGNATURE_STATE === "loading") {
+//         console.log("[CardByte] Already loading — skipping");
+//         event.completed();
+//         return;
+//     }
+
+//     // v0.0.9: For manual apply, always re-check body before skipping.
+//     // User may have deleted the signature — SIGNATURE_STATE is stale.
+//     if (SIGNATURE_STATE === "applied" && !isManualApply) {
+//         console.log("[CardByte] Already applied for this item — skipping");
+//         event.completed();
+//         return;
+//     }
+
+//     if (SIGNATURE_STATE === "applied" && isManualApply) {
+//         // Re-check actual body to see if sig was removed
+//         try {
+//             const currentBody = await new Promise((resolve, reject) => {
+//                 item.body.getAsync(Office.CoercionType.Html, (r) => {
+//                     if (r.status === "succeeded") resolve(r.value || "");
+//                     else reject(r.error);
+//                 });
+//             });
+//             if (hasCardByteSignature(currentBody)) {
+//                 console.log("[CardByte] Manual apply: signature already present in body — skipping");
+//                 event.completed();
+//                 return;
+//             }
+//             // Sig was removed by user — reset state and proceed
+//             console.log("[CardByte] Manual apply: signature was removed from body — resetting state");
+//             SIGNATURE_STATE = "idle";
+//         } catch (e) {
+//             console.warn("[CardByte] Manual apply: body check failed, proceeding anyway:", e.message);
+//             SIGNATURE_STATE = "idle";
+//         }
+//     }
+
+//     const user = mailbox?.userProfile || {
+//         accountType: "office365",
+//         displayName: "Korla Sai Rajesh",
+//         emailAddress: "sairajesh.korla1272@outlook.com",
+//         timeZone: "India Standard Time"
+//     };
+
+//     try {
+//         if (!item) {
+//             console.warn("[CardByte] No mail item found");
+//             event.completed();
+//             return;
+//         }
+
+//         SIGNATURE_STATE = "loading";
+
+//         const platform = detectPlatform();
+//         const mobile = isMobile();
+//         const mac = isMac();
+
+//         console.log("[CardByte] ════════════════════════════════════");
+//         console.log(`[CardByte] Starting signature flow v0.0.9 (manual: ${isManualApply})`);
+//         console.log("[CardByte] User:", user?.emailAddress);
+//         console.log("[CardByte] Platform:", platform);
+//         console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
+
+//         if (mobile) {
+//             const ready = await waitForItemReady(item);
+//             if (!ready) throw new Error("Mail item not ready on mobile after retries");
+//         }
+
+//         // v0.0.9: Skip ensureNoDefaultSignature on manual apply — user has already
+//         // composed their content. We must NOT touch the body at this stage.
+//         if (!isManualApply) {
+//             const removedDefault = await ensureNoDefaultSignature(item);
+//             if (removedDefault) console.log("[CardByte] Default signature was removed before applying CardByte");
+//         } else {
+//             console.log("[CardByte] Manual apply: skipping ensureNoDefaultSignature to preserve body");
+//         }
+
+//         // Use cached signature if available (avoids extra API call on manual re-apply)
+//         let apiResponse = CACHED_SIGNATURE_HTML;
+//         if (!apiResponse) {
+//             try {
+//                 const stored = localStorage.getItem("cardbyte_cached_signature");
+//                 if (stored) { apiResponse = stored; console.log("[CardByte] Using localStorage cached signature"); }
+//             } catch (e) { /* ignore */ }
+//         }
+//         if (!apiResponse) {
+//             apiResponse = await renderSignatureOnServer(user?.emailAddress);
+//         }
+//         if (!apiResponse) throw new Error("API returned empty or null response");
+
+//         CACHED_SIGNATURE_HTML = apiResponse;
+//         try { localStorage.setItem("cardbyte_cached_signature", apiResponse); } catch (e) { }
+
+//         // v0.0.9: Pass isManualApply context into insertion so it can choose
+//         // signature-only path and never rebuild full body on manual apply.
+//         await insertSignatureWithoutCursorError(item, apiResponse, { manualApply: isManualApply });
+
+//         SIGNATURE_STATE = "applied";
+//         console.log("[CardByte] Signature applied successfully");
+//         console.log("[CardByte] ════════════════════════════════════");
+
+//     } catch (err) {
+//         SIGNATURE_STATE = "idle";
+//         console.error("[CardByte] applySignature failed:", err.message || err);
+
+//         try {
+//             const userProfile = mailbox?.userProfile || {};
+//             const fallbackHtml = `
+//                 <table cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:400px;">
+//                   <tr>
+//                     <td style="font-family:Arial,sans-serif;font-size:${isMobile() ? '14' : '12'}px;">
+//                       <strong>${userProfile.displayName || ""}</strong><br/>
+//                       ${userProfile.emailAddress || ""}<br/>
+//                       <span style="color:#999;">Sent via CardByte</span>
+//                     </td>
+//                   </tr>
+//                 </table>`.trim();
+//             const fallbackItem = mailbox?.item;
+//             if (fallbackItem) {
+//                 if (isMobile()) {
+//                     await tryInsertFullBody(fallbackItem, fallbackHtml, "Fallback-Mobile");
+//                 } else {
+//                     const r = await tryInsertSignatureOnly(fallbackItem, fallbackHtml, "Fallback");
+//                     if (!r.success) await tryInsertFullBody(fallbackItem, fallbackHtml, "Fallback-Full");
+//                 }
+//             }
+//         } catch (fallbackErr) { console.error("[CardByte] Fallback error:", fallbackErr); }
+
+//     } finally {
+//         event.completed();
+//     }
+// };
+
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
-    // options.forceApply = true when called from taskpane button click
     const isManualApply = options?.forceApply === true;
 
     const mailbox = Office?.context?.mailbox;
@@ -1323,6 +1469,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
     if (currentItemId && window.__LAST_ITEM_ID__ && window.__LAST_ITEM_ID__ !== currentItemId) {
         console.log(`[CardByte] New item detected (${currentItemId}) — resetting SIGNATURE_STATE`);
         SIGNATURE_STATE = "idle";
+        CACHED_SIGNATURE_HTML = null; // v0.0.10: clear in-memory cache on new item
     }
     if (currentItemId) window.__LAST_ITEM_ID__ = currentItemId;
 
@@ -1332,8 +1479,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
         return;
     }
 
-    // v0.0.9: For manual apply, always re-check body before skipping.
-    // User may have deleted the signature — SIGNATURE_STATE is stale.
     if (SIGNATURE_STATE === "applied" && !isManualApply) {
         console.log("[CardByte] Already applied for this item — skipping");
         event.completed();
@@ -1341,7 +1486,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 
     if (SIGNATURE_STATE === "applied" && isManualApply) {
-        // Re-check actual body to see if sig was removed
         try {
             const currentBody = await new Promise((resolve, reject) => {
                 item.body.getAsync(Office.CoercionType.Html, (r) => {
@@ -1354,7 +1498,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
                 event.completed();
                 return;
             }
-            // Sig was removed by user — reset state and proceed
             console.log("[CardByte] Manual apply: signature was removed from body — resetting state");
             SIGNATURE_STATE = "idle";
         } catch (e) {
@@ -1384,7 +1527,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
         const mac = isMac();
 
         console.log("[CardByte] ════════════════════════════════════");
-        console.log(`[CardByte] Starting signature flow v0.0.9 (manual: ${isManualApply})`);
+        console.log(`[CardByte] Starting signature flow v0.0.10 (manual: ${isManualApply})`);
         console.log("[CardByte] User:", user?.emailAddress);
         console.log("[CardByte] Platform:", platform);
         console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
@@ -1394,8 +1537,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
             if (!ready) throw new Error("Mail item not ready on mobile after retries");
         }
 
-        // v0.0.9: Skip ensureNoDefaultSignature on manual apply — user has already
-        // composed their content. We must NOT touch the body at this stage.
         if (!isManualApply) {
             const removedDefault = await ensureNoDefaultSignature(item);
             if (removedDefault) console.log("[CardByte] Default signature was removed before applying CardByte");
@@ -1403,24 +1544,35 @@ window.applySignature = async function (event = { completed: () => { } }, option
             console.log("[CardByte] Manual apply: skipping ensureNoDefaultSignature to preserve body");
         }
 
-        // Use cached signature if available (avoids extra API call on manual re-apply)
-        let apiResponse = CACHED_SIGNATURE_HTML;
-        if (!apiResponse) {
-            try {
-                const stored = localStorage.getItem("cardbyte_cached_signature");
-                if (stored) { apiResponse = stored; console.log("[CardByte] Using localStorage cached signature"); }
-            } catch (e) { /* ignore */ }
-        }
-        if (!apiResponse) {
-            apiResponse = await renderSignatureOnServer(user?.emailAddress);
-        }
-        if (!apiResponse) throw new Error("API returned empty or null response");
+        // v0.0.10: ALWAYS fetch fresh from API first — no localStorage fallback.
+        // localStorage cache was causing stale signatures to be imprinted on Mac/Windows
+        // when ns-enterprise.cardbyte.ai was unreachable.
+        // In-memory CACHED_SIGNATURE_HTML is only used within the same session as a
+        // secondary fallback (e.g. onSend fires after applySignature already succeeded).
+        let apiResponse = null;
 
+        try {
+            apiResponse = await renderSignatureOnServer(user?.emailAddress);
+            console.log(`[CardByte] API fetch succeeded: ${(apiResponse?.length / 1024).toFixed(1)}KB`);
+        } catch (fetchErr) {
+            console.warn("[CardByte] API fetch threw:", fetchErr?.message);
+        }
+
+        // Secondary fallback: in-memory cache from this session only (not localStorage)
+        if (!apiResponse && CACHED_SIGNATURE_HTML) {
+            console.warn("[CardByte] API failed — using in-memory session cache as fallback");
+            apiResponse = CACHED_SIGNATURE_HTML;
+        }
+
+        if (!apiResponse) {
+            throw new Error("API returned empty or null response and no session cache available");
+        }
+
+        // Store in-memory for onSend handler reuse within this session
         CACHED_SIGNATURE_HTML = apiResponse;
         try { localStorage.setItem("cardbyte_cached_signature", apiResponse); } catch (e) { }
+        // v0.0.10: Do NOT write to localStorage — stale cache causes wrong sig on reload
 
-        // v0.0.9: Pass isManualApply context into insertion so it can choose
-        // signature-only path and never rebuild full body on manual apply.
         await insertSignatureWithoutCursorError(item, apiResponse, { manualApply: isManualApply });
 
         SIGNATURE_STATE = "applied";
