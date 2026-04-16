@@ -852,6 +852,39 @@ function bodySetAsyncMac(item, html) {
     });
 }
 
+/**
+ * _stripSigFromSafeZoneOnly
+ * ─────────────────────────
+ * Strips the CardByte signature ONLY from the portion of the body
+ * that sits ABOVE the reply-chain marker (the "safe zone").
+ * Everything from the first reply-chain marker onwards is returned
+ * completely untouched — preserving signatures inside quoted emails.
+ *
+ * Use this wherever we are rebuilding the full body for a reply so
+ * that older signatures in the quoted chain are never destroyed.
+ *
+ * @param {string} html  Full body HTML of the compose item
+ * @returns {{ safeZone: string, replyChain: string, fullStripped: string }}
+ */
+function _stripSigFromSafeZoneOnly(html) {
+    const chainIndex = _findReplyChainIndex(html);
+
+    if (chainIndex === -1) {
+        // No reply chain found — strip from the entire body (safe for compose)
+        const stripped = _stripSig(html);
+        return { safeZone: stripped, replyChain: "", fullStripped: stripped };
+    }
+
+    const safeZone = _stripSig(html.slice(0, chainIndex));   // strip only the top
+    const replyChain = html.slice(chainIndex);                  // NEVER touch this
+
+    return {
+        safeZone,
+        replyChain,
+        fullStripped: safeZone + replyChain,
+    };
+}
+
 async function insertSignatureWithoutCursorError(item, signatureHtml, options = {}) {
     const isManualApply = options?.manualApply === true;
     try {
@@ -941,30 +974,68 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                     throw new Error("Mac manual apply: all signature-only tiers failed");
                 }
 
+                // // Mac Reply T1
+                // {
+                //     try {
+                //         const compressed = await compressImagesInHtml(signatureBlock);
+                //         const cleanBody = _stripSig(existingBody);
+                //         const insertIndex = _findReplyChainIndex(cleanBody);
+                //         const fullHtml = insertIndex > -1
+                //             ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                //             : compressed + cleanBody;  // sig before body if no chain found
+
+                //         console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
+                //         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
+                //         if (result.success) { return; }  // No stabilizeSelection on Mac
+                //     } catch (e) { console.warn("[CardByte] Mac Reply T1:", e.message); }
+                // }
+
+                // // Mac Reply T2
+                // {
+                //     try {
+                //         const cleanBody = _stripSig(existingBody);
+                //         const insertIndex = _findReplyChainIndex(cleanBody);
+                //         const fullHtml = insertIndex > -1
+                //             ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
+                //             : signatureBlock + cleanBody;
+
+                //         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
+                //         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
+                //         if (result.success) { return; }
+                //     } catch (e) { console.warn("[CardByte] Mac Reply T2:", e.message); }
+                // }
+
+                // // Mac Reply T3
+                // {
+                //     const cleanBody = _stripSig(existingBody);
+                //     const insertIndex = _findReplyChainIndex(cleanBody);
+                //     const strippedBlock = stripBase64Images(signatureBlock);
+                //     const fullHtml = insertIndex > -1
+                //         ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
+                //         : strippedBlock + cleanBody;
+
+                //     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
+                //     if (result.success) { return; }
+                // }
                 // Mac Reply T1
                 {
                     try {
                         const compressed = await compressImagesInHtml(signatureBlock);
-                        const cleanBody = _stripSig(existingBody);
-                        const insertIndex = _findReplyChainIndex(cleanBody);
-                        const fullHtml = insertIndex > -1
-                            ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
-                            : compressed + cleanBody;  // sig before body if no chain found
+                        // v0.0.11: use safeZone-only strip so quoted-chain signatures survive
+                        const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(existingBody);
+                        const fullHtml = safeZone + compressed + replyChain;
 
-                        console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
+                        console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
-                        if (result.success) { return; }  // No stabilizeSelection on Mac
+                        if (result.success) { return; }
                     } catch (e) { console.warn("[CardByte] Mac Reply T1:", e.message); }
                 }
 
                 // Mac Reply T2
                 {
                     try {
-                        const cleanBody = _stripSig(existingBody);
-                        const insertIndex = _findReplyChainIndex(cleanBody);
-                        const fullHtml = insertIndex > -1
-                            ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
-                            : signatureBlock + cleanBody;
+                        const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(existingBody);
+                        const fullHtml = safeZone + signatureBlock + replyChain;
 
                         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
@@ -974,12 +1045,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
 
                 // Mac Reply T3
                 {
-                    const cleanBody = _stripSig(existingBody);
-                    const insertIndex = _findReplyChainIndex(cleanBody);
+                    const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(existingBody);
                     const strippedBlock = stripBase64Images(signatureBlock);
-                    const fullHtml = insertIndex > -1
-                        ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
-                        : strippedBlock + cleanBody;
+                    const fullHtml = safeZone + strippedBlock + replyChain;
 
                     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
                     if (result.success) { return; }

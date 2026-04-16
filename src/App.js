@@ -634,6 +634,28 @@ export default function App({ user }) {
   // ── Tiered insertion methods — platform-aware ─────────────────────────────
 
   /**
+ * stripSigFromSafeZoneOnly
+ * Strips the CardByte signature ONLY from the portion of the body
+ * that sits ABOVE the reply-chain marker (the "safe zone").
+ * Everything from the first reply-chain marker onwards is returned
+ * completely untouched — preserving signatures inside quoted emails.
+ */
+  function stripSigFromSafeZoneOnly(html) {
+    const chainIndex = findReplyChainIndex(html);
+
+    if (chainIndex === -1) {
+      // No reply chain — strip from the entire body (safe for compose)
+      const stripped = stripSig(html);
+      return { safeZone: stripped, replyChain: "", fullStripped: stripped };
+    }
+
+    const safeZone = stripSig(html.slice(0, chainIndex)); // only strip above the chain
+    const replyChain = html.slice(chainIndex);              // NEVER touch this
+
+    return { safeZone, replyChain, fullStripped: safeZone + replyChain };
+  }
+
+  /**
    * tryInsertSignatureOnly
    * Inserts signature WITHOUT touching existing body content.
    *
@@ -811,114 +833,41 @@ export default function App({ user }) {
         }
 
         // ── MAC REPLY ──
-        // if (mac) {
-        //   console.log("[CardByte] Mac reply: full-body rebuild (setSignatureAsync bypassed)");
-        //   // Mac T1: compressed signature-only
-        //   try {
-        //     const compressed = await compressImagesInHtml(signatureBlock);
-        //     const r = await tryInsertFullBody(item, compressed, "MacReply-T1");
-        //     if (r.success) { await stabilizeSelection(item); return; }
-        //   } catch (e) { console.warn("[CardByte] MacReply-T1:", e.message); }
-        //   // Mac T2: uncompressed
-        //   {
-        //     const r = await tryInsertFullBody(item, signatureBlock, "MacReply-T2");
-        //     if (r.success) { await stabilizeSelection(item); return; }
-        //   }
-        //   // Mac T3: strip images — last resort
-        //   {
-        //     const r = await tryInsertFullBody(item, stripBase64Images(signatureBlock), "MacReply-T3");
-        //     if (r.success) { await stabilizeSelection(item); return; }
-        //   }
-        //   throw new Error("All Mac reply insertion tiers failed");
-        // }
-        // ── MAC REPLY ──
-        // if (mac) {
-        //   console.log("[CardByte] Mac reply: trying signature insertion without breaking reply chain");
-
-        //   // T1: Use signature-only insertion first (preserves reply chain)
-        //   for (const v of variants) {
-        //     const r = await tryInsertSignatureOnly(item, v.html, `MacReply-T1-${v.label}`);
-        //     if (r.success) {
-        //       await stabilizeSelection(item);
-        //       return;
-        //     }
-        //   }
-
-        //   // T2: If signature-only fails, try compressed version
-        //   try {
-        //     const compressed = await compressImagesInHtml(signatureBlock);
-        //     const r = await tryInsertSignatureOnly(item, compressed, "MacReply-T2");
-        //     if (r.success) {
-        //       await stabilizeSelection(item);
-        //       return;
-        //     }
-        //   } catch (e) { console.warn("[CardByte] MacReply-T2:", e.message); }
-
-        //   // T3: Last resort - strip images and try signature-only
-        //   try {
-        //     const r = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacReply-T3");
-        //     if (r.success) {
-        //       await stabilizeSelection(item);
-        //       return;
-        //     }
-        //   } catch (e) { console.warn("[CardByte] MacReply-T3:", e.message); }
-
-        //   // T4: If all signature-only methods fail, fall back to full-body
-        //   console.log("[CardByte] Mac reply: falling back to full-body rebuild");
-        //   try {
-        //     const compressed = await compressImagesInHtml(signatureBlock);
-        //     const r = await tryInsertFullBody(item, compressed, "MacReply-T4");
-        //     if (r.success) { await stabilizeSelection(item); return; }
-        //   } catch (e) { console.warn("[CardByte] MacReply-T4:", e.message); }
-
-        //   throw new Error("All Mac reply insertion tiers failed");
-        // }
-        // ── MAC REPLY ──
         if (mac) {
-          console.log("[CardByte] Mac reply: ensuring clean removal before insertion");
+          console.log("[CardByte] Mac reply: safe-zone strip — preserving quoted chain signatures");
 
-          // First, ensure any existing signature is completely removed
-          let cleanExisting = stripSig(existingBody);
+          // v0.0.11: strip sig ONLY from the safe zone above the reply chain.
+          // stripSig(existingBody) would also remove signatures inside quoted
+          // emails (email 2, 3, 4 in the chain) — this prevents that.
+          const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
+          const finalHtml = safeZone + signatureBlock + replyChain;
 
-          // On Mac, we need to be more aggressive - remove multiple times if needed
-          let previousLength = cleanExisting.length;
-          let maxIterations = 3;
-          for (let i = 0; i < maxIterations; i++) {
-            cleanExisting = stripSig(cleanExisting);
-            if (cleanExisting.length === previousLength) break;
-            previousLength = cleanExisting.length;
-          }
-
-          // Find where to insert the signature (above reply chain)
-          const insertIndex = findReplyChainIndex(cleanExisting);
-          let finalHtml;
-
-          if (insertIndex > -1) {
-            finalHtml = cleanExisting.slice(0, insertIndex) + signatureBlock + cleanExisting.slice(insertIndex);
-          } else {
-            finalHtml = cleanExisting + signatureBlock;
-          }
-
-          // Try multiple insertion methods
+          // Method 1: setAsync (most reliable on Mac)
           try {
-            // Method 1: Direct setAsync (most reliable on Mac)
             await bodySetAsync(item, finalHtml);
             console.log("[CardByte] ✅ Mac reply: setAsync succeeded");
             await stabilizeSelection(item);
             return;
-          } catch (e) {
-            console.warn("[CardByte] Mac reply setAsync failed:", e.message);
-          }
+          } catch (e) { console.warn("[CardByte] Mac reply setAsync failed:", e.message); }
 
-          // Method 2: setSelectedDataAsync with selection cleared
+          // Method 2: compressed variant
           try {
-            await bodySetSelectedDataAsync(item, finalHtml);
-            console.log("[CardByte] ✅ Mac reply: setSelectedDataAsync succeeded");
+            const compressed = await compressImagesInHtml(signatureBlock);
+            const { safeZone: sz, replyChain: rc } = stripSigFromSafeZoneOnly(existingBody);
+            await bodySetAsync(item, sz + compressed + rc);
+            console.log("[CardByte] ✅ Mac reply: setAsync compressed succeeded");
             await stabilizeSelection(item);
             return;
-          } catch (e) {
-            console.warn("[CardByte] Mac reply setSelectedDataAsync failed:", e.message);
-          }
+          } catch (e) { console.warn("[CardByte] Mac reply setAsync compressed failed:", e.message); }
+
+          // Method 3: strip images — last resort
+          try {
+            const { safeZone: sz, replyChain: rc } = stripSigFromSafeZoneOnly(existingBody);
+            await bodySetAsync(item, sz + stripBase64Images(signatureBlock) + rc);
+            console.log("[CardByte] ✅ Mac reply: setAsync stripped succeeded");
+            await stabilizeSelection(item);
+            return;
+          } catch (e) { console.warn("[CardByte] Mac reply setAsync stripped failed:", e.message); }
 
           throw new Error("All Mac reply insertion methods failed");
         }
