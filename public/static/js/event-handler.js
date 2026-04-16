@@ -1062,7 +1062,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             }
             {
                 // v0.0.8: use cleanBody (sig already stripped)
-                const fullHtml = cleanBody + "<br/>" + signatureBlock;
+                const fullHtml = "<br/>" + signatureBlock;
                 let result = await tryInsertFullBody(item, fullHtml, "MobileCompose-T2");
                 if (result.success) { await stabilizeSelection(item); return; }
 
@@ -1091,7 +1091,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 // cleanBody
                 //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
                 //     : 
-                signatureBlock;
+                "<br/>" +
+                signatureBlock +
+                "<br/>"
             console.log("[CardByte] Compose Tier 1: Full-body insert", signatureBlock, "fullHtml", fullHtml, "cleanBody", cleanBody);
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T1");
             if (result.success) { return; }
@@ -1107,7 +1109,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                     // cleanBody
                     //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
                     //     : 
-                    compressed;
+                    "<br/>" +
+                    compressed +
+                    "<br/>"
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T2");
                 if (result.success) { return; }
             } catch (e) { console.warn("[CardByte] Compose Tier 2 compression error:", e.message); }
@@ -1123,7 +1127,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                     // cleanBody
                     //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + cleanedHtml
                     //     : 
-                    cleanedHtml;
+                    "<br/>" +
+                    cleanedHtml +
+                    "<br/>"
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T3");
                 if (result.success) {
                     let attached = 0;
@@ -1142,9 +1148,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             console.log("[CardByte] Compose Tier 4: Strip images + full-body insert");
             const stripped = stripBase64Images(signatureBlock);
             // v0.0.8: cleanBody instead of existingBody
-            const fullHtml = cleanBody
-                ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
-                : stripped;
+            const fullHtml =
+                // cleanBody
+                //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
+                //     : 
+                stripped;
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T4");
             if (result.success) { return; }
         }

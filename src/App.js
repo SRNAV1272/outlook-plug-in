@@ -960,7 +960,11 @@ export default function App({ user }) {
           const r = await tryInsertSignatureOnly(item, v.html, `MobileCompose-T1-${v.label}`);
           if (r.success) { await stabilizeSelection(item); return; }
         }
-        const fullHtml = (cleanBody ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() : "") + "<br/>" + signatureBlock;
+        const fullHtml =
+          // (cleanBody ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() : "") + 
+          "<br/>" +
+          signatureBlock +
+          "<br/>"
         let r = await tryInsertFullBody(item, fullHtml, "MobileCompose-T2");
         if (r.success) { await stabilizeSelection(item); return; }
         r = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileCompose-T3");
@@ -1003,9 +1007,13 @@ export default function App({ user }) {
         }
 
         // Build final HTML
-        const body = cleanBody
-          ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
-          : signatureBlock;
+        const body =
+          // cleanBody
+          //   ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
+          //   : 
+          "<br/>" +
+          signatureBlock +
+          "<br/>"
 
         // Use setAsync for most reliable replacement on Mac
         const r = await tryInsertFullBody(item, body, "MacCompose");
@@ -1020,9 +1028,13 @@ export default function App({ user }) {
       // ── DESKTOP / OWA COMPOSE ──
       // T1: full-body (cleanBody + signatureBlock)
       {
-        const fullHtml = cleanBody
-          ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
-          : signatureBlock;
+        const fullHtml =
+          // cleanBody
+          //   ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
+          //   : 
+          "<br/>" +
+          signatureBlock +
+          "<br/>"
         const r = await tryInsertFullBody(item, fullHtml, "Compose-T1");
         if (r.success) { await stabilizeSelection(item); return; }
       }
@@ -1045,9 +1057,13 @@ export default function App({ user }) {
       // T4: strip images — last resort
       {
         const stripped = stripBase64Images(signatureBlock);
-        const fullHtml = cleanBody
-          ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
-          : stripped;
+        const fullHtml =
+          // cleanBody
+          //   ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
+          //   : 
+          "<br/>" +
+          stripped +
+          "<br/>"
         const r = await tryInsertFullBody(item, fullHtml, "Compose-T4");
         if (r.success) { await stabilizeSelection(item); return; }
       }
