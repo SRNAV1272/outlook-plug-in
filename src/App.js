@@ -921,57 +921,69 @@ export default function App({ user }) {
         throw new Error("All mobile compose strategies failed");
       }
 
-      // // ── MAC COMPOSE ──
-      // if (mac) {
-      //   // Mac T1: try signature-only with prependAsync
-      //   for (const v of variants) {
-      //     const r = await tryInsertSignatureOnly(item, v.html, `MacCompose-T1-${v.label}`);
-      //     if (r.success) { await stabilizeSelection(item); return; }
-      //   }
-      //   // Mac T2: full-body
-      //   {
-      //     const body = cleanBody
-      //       ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
-      //       : signatureBlock;
-      //     const r = await tryInsertFullBody(item, body, "MacCompose-T2");
-      //     if (r.success) { await stabilizeSelection(item); return; }
-      //   }
-      //   // Mac T3: strip images
-      //   {
-      //     const r = await tryInsertFullBody(item, stripBase64Images(signatureBlock), "MacCompose-T3");
-      //     if (r.success) { await stabilizeSelection(item); return; }
-      //   }
-      //   return;
-      // }
       // ── MAC COMPOSE ──
       if (mac) {
-        console.log("[CardByte] Mac compose: replacing signature");
+        console.log("[CardByte] Mac compose: safe signature insertion");
 
-        // Aggressively strip any existing signature first
-        let cleanBody = stripSig(existingBody);
-        for (let i = 0; i < 3; i++) {
-          const newClean = stripSig(cleanBody);
-          if (newClean === cleanBody) break;
-          cleanBody = newClean;
+        // ── Step 1: Try prependAsync first — NEVER touches existing body ──
+        // This is the only truly safe method on Mac compose.
+        for (const v of variants) {
+          try {
+            await bodyPrependAsync(item, v.html);
+            console.log(`[CardByte] ✅ Mac compose prependAsync succeeded (${v.label})`);
+            await stabilizeSelection(item);
+            return;
+          } catch (e) {
+            console.warn(`[CardByte] Mac compose prependAsync failed (${v.label}):`, e.message);
+          }
         }
 
-        // Build final HTML
-        const body =
-          // cleanBody
-          //   ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
-          //   : 
-          "<br/>" +
-          signatureBlock +
-          "<br/>"
+        // ── Step 2: Re-read body fresh before any setAsync ──
+        // Mac race condition: existingBody read at top of applySignature
+        // may be stale. Re-read here for a current snapshot.
+        let freshBody = existingBody;
+        try {
+          freshBody = await getBodyHtml(item);
+          console.log(`[CardByte] Mac compose re-read body: ${(freshBody.length / 1024).toFixed(1)}KB`);
+        } catch (e) {
+          console.warn("[CardByte] Mac compose re-read failed, using existingBody:", e.message);
+        }
 
-        // Use setAsync for most reliable replacement on Mac
-        const r = await tryInsertFullBody(item, body, "MacCompose");
-        if (r.success) {
-          await stabilizeSelection(item);
+        // 🛡️ Mac stale-read guard: if existingBody had content but freshBody
+        // came back near-empty, the first read was a race — trust existingBody.
+        if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
+          console.warn("[CardByte] ⚠️ Mac stale-read detected — reverting to existingBody");
+          freshBody = existingBody;
+        }
+
+        // 🛡️ Content guard: if body is still suspiciously short,
+        // refuse setAsync — it would silently wipe an unread draft.
+        const draftTextLength = freshBody.replace(/<[^>]*>/g, "").trim().length;
+        if (draftTextLength < 30) {
+          console.warn("[CardByte] ⚠️ Mac body near-empty after re-read — skipping setAsync to protect draft");
+          // prependAsync already failed above, nothing safe left to try
+          console.error("[CardByte] ❌ Mac compose: all safe methods exhausted");
           return;
         }
 
-        throw new Error("Mac compose insertion failed");
+        // Strip any prior CardByte signature from the fresh body
+        let macCleanBody = stripSig(freshBody);
+        macCleanBody = macCleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+
+        // ── Step 3: setAsync with full confirmed body + signature ──
+        for (const v of variants) {
+          try {
+            const fullHtml = `${macCleanBody}<br/>${v.html}<br/>`;
+            await bodySetAsync(item, fullHtml);
+            console.log(`[CardByte] ✅ Mac compose setAsync succeeded (${v.label})`);
+            await stabilizeSelection(item);
+            return;
+          } catch (e) {
+            console.warn(`[CardByte] Mac compose setAsync failed (${v.label}):`, e.message);
+          }
+        }
+
+        throw new Error("Mac compose: all insertion methods failed");
       }
 
       // ── DESKTOP / OWA COMPOSE ──
