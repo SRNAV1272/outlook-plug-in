@@ -968,6 +968,7 @@ export default function App({ user }) {
 
         // Strip any prior CardByte signature from the fresh body
         let macCleanBody = stripSig(freshBody);
+        console.log(`[CardByte] Mac compose clean body: ${(macCleanBody.length / 1024).toFixed(1)}KB`, freshBody, "Mac spec", macCleanBody);
         macCleanBody = macCleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
 
         // ── Step 3: setAsync with full confirmed body + signature ──

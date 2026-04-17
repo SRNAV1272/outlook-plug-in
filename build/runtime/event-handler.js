@@ -974,49 +974,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                     throw new Error("Mac manual apply: all signature-only tiers failed");
                 }
 
-                // // Mac Reply T1
-                // {
-                //     try {
-                //         const compressed = await compressImagesInHtml(signatureBlock);
-                //         const cleanBody = _stripSig(existingBody);
-                //         const insertIndex = _findReplyChainIndex(cleanBody);
-                //         const fullHtml = insertIndex > -1
-                //             ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
-                //             : compressed + cleanBody;  // sig before body if no chain found
-
-                //         console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB, insertIndex: ${insertIndex}`);
-                //         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
-                //         if (result.success) { return; }  // No stabilizeSelection on Mac
-                //     } catch (e) { console.warn("[CardByte] Mac Reply T1:", e.message); }
-                // }
-
-                // // Mac Reply T2
-                // {
-                //     try {
-                //         const cleanBody = _stripSig(existingBody);
-                //         const insertIndex = _findReplyChainIndex(cleanBody);
-                //         const fullHtml = insertIndex > -1
-                //             ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
-                //             : signatureBlock + cleanBody;
-
-                //         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
-                //         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
-                //         if (result.success) { return; }
-                //     } catch (e) { console.warn("[CardByte] Mac Reply T2:", e.message); }
-                // }
-
-                // // Mac Reply T3
-                // {
-                //     const cleanBody = _stripSig(existingBody);
-                //     const insertIndex = _findReplyChainIndex(cleanBody);
-                //     const strippedBlock = stripBase64Images(signatureBlock);
-                //     const fullHtml = insertIndex > -1
-                //         ? cleanBody.slice(0, insertIndex) + strippedBlock + cleanBody.slice(insertIndex)
-                //         : strippedBlock + cleanBody;
-
-                //     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
-                //     if (result.success) { return; }
-                // }
                 // Mac Reply T1
                 {
                     try {
@@ -1153,6 +1110,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             if (result3.success) { return; }
             throw new Error("Mac manual compose: all signature-only tiers failed");
         }
+        
         // Compose T1
         {
             const fullHtml =
