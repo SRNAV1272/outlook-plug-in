@@ -647,12 +647,26 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
  * Tries all methods including setAsync which replaces the entire body.
  */
 async function tryInsertFullBody(item, fullHtml, label = "") {
+    // const owa = isOWA();
+    // const hasGifs = containsGifImages(fullHtml);
+
+    // let methods;
+
     const owa = isOWA();
+    const mac = isMac();
     const hasGifs = containsGifImages(fullHtml);
 
     let methods;
 
-    if (owa || hasGifs) {
+    if (mac) {
+        // On Mac: setAsync last — it nukes the body if fullHtml is wrong
+        methods = [
+            { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
+            { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
+            { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) }, // last resort
+        ];
+    } else if (owa || hasGifs) {
         methods = [
             { name: "setAsync", fn: () => bodySetAsync(item, fullHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
