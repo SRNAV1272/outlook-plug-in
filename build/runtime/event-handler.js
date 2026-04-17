@@ -1023,7 +1023,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                         const compressed = await compressImagesInHtml(signatureBlock);
                         // v0.0.11: use safeZone-only strip so quoted-chain signatures survive
                         const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(existingBody);
-                        const fullHtml = safeZone + compressed + replyChain;
+                        const fullHtml = safeZone + compressed + "<div style='margin-top:20px'></div>" + replyChain;
 
                         console.log(`[CardByte] Mac Reply T1: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T1");
@@ -1035,7 +1035,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 {
                     try {
                         const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(existingBody);
-                        const fullHtml = safeZone + signatureBlock + replyChain;
+                        const fullHtml = safeZone + signatureBlock + "<div style='margin-top:20px'></div>" + replyChain;
 
                         console.log(`[CardByte] Mac Reply T2 uncompressed: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                         const result = await tryInsertFullBody(item, fullHtml, "MacReply-T2");
@@ -1047,7 +1047,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 {
                     const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(existingBody);
                     const strippedBlock = stripBase64Images(signatureBlock);
-                    const fullHtml = safeZone + strippedBlock + replyChain;
+                    const fullHtml = safeZone + strippedBlock + "<div style='margin-top:20px'></div>" + replyChain;
 
                     const result = await tryInsertFullBody(item, fullHtml, "MacReply-T3");
                     if (result.success) { return; }
