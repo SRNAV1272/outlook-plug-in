@@ -192,6 +192,30 @@ function findReplyChainIndex(html) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SAFE-ZONE STRIP
+// Strips the CardByte signature ONLY from the portion of the body that sits
+// ABOVE the reply-chain marker. Everything from the first reply-chain marker
+// onwards is returned completely untouched — preserving quoted email signatures.
+// ─────────────────────────────────────────────────────────────────────────────
+function stripSigFromSafeZoneOnly(html) {
+  const chainIndex = findReplyChainIndex(html);
+
+  if (chainIndex === -1) {
+    const stripped = stripSig(html);
+    return { safeZone: stripped, replyChain: "", fullStripped: stripped };
+  }
+
+  const safeZone = stripSig(html.slice(0, chainIndex));   // strip only the top
+  const replyChain = html.slice(chainIndex);               // NEVER touch this
+
+  return {
+    safeZone,
+    replyChain,
+    fullStripped: safeZone + replyChain,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MOBILE: wait for mail item to be fully ready before touching it
 // ─────────────────────────────────────────────────────────────────────────────
 async function waitForItemReady(item, maxRetries = 6, delayMs = 500) {
@@ -289,6 +313,15 @@ export default function App({ user }) {
     });
   }
 
+  function bodySetAsyncMac(item, html) {
+    return new Promise((res, rej) => {
+      item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+        if (r.status !== "succeeded") { rej(r.error); return; }
+        res(); // No prependAsync — avoids cursor loss on Mac
+      });
+    });
+  }
+
   function bodyPrependAsync(item, html) {
     return new Promise((res, rej) => {
       if (typeof item.body.prependAsync !== "function") { rej(new Error("prependAsync not available")); return; }
@@ -346,15 +379,12 @@ export default function App({ user }) {
   // ── Detection helpers ────────────────────────────────────────────────────
 
   function hasCardByteSignature(html) {
-    // Standard detection
     if (html.includes("CARD_BYTE_SIGNATURE_START") ||
       html.includes("CARDBYTE_SIGNATURE") ||
       html.includes("CB_SIG_START") ||
       /id="x?_?cardbyte-signature-block"/i.test(html)) {
       return true;
     }
-
-    // Mac-specific detection
     if (isMacPlatform()) {
       const macPatterns = [
         /<div[^>]*style="[^"]*font-family:Calibri[^"]*"[^>]*>[\s\S]*?CardByte/i,
@@ -362,7 +392,6 @@ export default function App({ user }) {
       ];
       return macPatterns.some(pattern => pattern.test(html));
     }
-
     return false;
   }
 
@@ -573,37 +602,6 @@ export default function App({ user }) {
 
   // ── Tiered insertion methods — platform-aware ─────────────────────────────
 
-  /**
-   * stripSigFromSafeZoneOnly
-   * Strips the CardByte signature ONLY from the portion of the body
-   * that sits ABOVE the reply-chain marker (the "safe zone").
-   * Everything from the first reply-chain marker onwards is returned
-   * completely untouched — preserving signatures inside quoted emails.
-   */
-  function stripSigFromSafeZoneOnly(html) {
-    const chainIndex = findReplyChainIndex(html);
-
-    if (chainIndex === -1) {
-      const stripped = stripSig(html);
-      return { safeZone: stripped, replyChain: "", fullStripped: stripped };
-    }
-
-    const safeZone = stripSig(html.slice(0, chainIndex));
-    const replyChain = html.slice(chainIndex);
-
-    return { safeZone, replyChain, fullStripped: safeZone + replyChain };
-  }
-
-  /**
-   * tryInsertSignatureOnly
-   * Inserts signature WITHOUT touching existing body content.
-   *
-   * MOBILE:   prependAsync → (setSignatureAsync if available)
-   * MAC:      prependAsync → setSignatureAsync (FIX: was using wrong variable 'signatureHtml')
-   * OWA+GIF:  prependAsync → setSignatureAsync
-   * OWA:      setSelectedDataAsync → setSignatureAsync → prependAsync
-   * DESKTOP:  setSignatureAsync → prependAsync
-   */
   async function tryInsertSignatureOnly(item, html, label = "") {
     let methods;
 
@@ -613,8 +611,6 @@ export default function App({ user }) {
         methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) });
 
     } else if (mac) {
-      // FIX: was referencing undefined 'signatureHtml' — corrected to 'html'.
-      // prependAsync first — avoids body clobber in taskpane context on Mac.
       methods = [
         { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
@@ -654,16 +650,6 @@ export default function App({ user }) {
     return { success: false, method: "none" };
   }
 
-  /**
-   * tryInsertFullBody
-   * Replaces or sets the full body (last resort / mobile default).
-   *
-   * MOBILE:   setAsync → prependAsync
-   * MAC:      setAsync → prependAsync
-   * OWA+GIF:  setSelectedDataAsync → prependAsync → setSignatureAsync → setAsync
-   * OWA:      setSelectedDataAsync → prependAsync → setSignatureAsync → setAsync
-   * DESKTOP:  bodySelectAllAndReplaceAsync → prependAsync → setSignatureAsync → setAsync
-   */
   async function tryInsertFullBody(item, html, label = "") {
     let methods;
 
@@ -675,7 +661,7 @@ export default function App({ user }) {
 
     } else if (mac) {
       methods = [
-        { name: "setAsync", fn: () => bodySetAsync(item, html) },
+        { name: "setAsync", fn: () => bodySetAsyncMac(item, html) },
         { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
       ];
 
@@ -730,7 +716,6 @@ export default function App({ user }) {
       await ensureNoDefaultSignature(item);
 
       const existingBody = await getBodyHtml(item);
-      const cleanBody = stripSig(existingBody);
 
       if (hasCardByteSignature(existingBody)) {
         console.log("[CardByte] Existing signature detected — will replace");
@@ -757,18 +742,25 @@ export default function App({ user }) {
 
         // ── MOBILE REPLY ──
         if (mobile) {
+          // T1: signature-only (non-destructive)
           for (const v of variants) {
             const r = await tryInsertSignatureOnly(item, v.html, `MobileReply-T1-${v.label}`);
             if (r.success) { await stabilizeSelection(item); return; }
           }
-          const insertIndex = findReplyChainIndex(cleanBody);
-          const fullHtml = insertIndex > -1
-            ? cleanBody.slice(0, insertIndex) + signatureBlock + cleanBody.slice(insertIndex)
-            : cleanBody + signatureBlock;
-          let r = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
-          if (r.success) { await stabilizeSelection(item); return; }
-          r = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileReply-T3");
-          if (r.success) { await stabilizeSelection(item); return; }
+
+          // T2/T3: full-body rebuild — strip sig from safe zone only to preserve reply chain
+          {
+            const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
+            const insertIndex = findReplyChainIndex(existingBody); // use original index
+            const base = safeZone;
+            const fullHtml = base + signatureBlock + replyChain;
+
+            let r = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
+            if (r.success) { await stabilizeSelection(item); return; }
+
+            r = await tryInsertFullBody(item, stripBase64Images(base + signatureBlock + replyChain), "MobileReply-T3");
+            if (r.success) { await stabilizeSelection(item); return; }
+          }
           throw new Error("All mobile reply strategies failed");
         }
 
@@ -776,37 +768,42 @@ export default function App({ user }) {
         if (mac) {
           console.log("[CardByte] Mac reply: safe-zone strip — preserving quoted chain signatures");
 
-          const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
-          const finalHtml = safeZone + signatureBlock + replyChain;
-
-          try {
-            await bodySetAsync(item, finalHtml);
-            console.log("[CardByte] ✅ Mac reply: setAsync succeeded");
-            await stabilizeSelection(item);
-            return;
-          } catch (e) { console.warn("[CardByte] Mac reply setAsync failed:", e.message); }
-
+          // T1: compressed — strip sig from safe zone only
           try {
             const compressed = await compressImagesInHtml(signatureBlock);
-            const { safeZone: sz, replyChain: rc } = stripSigFromSafeZoneOnly(existingBody);
-            await bodySetAsync(item, sz + compressed + rc);
-            console.log("[CardByte] ✅ Mac reply: setAsync compressed succeeded");
+            const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
+            const fullHtml = safeZone + compressed + replyChain;
+            await bodySetAsyncMac(item, fullHtml);
+            console.log("[CardByte] ✅ Mac reply T1: setAsync compressed succeeded");
             await stabilizeSelection(item);
             return;
-          } catch (e) { console.warn("[CardByte] Mac reply setAsync compressed failed:", e.message); }
+          } catch (e) { console.warn("[CardByte] Mac reply T1 failed:", e.message); }
 
+          // T2: uncompressed — strip sig from safe zone only
           try {
-            const { safeZone: sz, replyChain: rc } = stripSigFromSafeZoneOnly(existingBody);
-            await bodySetAsync(item, sz + stripBase64Images(signatureBlock) + rc);
-            console.log("[CardByte] ✅ Mac reply: setAsync stripped succeeded");
+            const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
+            const fullHtml = safeZone + signatureBlock + replyChain;
+            await bodySetAsyncMac(item, fullHtml);
+            console.log("[CardByte] ✅ Mac reply T2: setAsync succeeded");
             await stabilizeSelection(item);
             return;
-          } catch (e) { console.warn("[CardByte] Mac reply setAsync stripped failed:", e.message); }
+          } catch (e) { console.warn("[CardByte] Mac reply T2 failed:", e.message); }
+
+          // T3: images stripped — strip sig from safe zone only
+          try {
+            const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
+            const fullHtml = safeZone + stripBase64Images(signatureBlock) + replyChain;
+            await bodySetAsyncMac(item, fullHtml);
+            console.log("[CardByte] ✅ Mac reply T3: setAsync stripped succeeded");
+            await stabilizeSelection(item);
+            return;
+          } catch (e) { console.warn("[CardByte] Mac reply T3 failed:", e.message); }
 
           throw new Error("All Mac reply insertion methods failed");
         }
 
         // ── DESKTOP / OWA REPLY ──
+        // T1: signature-only insertion (preferred — never touches reply chain)
         for (const v of variants) {
           const r = await tryInsertSignatureOnly(item, v.html, `Reply-T1-${v.label}`);
           if (r.success) {
@@ -815,24 +812,39 @@ export default function App({ user }) {
             return;
           }
         }
+
+        // T2: full-body rebuild — MUST use stripSigFromSafeZoneOnly to preserve reply chain
         try {
           const compressed = await compressImagesInHtml(signatureBlock);
-          const insertIndex = findReplyChainIndex(cleanBody);
-          const fullHtml = insertIndex > -1
-            ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
-            : cleanBody + compressed;
+          const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
+          const fullHtml = safeZone + compressed + replyChain;
+          console.log(`[CardByte] Reply-T2 full-body: safeZone=${(safeZone.length / 1024).toFixed(1)}KB replyChain=${(replyChain.length / 1024).toFixed(1)}KB`);
           const r = await tryInsertFullBody(item, fullHtml, "Reply-T2");
           if (r.success) { await stabilizeSelection(item); return; }
         } catch (e) { console.warn("[CardByte] Reply-T2:", e.message); }
+
+        // T3: stripped images, signature-only fallback
         {
           const r = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T3");
           if (r.success) { await stabilizeSelection(item); return; }
         }
+
+        // T4: stripped images, full-body rebuild fallback
+        try {
+          const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
+          const fullHtml = safeZone + stripBase64Images(signatureBlock) + replyChain;
+          const r = await tryInsertFullBody(item, fullHtml, "Reply-T4");
+          if (r.success) { await stabilizeSelection(item); return; }
+        } catch (e) { console.warn("[CardByte] Reply-T4:", e.message); }
+
         return;
       }
 
       // ── PATH B: NEW COMPOSE ──────────────────────────────────────────────
       console.log("[CardByte] ✉️ New compose path");
+
+      // For compose, strip entire body (no reply chain to protect)
+      const cleanBody = stripSig(existingBody);
 
       // ── MOBILE COMPOSE ──
       if (mobile) {
@@ -852,13 +864,10 @@ export default function App({ user }) {
       if (mac) {
         console.log("[CardByte] Mac compose: safe signature insertion");
 
-        // ── REPLACE PATH: existing sig detected ─────────────────────────
-        // prependAsync would double-insert. Must strip old sig and splice new
-        // one via setAsync to preserve the draft content.
+        // REPLACE PATH: existing sig detected — must strip and splice via setAsync
         if (hasCardByteSignature(existingBody)) {
           console.log("[CardByte] Mac compose: replacing existing signature via safe-zone strip");
 
-          // Re-read body fresh — existingBody may be stale on Mac
           let freshBody = existingBody;
           try {
             freshBody = await getBodyHtml(item);
@@ -867,7 +876,6 @@ export default function App({ user }) {
             console.warn("[CardByte] Mac compose replace: re-read failed, using existingBody:", e.message);
           }
 
-          // Stale-read guard
           if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
             console.warn("[CardByte] ⚠️ Mac stale-read on replace — reverting to existingBody");
             freshBody = existingBody;
@@ -879,7 +887,7 @@ export default function App({ user }) {
           for (const v of variants) {
             try {
               const fullHtml = trimmedSafe + "<br/>" + v.html + (replyChain || "<br/>");
-              await bodySetAsync(item, fullHtml);
+              await bodySetAsyncMac(item, fullHtml);
               console.log(`[CardByte] ✅ Mac compose replace: setAsync succeeded (${v.label})`);
               await stabilizeSelection(item);
               return;
@@ -888,12 +896,10 @@ export default function App({ user }) {
             }
           }
 
-          // setAsync exhausted — fall through to prependAsync as last resort
           console.warn("[CardByte] Mac compose replace: all setAsync variants failed, falling through to prependAsync");
         }
 
-        // ── FRESH INSERT PATH: prependAsync — never touches existing draft ─
-        // ── FRESH INSERT PATH: append after draft body — signature goes at bottom ─
+        // FRESH INSERT PATH: append signature after existing draft content
         let freshBodyForInsert = existingBody;
         try {
           freshBodyForInsert = await getBodyHtml(item);
@@ -901,7 +907,6 @@ export default function App({ user }) {
           console.warn("[CardByte] Mac compose fresh insert: re-read failed, using existingBody:", e.message);
         }
 
-        // Stale-read guard
         if (existingBody.length > 200 && freshBodyForInsert.length < existingBody.length * 0.5) {
           console.warn("[CardByte] ⚠️ Mac stale-read on fresh insert — reverting to existingBody");
           freshBodyForInsert = existingBody;
@@ -916,7 +921,7 @@ export default function App({ user }) {
             const fullHtml = trimmedFreshBody
               ? `${trimmedFreshBody}<br/>${v.html}<br/>`
               : `<br/>${v.html}<br/>`;
-            await bodySetAsync(item, fullHtml);
+            await bodySetAsyncMac(item, fullHtml);
             console.log(`[CardByte] ✅ Mac compose fresh insert: setAsync succeeded (${v.label})`);
             await stabilizeSelection(item);
             return;
@@ -937,8 +942,7 @@ export default function App({ user }) {
           }
         }
 
-        // ── FALLBACK: setAsync with full body rebuild ─────────────────────
-        // Re-read body fresh before any setAsync (race condition guard)
+        // FALLBACK: setAsync with full body rebuild using clean body
         let freshBody = existingBody;
         try {
           freshBody = await getBodyHtml(item);
@@ -947,13 +951,11 @@ export default function App({ user }) {
           console.warn("[CardByte] Mac compose re-read failed, using existingBody:", e.message);
         }
 
-        // Stale-read guard
         if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
           console.warn("[CardByte] ⚠️ Mac stale-read detected — reverting to existingBody");
           freshBody = existingBody;
         }
 
-        // Content guard: refuse setAsync if body is near-empty (would wipe unseen draft)
         const draftTextLength = freshBody.replace(/<[^>]*>/g, "").trim().length;
         if (draftTextLength < 30) {
           console.warn("[CardByte] ⚠️ Mac body near-empty after re-read — skipping setAsync to protect draft");
@@ -966,7 +968,7 @@ export default function App({ user }) {
         for (const v of variants) {
           try {
             const fullHtml = `${macCleanBody}<br/>${v.html}<br/>`;
-            await bodySetAsync(item, fullHtml);
+            await bodySetAsyncMac(item, fullHtml);
             console.log(`[CardByte] ✅ Mac compose setAsync fallback succeeded (${v.label})`);
             await stabilizeSelection(item);
             return;
@@ -1009,20 +1011,6 @@ export default function App({ user }) {
       console.error("[CardByte] applySignature failed:", e);
       throw e;
     }
-  }
-
-  function buildReplyHtml(existingBody, sigBlock) {
-    const markers = [
-      /<div[^>]*id="?divRplyFwdMsg"?/i, /<div[^>]*id="?appendonsend"?/i,
-      /<div[^>]*id="?x_divRplyFwdMsg"?/i,
-      /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
-      /<blockquote/i, /<!-- OriginalMessage -->/i,
-    ];
-    let idx = -1;
-    for (const p of markers) { const i = existingBody.search(p); if (i > -1) { idx = i; break; } }
-    return idx > -1
-      ? `${existingBody.slice(0, idx)}${sigBlock}${existingBody.slice(idx)}`
-      : `${existingBody}${sigBlock}`;
   }
 
   async function attachImages(item, images) {
