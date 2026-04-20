@@ -893,14 +893,47 @@ export default function App({ user }) {
         }
 
         // ── FRESH INSERT PATH: prependAsync — never touches existing draft ─
+        // ── FRESH INSERT PATH: append after draft body — signature goes at bottom ─
+        let freshBodyForInsert = existingBody;
+        try {
+          freshBodyForInsert = await getBodyHtml(item);
+        } catch (e) {
+          console.warn("[CardByte] Mac compose fresh insert: re-read failed, using existingBody:", e.message);
+        }
+
+        // Stale-read guard
+        if (existingBody.length > 200 && freshBodyForInsert.length < existingBody.length * 0.5) {
+          console.warn("[CardByte] ⚠️ Mac stale-read on fresh insert — reverting to existingBody");
+          freshBodyForInsert = existingBody;
+        }
+
+        const trimmedFreshBody = freshBodyForInsert
+          .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "")
+          .trimEnd();
+
         for (const v of variants) {
           try {
-            await bodyPrependAsync(item, v.html);
-            console.log(`[CardByte] ✅ Mac compose prependAsync succeeded (${v.label})`);
+            const fullHtml = trimmedFreshBody
+              ? `${trimmedFreshBody}<br/>${v.html}<br/>`
+              : `<br/>${v.html}<br/>`;
+            await bodySetAsync(item, fullHtml);
+            console.log(`[CardByte] ✅ Mac compose fresh insert: setAsync succeeded (${v.label})`);
             await stabilizeSelection(item);
             return;
           } catch (e) {
-            console.warn(`[CardByte] Mac compose prependAsync failed (${v.label}):`, e.message);
+            console.warn(`[CardByte] Mac compose fresh insert setAsync failed (${v.label}):`, e.message);
+          }
+        }
+
+        // Last resort fallback: prependAsync
+        for (const v of variants) {
+          try {
+            await bodyPrependAsync(item, v.html);
+            console.log(`[CardByte] ✅ Mac compose prependAsync fallback succeeded (${v.label})`);
+            await stabilizeSelection(item);
+            return;
+          } catch (e) {
+            console.warn(`[CardByte] Mac compose prependAsync fallback failed (${v.label}):`, e.message);
           }
         }
 

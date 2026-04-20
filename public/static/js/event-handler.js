@@ -1070,12 +1070,42 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
 
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
-            // cleanBody already has the old sig stripped; append fresh block.
+
+            if (mac) {
+                // Mac: must rebuild full body — prependAsync/setSignatureAsync would duplicate
+                let freshBody = existingBody;
+                try { freshBody = await getBodyHtml(item); } catch (e) { /* use existingBody */ }
+                if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) freshBody = existingBody;
+
+                const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(freshBody);
+                const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+
+                const sigVariants = [
+                    signatureBlock,
+                    await compressImagesInHtml(signatureBlock).catch(() => signatureBlock),
+                    stripBase64Images(signatureBlock),
+                ];
+
+                for (let i = 0; i < sigVariants.length; i++) {
+                    try {
+                        const fullHtml = trimmedSafe
+                            ? `${trimmedSafe}<br/>${sigVariants[i]}${replyChain || "<br/>"}`
+                            : `<br/>${sigVariants[i]}<br/>`;
+                        await bodySetAsyncMac(item, fullHtml);
+                        console.log(`[CardByte] ✅ Mac compose replace: setAsync succeeded (variant ${i})`);
+                        return;
+                    } catch (e) {
+                        console.warn(`[CardByte] Mac compose replace: setAsync variant ${i} failed:`, e.message);
+                    }
+                }
+                throw new Error("Mac compose replace: all setAsync variants failed");
+            }
+
+            // Non-Mac: original behaviour
             const updatedBody = signatureBlock;
-            console.log("[CardByte] Attempting full-body replace to update existing signature", cleanBody, signatureBlock)
+            console.log("[CardByte] Attempting full-body replace to update existing signature");
             const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
             if (result.success) { return; }
-            // If replace fails fall through to the tier chain below.
         }
 
         // MOBILE COMPOSE PATH
@@ -1100,17 +1130,49 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
         // DESKTOP / OWA / MAC COMPOSE PATH
         // v0.0.8: ALL tiers use cleanBody — never raw existingBody.
         if (mac && isManualApply) {
-            console.log("[CardByte] Mac manual compose apply: signature-only");
-            const result = await tryInsertSignatureOnly(item, signatureBlock, "MacManualCompose-T1");
-            if (result.success) { return; }
-            const compressed = await compressImagesInHtml(signatureBlock);
-            const result2 = await tryInsertSignatureOnly(item, compressed, "MacManualCompose-T2");
-            if (result2.success) { return; }
-            const result3 = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacManualCompose-T3");
-            if (result3.success) { return; }
-            throw new Error("Mac manual compose: all signature-only tiers failed");
+            console.log("[CardByte] Mac manual compose apply: append signature below draft");
+
+            // Re-read body fresh to avoid stale-read on Mac
+            let freshBody = existingBody;
+            try {
+                freshBody = await getBodyHtml(item);
+                console.log(`[CardByte] Mac manual compose: re-read body ${(freshBody.length / 1024).toFixed(1)}KB`);
+            } catch (e) {
+                console.warn("[CardByte] Mac manual compose: re-read failed, using existingBody:", e.message);
+            }
+
+            // Stale-read guard
+            if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
+                console.warn("[CardByte] ⚠️ Mac stale-read on manual compose — reverting to existingBody");
+                freshBody = existingBody;
+            }
+
+            // Strip any previous CardByte sig, trim trailing whitespace
+            const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(freshBody);
+            const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+
+            const sigVariants = [
+                signatureBlock,
+                await compressImagesInHtml(signatureBlock).catch(() => signatureBlock),
+                stripBase64Images(signatureBlock),
+            ];
+
+            for (let i = 0; i < sigVariants.length; i++) {
+                try {
+                    const fullHtml = trimmedSafe
+                        ? `${trimmedSafe}<br/>${sigVariants[i]}${replyChain ? replyChain : "<br/>"}`
+                        : `<br/>${sigVariants[i]}<br/>`;
+                    await bodySetAsyncMac(item, fullHtml);
+                    console.log(`[CardByte] ✅ Mac manual compose: setAsync succeeded (variant ${i})`);
+                    return;
+                } catch (e) {
+                    console.warn(`[CardByte] Mac manual compose: setAsync variant ${i} failed:`, e.message);
+                }
+            }
+
+            throw new Error("Mac manual compose: all setAsync variants failed");
         }
-        
+
         // Compose T1
         {
             const fullHtml =
