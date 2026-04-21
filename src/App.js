@@ -182,13 +182,13 @@ function findReplyChainIndex(html) {
     /<div[^>]*class="?WordSection[0-9]"?/i,
     /x_divRplyFwdMsg/i,
     /divRplyFwdMsg/i,
-    // ✅ ADD THESE — Mac Outlook reply markers
+    // Mac Outlook reply markers
     /<div[^>]*class="[^"]*gmail_extra[^"]*"/i,
     /<div[^>]*class="[^"]*yahoo_quoted[^"]*"/i,
     /<!--\s*--original message--\s*-->/i,
-    /On .{10,80} wrote:/i,          // "On Mon, Apr 21 2026, John wrote:"
-    /<hr[^>]*>/i,                    // Mac inserts a plain <hr> before quoted
-    /_{10,}/,                        // "____" separator Mac sometimes uses
+    /On .{10,80} wrote:/i,
+    /<hr[^>]*>/i,
+    /_{10,}/,
   ];
   let earliest = -1;
   for (const marker of replyMarkers) {
@@ -212,8 +212,8 @@ function stripSigFromSafeZoneOnly(html) {
     return { safeZone: stripped, replyChain: "", fullStripped: stripped };
   }
 
-  const safeZone = stripSig(html.slice(0, chainIndex));   // strip only the top
-  const replyChain = html.slice(chainIndex);               // NEVER touch this
+  const safeZone = stripSig(html.slice(0, chainIndex));
+  const replyChain = html.slice(chainIndex); // NEVER touch this
 
   return {
     safeZone,
@@ -722,6 +722,7 @@ export default function App({ user }) {
 
       await ensureNoDefaultSignature(item);
 
+      // ── IMPORTANT: read body ONCE, EARLY — do NOT re-read inside Mac reply path ──
       const existingBody = await getBodyHtml(item);
 
       if (hasCardByteSignature(existingBody)) {
@@ -758,24 +759,25 @@ export default function App({ user }) {
           // T2/T3: full-body rebuild — strip sig from safe zone only to preserve reply chain
           {
             const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
-            const insertIndex = findReplyChainIndex(existingBody); // use original index
-            const base = safeZone;
-            const fullHtml = base + signatureBlock + replyChain;
+            const fullHtml = safeZone + signatureBlock + replyChain;
 
             let r = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
             if (r.success) { await stabilizeSelection(item); return; }
 
-            r = await tryInsertFullBody(item, stripBase64Images(base + signatureBlock + replyChain), "MobileReply-T3");
+            r = await tryInsertFullBody(item, stripBase64Images(safeZone + signatureBlock + replyChain), "MobileReply-T3");
             if (r.success) { await stabilizeSelection(item); return; }
           }
           throw new Error("All mobile reply strategies failed");
         }
 
-        // ── MAC REPLY ──
+        // ── MAC REPLY ── (FIXED: non-destructive first, setAsync as true last resort only)
         if (mac) {
-          console.log("[CardByte] Mac reply: non-destructive insert only — never setAsync");
+          console.log("[CardByte] Mac reply: non-destructive insert only — never setAsync unless boundary confirmed");
 
-          // T1 + T2: signature-only methods — never reconstruct the body
+          // T1 + T2: signature-only methods per variant — NEVER reconstruct the body.
+          // prependAsync and setSignatureAsync insert at the cursor/signature slot without
+          // reading or writing the rest of the body, so the reply chain is completely
+          // untouched regardless of what getAsync returned (which can be truncated on Mac).
           for (const v of variants) {
             try {
               await bodyPrependAsync(item, v.html);
@@ -796,31 +798,52 @@ export default function App({ user }) {
             }
           }
 
-          // LAST RESORT ONLY: setAsync — only if reply chain boundary is unambiguously found
-          // Uses existingBody exclusively — never a re-read (Mac getAsync truncates on reply windows)
-          console.warn("[CardByte] Mac reply: all non-destructive methods failed, attempting setAsync last resort");
+          // T3 — LAST RESORT ONLY: setAsync with safe-zone-only strip.
+          //
+          // We use 'existingBody' (the very first getAsync result at the top of this
+          // function) intentionally — NOT a re-read. On Mac, re-reading inside a reply
+          // window often returns an even MORE truncated result than the first read.
+          //
+          // We only proceed if BOTH conditions hold:
+          //   a) The reply chain boundary is unambiguously found in existingBody.
+          //   b) existingBody is long enough to be a real reply body (> 500 chars).
+          //      A suspiciously short body means getAsync was truncated and we must
+          //      NOT write it back — doing so would destroy the reply chain.
+          console.warn("[CardByte] Mac reply: all non-destructive methods failed — attempting setAsync LAST RESORT");
+
           const chainIndex = findReplyChainIndex(existingBody);
 
           if (chainIndex === -1) {
-            console.error("[CardByte] Mac reply: reply chain boundary not found — aborting to prevent data loss");
-            throw new Error("Mac reply: could not locate reply chain boundary");
+            console.error("[CardByte] Mac reply: reply chain boundary NOT found — aborting to prevent data loss");
+            throw new Error("Mac reply: could not locate reply chain boundary; all safe methods exhausted");
+          }
+
+          const MIN_REPLY_BODY_LENGTH = 500;
+          if (existingBody.length < MIN_REPLY_BODY_LENGTH) {
+            console.error(
+              `[CardByte] Mac reply: existingBody too short (${existingBody.length} chars) — likely truncated; refusing setAsync`
+            );
+            throw new Error("Mac reply: existingBody appears truncated; refusing setAsync to protect reply chain");
           }
 
           for (const v of variants) {
             try {
+              // Strip only the safe zone (above reply chain boundary).
+              // The reply chain itself is spliced back in completely unmodified.
               const safeZone = stripSig(existingBody.slice(0, chainIndex));
-              const replyChain = existingBody.slice(chainIndex); // never modified
+              const replyChain = existingBody.slice(chainIndex); // NEVER modified
               const fullHtml = safeZone + v.html + replyChain;
+
               await bodySetAsyncMac(item, fullHtml);
-              console.log(`[CardByte] ✅ Mac reply setAsync last-resort succeeded (${v.label})`);
+              console.log(`[CardByte] ✅ Mac reply setAsync LAST RESORT succeeded (${v.label})`);
               await stabilizeSelection(item);
               return;
             } catch (e) {
-              console.warn(`[CardByte] Mac reply setAsync last-resort failed (${v.label}):`, e.message);
+              console.warn(`[CardByte] Mac reply setAsync LAST RESORT failed (${v.label}):`, e.message);
             }
           }
 
-          throw new Error("All Mac reply insertion methods failed");
+          throw new Error("Mac reply: all insertion methods (including setAsync last resort) failed");
         }
 
         // ── DESKTOP / OWA REPLY ──
@@ -903,12 +926,13 @@ export default function App({ user }) {
           }
 
           const { safeZone, replyChain } = stripSigFromSafeZoneOnly(freshBody);
-
           const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
 
           for (const v of variants) {
             try {
-              const fullHtml = trimmedSafe + "<br/>" + v.html + (replyChain || "<br/>");
+              const fullHtml = trimmedSafe
+                ? `${trimmedSafe}<br/>${v.html}${replyChain || "<br/>"}`
+                : `<br/>${v.html}<br/>`;
               await bodySetAsyncMac(item, fullHtml);
               console.log(`[CardByte] ✅ Mac compose replace: setAsync succeeded (${v.label})`);
               await stabilizeSelection(item);
