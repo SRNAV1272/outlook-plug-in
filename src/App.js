@@ -773,38 +773,52 @@ export default function App({ user }) {
 
         // ── MAC REPLY ──
         if (mac) {
-          console.log("[CardByte] Mac reply: safe-zone strip — preserving quoted chain signatures");
+          console.log("[CardByte] Mac reply: non-destructive insert only — never setAsync");
 
-          // T1: compressed — strip sig from safe zone only
-          try {
-            const compressed = await compressImagesInHtml(signatureBlock);
-            const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
-            const fullHtml = safeZone + compressed + replyChain;
-            await bodySetAsyncMac(item, fullHtml);
-            console.log("[CardByte] ✅ Mac reply T1: setAsync compressed succeeded");
-            await stabilizeSelection(item);
-            return;
-          } catch (e) { console.warn("[CardByte] Mac reply T1 failed:", e.message); }
+          // T1 + T2: signature-only methods — never reconstruct the body
+          for (const v of variants) {
+            try {
+              await bodyPrependAsync(item, v.html);
+              console.log(`[CardByte] ✅ Mac reply prependAsync succeeded (${v.label})`);
+              await stabilizeSelection(item);
+              return;
+            } catch (e) {
+              console.warn(`[CardByte] Mac reply prependAsync failed (${v.label}):`, e.message);
+            }
 
-          // T2: uncompressed — strip sig from safe zone only
-          try {
-            const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
-            const fullHtml = safeZone + signatureBlock + replyChain;
-            await bodySetAsyncMac(item, fullHtml);
-            console.log("[CardByte] ✅ Mac reply T2: setAsync succeeded");
-            await stabilizeSelection(item);
-            return;
-          } catch (e) { console.warn("[CardByte] Mac reply T2 failed:", e.message); }
+            try {
+              await bodySetSignatureAsync(item, v.html);
+              console.log(`[CardByte] ✅ Mac reply setSignatureAsync succeeded (${v.label})`);
+              await stabilizeSelection(item);
+              return;
+            } catch (e) {
+              console.warn(`[CardByte] Mac reply setSignatureAsync failed (${v.label}):`, e.message);
+            }
+          }
 
-          // T3: images stripped — strip sig from safe zone only
-          try {
-            const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
-            const fullHtml = safeZone + stripBase64Images(signatureBlock) + replyChain;
-            await bodySetAsyncMac(item, fullHtml);
-            console.log("[CardByte] ✅ Mac reply T3: setAsync stripped succeeded");
-            await stabilizeSelection(item);
-            return;
-          } catch (e) { console.warn("[CardByte] Mac reply T3 failed:", e.message); }
+          // LAST RESORT ONLY: setAsync — only if reply chain boundary is unambiguously found
+          // Uses existingBody exclusively — never a re-read (Mac getAsync truncates on reply windows)
+          console.warn("[CardByte] Mac reply: all non-destructive methods failed, attempting setAsync last resort");
+          const chainIndex = findReplyChainIndex(existingBody);
+
+          if (chainIndex === -1) {
+            console.error("[CardByte] Mac reply: reply chain boundary not found — aborting to prevent data loss");
+            throw new Error("Mac reply: could not locate reply chain boundary");
+          }
+
+          for (const v of variants) {
+            try {
+              const safeZone = stripSig(existingBody.slice(0, chainIndex));
+              const replyChain = existingBody.slice(chainIndex); // never modified
+              const fullHtml = safeZone + v.html + replyChain;
+              await bodySetAsyncMac(item, fullHtml);
+              console.log(`[CardByte] ✅ Mac reply setAsync last-resort succeeded (${v.label})`);
+              await stabilizeSelection(item);
+              return;
+            } catch (e) {
+              console.warn(`[CardByte] Mac reply setAsync last-resort failed (${v.label}):`, e.message);
+            }
+          }
 
           throw new Error("All Mac reply insertion methods failed");
         }
@@ -875,33 +889,18 @@ export default function App({ user }) {
         if (hasCardByteSignature(existingBody)) {
           console.log("[CardByte] Mac compose: replacing existing signature via safe-zone strip");
 
-          // let freshBody = existingBody;
-          // try {
-          //   freshBody = await getBodyHtml(item);
-          //   console.log(`[CardByte] Mac compose replace: re-read body ${(freshBody.length / 1024).toFixed(1)}KB`);
-          // } catch (e) {
-          //   console.warn("[CardByte] Mac compose replace: re-read failed, using existingBody:", e.message);
-          // }
-
-          // if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
-          //   console.warn("[CardByte] ⚠️ Mac stale-read on replace — reverting to existingBody");
-          //   freshBody = existingBody;
-          // }
           let freshBody = existingBody;
           try {
-            const reread = await getBodyHtml(item);
-            // Only use re-read if it's not suspiciously shorter AND existingBody had no reply chain
-            const existingHadReplyChain = detectReplyChain(existingBody);
-            const suspiciouslyShort = reread.length < existingBody.length * 0.8;
-            if (!existingHadReplyChain && !suspiciouslyShort) {
-              freshBody = reread;
-            } else if (suspiciouslyShort) {
-              console.warn("[CardByte] Mac re-read suspicious — keeping existingBody");
-            }
+            freshBody = await getBodyHtml(item);
+            console.log(`[CardByte] Mac compose replace: re-read body ${(freshBody.length / 1024).toFixed(1)}KB`);
           } catch (e) {
-            console.warn("[CardByte] Mac re-read failed:", e.message);
+            console.warn("[CardByte] Mac compose replace: re-read failed, using existingBody:", e.message);
           }
 
+          if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
+            console.warn("[CardByte] ⚠️ Mac stale-read on replace — reverting to existingBody");
+            freshBody = existingBody;
+          }
 
           const { safeZone, replyChain } = stripSigFromSafeZoneOnly(freshBody);
 
