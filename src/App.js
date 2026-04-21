@@ -642,11 +642,18 @@ export default function App({ user }) {
   //   Use APIs that INSERT content at a specific slot WITHOUT reading or
   //   writing the full body HTML:
   //
-  //     • prependAsync(html)      — inserts at cursor / top of compose area
-  //     • setSignatureAsync(html) — inserts into the dedicated signature slot
+  //     • setSignatureAsync(html) — Outlook REPLACES the signature slot.
+  //                                 Calling it again overwrites the previous
+  //                                 value — idempotent, zero duplication risk.
+  //     • prependAsync(html)      — inserts at top of compose area.
+  //                                 ONLY safe when no signature exists yet;
+  //                                 calling it again ADDS another copy on top.
   //
-  //   Both of these are "append-only" from Outlook's perspective. The reply
-  //   chain is never read, never modified, never written back.
+  // DUPLICATION FIX (v0.0.11):
+  //   We always try setSignatureAsync first — it is the only method that is
+  //   truly idempotent (Outlook manages exactly one signature slot per window).
+  //   prependAsync is tried as a fallback ONLY when no CardByte signature is
+  //   already present in the body, preventing a second copy being prepended.
   //
   // WHAT WE NEVER DO HERE:
   //   setAsync is NEVER called in this function, regardless of failures.
@@ -656,23 +663,37 @@ export default function App({ user }) {
   async function macReplyInsert(item, variants) {
     console.log("[CardByte] ── macReplyInsert: non-destructive only (setAsync NEVER called) ──");
 
-    for (const v of variants) {
-      // prependAsync: inserts at top of compose area, fully non-destructive
-      try {
-        await bodyPrependAsync(item, v.html);
-        console.log(`[CardByte] ✅ macReplyInsert: prependAsync ok (${v.label})`);
-        return { success: true, method: "prependAsync" };
-      } catch (e) {
-        console.warn(`[CardByte] macReplyInsert: prependAsync failed (${v.label}): ${e.message}`);
-      }
+    // Read body once just for detection — may be truncated on Mac reply,
+    // but we only use it to check hasCardByteSignature, never to write back.
+    const existingBodyForCheck = await getBodyHtml(item).catch(() => "");
+    const alreadyHasSig = hasCardByteSignature(existingBodyForCheck);
+    console.log(`[CardByte] macReplyInsert: alreadyHasSig=${alreadyHasSig}`);
 
-      // setSignatureAsync: inserts into signature slot, also non-destructive
+    for (const v of variants) {
+      // ── setSignatureAsync: Outlook REPLACES the signature slot ──────────
+      // Calling it a second time overwrites the first — zero duplication risk.
+      // This is the preferred method for both fresh insert and re-apply.
       try {
         await bodySetSignatureAsync(item, v.html);
         console.log(`[CardByte] ✅ macReplyInsert: setSignatureAsync ok (${v.label})`);
         return { success: true, method: "setSignatureAsync" };
       } catch (e) {
         console.warn(`[CardByte] macReplyInsert: setSignatureAsync failed (${v.label}): ${e.message}`);
+      }
+
+      // ── prependAsync: safe ONLY when no signature exists yet ────────────
+      // If a CardByte sig is already in the body, prependAsync would add
+      // a second copy above it. Skip it entirely in that case.
+      if (!alreadyHasSig) {
+        try {
+          await bodyPrependAsync(item, v.html);
+          console.log(`[CardByte] ✅ macReplyInsert: prependAsync ok (${v.label})`);
+          return { success: true, method: "prependAsync" };
+        } catch (e) {
+          console.warn(`[CardByte] macReplyInsert: prependAsync failed (${v.label}): ${e.message}`);
+        }
+      } else {
+        console.warn(`[CardByte] macReplyInsert: skipping prependAsync (${v.label}) — sig already present, would duplicate`);
       }
     }
 
@@ -826,67 +847,56 @@ export default function App({ user }) {
       // ── MAC COMPOSE ───────────────────────────────────────────────────
       // Compose on Mac is safe for setAsync: getAsync is reliable when there
       // is no reply chain (compose window = clean, untruncated body).
+      //
+      // DUPLICATION FIX (v0.0.11):
+      //   Both the REPLACE path and the FRESH INSERT path now call
+      //   stripSigFromSafeZoneOnly() before building fullHtml, so any
+      //   previously inserted CardByte signature is always removed first,
+      //   regardless of which code path is taken.
       if (mac) {
         console.log("[CardByte] Mac compose");
 
-        // REPLACE PATH: existing CardByte sig found — strip and re-insert
+        // Re-read fresh — safe in compose window (no truncation risk)
+        let freshBody = existingBody;
+        try { freshBody = await getBodyHtml(item); } catch { /* use existingBody */ }
+        if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
+          console.warn("[CardByte] ⚠️ Mac stale-read — reverting to existingBody");
+          freshBody = existingBody;
+        }
+
+        // Always strip existing CardByte sig before building fullHtml.
+        // This handles both the "replace" case (hasCardByteSignature=true)
+        // and the "fresh insert" case (no sig yet) in a single unified path.
+        const { safeZone, replyChain } = stripSigFromSafeZoneOnly(freshBody);
+        const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+
         if (hasCardByteSignature(existingBody)) {
           console.log("[CardByte] Mac compose: replacing existing signature");
-
-          // Re-read fresh — safe in compose window (no truncation risk)
-          let freshBody = existingBody;
-          try { freshBody = await getBodyHtml(item); } catch { /* use existingBody */ }
-          if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
-            console.warn("[CardByte] ⚠️ Mac stale-read on replace — reverting to existingBody");
-            freshBody = existingBody;
-          }
-
-          const { safeZone, replyChain } = stripSigFromSafeZoneOnly(freshBody);
-          const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
-
-          for (const v of variants) {
-            try {
-              const fullHtml = trimmedSafe
-                ? `${trimmedSafe}<br/>${v.html}${replyChain || "<br/>"}`
-                : `<br/>${v.html}<br/>`;
-              await bodySetAsyncMac(item, fullHtml);
-              console.log(`[CardByte] ✅ Mac compose replace setAsync ok (${v.label})`);
-              return;
-            } catch (e) { console.warn(`[CardByte] Mac compose replace setAsync failed (${v.label}):`, e.message); }
-          }
-          console.warn("[CardByte] Mac compose replace: all variants failed, falling through to fresh insert");
+        } else {
+          console.log("[CardByte] Mac compose: fresh insert");
         }
-
-        // FRESH INSERT PATH: re-read and append signature after draft content
-        let freshBodyForInsert = existingBody;
-        try { freshBodyForInsert = await getBodyHtml(item); } catch { /* use existingBody */ }
-        if (existingBody.length > 200 && freshBodyForInsert.length < existingBody.length * 0.5) {
-          console.warn("[CardByte] ⚠️ Mac stale-read on fresh insert — reverting to existingBody");
-          freshBodyForInsert = existingBody;
-        }
-
-        const trimmedFreshBody = freshBodyForInsert
-          .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "")
-          .trimEnd();
 
         for (const v of variants) {
           try {
-            const fullHtml = trimmedFreshBody
-              ? `${trimmedFreshBody}<br/>${v.html}<br/>`
+            const fullHtml = trimmedSafe
+              ? `${trimmedSafe}<br/>${v.html}${replyChain || "<br/>"}`
               : `<br/>${v.html}<br/>`;
             await bodySetAsyncMac(item, fullHtml);
-            console.log(`[CardByte] ✅ Mac compose fresh insert setAsync ok (${v.label})`);
+            console.log(`[CardByte] ✅ Mac compose setAsync ok (${v.label})`);
             return;
-          } catch (e) { console.warn(`[CardByte] Mac compose fresh insert failed (${v.label}):`, e.message); }
+          } catch (e) { console.warn(`[CardByte] Mac compose setAsync failed (${v.label}):`, e.message); }
         }
 
-        // Fallback: prependAsync (non-destructive, always safe)
-        for (const v of variants) {
-          try {
-            await bodyPrependAsync(item, v.html);
-            console.log(`[CardByte] ✅ Mac compose prependAsync fallback ok (${v.label})`);
-            return;
-          } catch (e) { console.warn(`[CardByte] Mac compose prependAsync fallback failed (${v.label}):`, e.message); }
+        // Fallback: prependAsync (non-destructive, always safe when compose body is clean)
+        // Only use if no sig exists yet — would duplicate otherwise.
+        if (!hasCardByteSignature(existingBody)) {
+          for (const v of variants) {
+            try {
+              await bodyPrependAsync(item, v.html);
+              console.log(`[CardByte] ✅ Mac compose prependAsync fallback ok (${v.label})`);
+              return;
+            } catch (e) { console.warn(`[CardByte] Mac compose prependAsync fallback failed (${v.label}):`, e.message); }
+          }
         }
 
         throw new Error("Mac compose: all insertion methods failed");
