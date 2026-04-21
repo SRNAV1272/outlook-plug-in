@@ -7,10 +7,10 @@ import SignatureView from "./components/SignatureView";
 // ─────────────────────────────────────────────────────────────────────────────
 // SIZE LIMITS
 // ─────────────────────────────────────────────────────────────────────────────
-const MAX_SAFE_HTML_SIZE        = 500_000;  // ~500 KB — desktop / OWA
+const MAX_SAFE_HTML_SIZE = 500_000;  // ~500 KB — desktop / OWA
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;  // ~200 KB — iOS / Android
-const MOBILE_MAX_IMAGE_WIDTH    = 200;      // px — shrink images on mobile
-const MOBILE_IMAGE_QUALITY      = 0.5;     // JPEG quality on mobile
+const MOBILE_MAX_IMAGE_WIDTH = 200;      // px — shrink images on mobile
+const MOBILE_IMAGE_QUALITY = 0.5;     // JPEG quality on mobile
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PLATFORM DETECTION
@@ -19,7 +19,7 @@ const MOBILE_IMAGE_QUALITY      = 0.5;     // JPEG quality on mobile
 export function detectPlatform() {
   try {
     const platform = (Office?.context?.platform || "").toLowerCase();
-    const ua       = (navigator?.userAgent   || "").toLowerCase();
+    const ua = (navigator?.userAgent || "").toLowerCase();
 
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
@@ -71,9 +71,9 @@ function isAutoApplyContext() {
 function stripDivById(html, idPattern) {
   if (isMacPlatform()) {
     const startMarker = "<!-- CARD_BYTE_SIGNATURE_START -->";
-    const endMarker   = "<!-- CARD_BYTE_SIGNATURE_END -->";
-    const startIdx    = html.indexOf(startMarker);
-    const endIdx      = html.indexOf(endMarker);
+    const endMarker = "<!-- CARD_BYTE_SIGNATURE_END -->";
+    const startIdx = html.indexOf(startMarker);
+    const endIdx = html.indexOf(endMarker);
     if (startIdx !== -1 && endIdx !== -1) {
       return html.slice(0, startIdx) + html.slice(endIdx + endMarker.length);
     }
@@ -94,15 +94,15 @@ function stripDivById(html, idPattern) {
 
   if (matchedIndex === -1) return html;
 
-  let pos   = matchedIndex + matchedLength;
+  let pos = matchedIndex + matchedLength;
   let depth = 1;
 
   while (pos < html.length && depth > 0) {
-    const nextOpen  = html.indexOf("<div",  pos);
+    const nextOpen = html.indexOf("<div", pos);
     const nextClose = html.indexOf("</div>", pos);
     if (nextClose === -1) break;
     if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
-    else                                          { depth--; pos = nextClose + 6; }
+    else { depth--; pos = nextClose + 6; }
   }
 
   return html.slice(0, matchedIndex) + html.slice(pos);
@@ -159,16 +159,47 @@ function findReplyChainIndex(html) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DETECTION HELPER (MOVED HERE - OUTSIDE COMPONENT)
+// ─────────────────────────────────────────────────────────────────────────────
+function hasCardByteSignature(html) {
+  if (
+    html.includes("CARD_BYTE_SIGNATURE_START") ||
+    html.includes("CARDBYTE_SIGNATURE") ||
+    html.includes("CB_SIG_START") ||
+    /id="x?_?cardbyte-signature-block"/i.test(html)
+  ) return true;
+  if (isMacPlatform()) {
+    return [
+      /<div[^>]*style="[^"]*font-family:Calibri[^"]*"[^>]*>[\s\S]*?CardByte/i,
+      /<div[^>]*contenteditable="false"[^>]*>[\s\S]*?<!-- CARD_BYTE/i,
+    ].some(p => p.test(html));
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SAFE-ZONE STRIP
 // ─────────────────────────────────────────────────────────────────────────────
 function stripSigFromSafeZoneOnly(html) {
   const chainIndex = findReplyChainIndex(html);
   if (chainIndex === -1) {
     const stripped = stripSig(html);
+    // Verify the signature was actually removed
+    if (hasCardByteSignature(html) && !hasCardByteSignature(stripped)) {
+      console.log("[CardByte] Successfully stripped signature from safe zone");
+    } else if (hasCardByteSignature(html) && hasCardByteSignature(stripped)) {
+      console.warn("[CardByte] WARNING: Signature still present after strip!");
+    }
     return { safeZone: stripped, replyChain: "", fullStripped: stripped };
   }
-  const safeZone   = stripSig(html.slice(0, chainIndex));
-  const replyChain = html.slice(chainIndex); // NEVER modified
+  const safeZone = stripSig(html.slice(0, chainIndex));
+  const replyChain = html.slice(chainIndex);
+
+  // Verify stripping worked
+  if (hasCardByteSignature(html.slice(0, chainIndex)) && !hasCardByteSignature(safeZone)) {
+    console.log("[CardByte] Successfully stripped signature from safe zone (with reply chain)");
+  }
+
   return { safeZone, replyChain, fullStripped: safeZone + replyChain };
 }
 
@@ -210,7 +241,7 @@ function simplifyHtmlForMobile(html) {
 // ─────────────────────────────────────────────────────────────────────────────
 function wrapForOutlook(innerHtml) {
   if (isMobilePlatform()) {
-    return `<div id="cardbyte-signature-block" contenteditable="false" style="font-family:Arial,sans-serif;font-size:14px;"><table contenteditable="false" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:100%;"><tbody><tr><td style="padding:0;margin:0;">${innerHtml}</td></tr></tbody></table></div>`;
+    return `<div id="cardbyte-signature-block" contenteditable="false" style="font-family:Arial,sans-serif;font-size:14px;"><table contenteditable="false" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:100%;"><tbody><tr><td style="padding:0;margin:0;">${innerHtml}<tr></tr></tbody></table></div>`;
   }
   if (isMacPlatform()) {
     return `<div id="cardbyte-signature-block" contenteditable="false" style="font-family:Calibri,Arial,sans-serif;font-size:11pt;mso-line-height-rule:exactly;">${innerHtml}</div>`;
@@ -222,14 +253,14 @@ function wrapForOutlook(innerHtml) {
 // APP
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App({ user }) {
-  const [mode,    setMode]    = useState("init");
+  const [mode, setMode] = useState("init");
   const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState("");
+  const [error, setError] = useState("");
 
   const autoApply = isAutoApplyContext();
-  const mobile    = isMobilePlatform();
-  const mac       = isMacPlatform();
-  const platform  = detectPlatform();
+  const mobile = isMobilePlatform();
+  const mac = isMacPlatform();
+  const platform = detectPlatform();
 
   const init = useCallback(async () => {
     setLoading(true);
@@ -237,7 +268,7 @@ export default function App({ user }) {
     const cached = getToken();
     if (cached) { await loadSignature(); return; }
     try {
-      const token   = await getOfficeToken();
+      const token = await getOfficeToken();
       const payload = decodeJwt(token);
       setToken(token, payload.exp, "aad");
       await loadSignature();
@@ -336,41 +367,6 @@ export default function App({ user }) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // DETECTION HELPERS
-  // ─────────────────────────────────────────────────────────────────────────
-
-  function hasCardByteSignature(html) {
-    if (
-      html.includes("CARD_BYTE_SIGNATURE_START") ||
-      html.includes("CARDBYTE_SIGNATURE") ||
-      html.includes("CB_SIG_START") ||
-      /id="x?_?cardbyte-signature-block"/i.test(html)
-    ) return true;
-    if (isMacPlatform()) {
-      return [
-        /<div[^>]*style="[^"]*font-family:Calibri[^"]*"[^>]*>[\s\S]*?CardByte/i,
-        /<div[^>]*contenteditable="false"[^>]*>[\s\S]*?<!-- CARD_BYTE/i,
-      ].some(p => p.test(html));
-    }
-    return false;
-  }
-
-  function containsGifImages(html) { return /data:image\/gif;base64,/i.test(html); }
-
-  function detectReplyChain(html) {
-    return [
-      /divRplyFwdMsg/i, /appendonsend/i, /OriginalMessage/i, /<blockquote/i,
-      /x_divRplyFwdMsg/i, /class="?OutlookMessageHeader"?/i,
-      /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
-      /<(?:div|hr|span|table)[^>]*class="[^"]*ms-outlook-[^"]*"/i,
-      /<(?:div|hr|span|table)[^>]*class="[^"]*ms-owa-[^"]*"/i,
-      /<[^>]*\sdata-ogsc[\s=>]/i,
-      /<hr[^>]*class="[^"]*separator[^"]*"/i,
-      /<div[^>]*class="?WordSection[0-9]"?/i,
-    ].some(p => p.test(html));
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
   // DEFAULT SIGNATURE STRIP
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -456,7 +452,7 @@ export default function App({ user }) {
 
   function compressBase64Image(dataUrl, maxWidth, quality) {
     if (maxWidth === undefined) maxWidth = mobile ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    if (quality === undefined) quality   = mobile ? MOBILE_IMAGE_QUALITY   : 0.7;
+    if (quality === undefined) quality = mobile ? MOBILE_IMAGE_QUALITY : 0.7;
     return new Promise((resolve) => {
       if (dataUrl.startsWith("data:image/gif") && !mobile) { resolve(dataUrl); return; }
       const img = new Image();
@@ -559,6 +555,21 @@ export default function App({ user }) {
     });
   }
 
+  function detectReplyChain(html) {
+    return [
+      /divRplyFwdMsg/i, /appendonsend/i, /OriginalMessage/i, /<blockquote/i,
+      /x_divRplyFwdMsg/i, /class="?OutlookMessageHeader"?/i,
+      /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
+      /<(?:div|hr|span|table)[^>]*class="[^"]*ms-outlook-[^"]*"/i,
+      /<(?:div|hr|span|table)[^>]*class="[^"]*ms-owa-[^"]*"/i,
+      /<[^>]*\sdata-ogsc[\s=>]/i,
+      /<hr[^>]*class="[^"]*separator[^"]*"/i,
+      /<div[^>]*class="?WordSection[0-9]"?/i,
+    ].some(p => p.test(html));
+  }
+
+  function containsGifImages(html) { return /data:image\/gif;base64,/i.test(html); }
+
   // ─────────────────────────────────────────────────────────────────────────
   // TIERED INSERTION HELPERS — used by non-Mac paths only
   // ─────────────────────────────────────────────────────────────────────────
@@ -571,20 +582,20 @@ export default function App({ user }) {
         methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) });
     } else if (isOWAPlatform() && containsGifImages(html)) {
       methods = [
-        { name: "prependAsync",      fn: () => bodyPrependAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
       ];
     } else if (isOWAPlatform()) {
       methods = [
         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
-        { name: "setSignatureAsync",    fn: () => bodySetSignatureAsync(item, html) },
-        { name: "prependAsync",         fn: () => bodyPrependAsync(item, html) },
+        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
       ];
     } else {
       // desktop
       methods = [
         { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
-        { name: "prependAsync",      fn: () => bodyPrependAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
       ];
     }
     console.log(`[CardByte] ${label} [${platform}]: ${methods.map(m => m.name).join(" → ")}`);
@@ -599,23 +610,23 @@ export default function App({ user }) {
     let methods;
     if (mobile) {
       methods = [
-        { name: "setAsync",     fn: () => bodySetAsync(item, html) },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
         { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
       ];
     } else if (isOWAPlatform()) {
       methods = [
         { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
-        { name: "prependAsync",         fn: () => bodyPrependAsync(item, html) },
-        { name: "setSignatureAsync",    fn: () => bodySetSignatureAsync(item, html) },
-        { name: "setAsync",             fn: () => bodySetAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
+        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
       ];
     } else {
       // desktop
       methods = [
         { name: "setSelectedDataAsync", fn: () => bodySelectAllAndReplaceAsync(item, html) },
-        { name: "prependAsync",         fn: () => bodyPrependAsync(item, html) },
-        { name: "setSignatureAsync",    fn: () => bodySetSignatureAsync(item, html) },
-        { name: "setAsync",             fn: () => bodySetAsync(item, html) },
+        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
+        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
+        { name: "setAsync", fn: () => bodySetAsync(item, html) },
       ];
     }
     console.log(`[CardByte] ${label} [${platform}]: ${methods.map(m => m.name).join(" → ")}`);
@@ -627,52 +638,48 @@ export default function App({ user }) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // MAC REPLY — FULLY NON-DESTRUCTIVE INSERTION
-  //
-  // ROOT CAUSE OF THE BUG:
-  //   On Mac, item.body.getAsync() inside a reply/forward window silently
-  //   returns a TRUNCATED copy — Outlook's internal rendering buffer clips
-  //   the reply chain at an arbitrary byte boundary with no error or warning.
-  //
-  //   Any code path that does getAsync → mutate → setAsync will write the
-  //   truncated body back, permanently destroying the quoted reply chain.
-  //   This is why the user sees only the most recent email in the thread.
-  //
-  // THE ONLY SAFE APPROACH:
-  //   Use APIs that INSERT content at a specific slot WITHOUT reading or
-  //   writing the full body HTML:
-  //
-  //     • setSignatureAsync(html) — Outlook REPLACES the signature slot.
-  //                                 Calling it again overwrites the previous
-  //                                 value — idempotent, zero duplication risk.
-  //     • prependAsync(html)      — inserts at top of compose area.
-  //                                 ONLY safe when no signature exists yet;
-  //                                 calling it again ADDS another copy on top.
-  //
-  // DUPLICATION FIX (v0.0.11):
-  //   We always try setSignatureAsync first — it is the only method that is
-  //   truly idempotent (Outlook manages exactly one signature slot per window).
-  //   prependAsync is tried as a fallback ONLY when no CardByte signature is
-  //   already present in the body, preventing a second copy being prepended.
-  //
-  // WHAT WE NEVER DO HERE:
-  //   setAsync is NEVER called in this function, regardless of failures.
-  //   If all non-destructive methods fail, we return failure and let the
-  //   caller decide — we do not silently fall through to a destructive path.
+  // MAC REPLY — NON-DESTRUCTIVE INSERTION WITH STRIPPING
+  // FIXED: Now strips existing signature from safe zone before inserting
   // ─────────────────────────────────────────────────────────────────────────
   async function macReplyInsert(item, variants) {
-    console.log("[CardByte] ── macReplyInsert: non-destructive only (setAsync NEVER called) ──");
+    console.log("[CardByte] ── macReplyInsert: non-destructive with signature stripping ──");
 
-    // Read body once just for detection — may be truncated on Mac reply,
-    // but we only use it to check hasCardByteSignature, never to write back.
-    const existingBodyForCheck = await getBodyHtml(item).catch(() => "");
+    // Read body once just for detection and stripping
+    let existingBodyForCheck = await getBodyHtml(item).catch(() => "");
+    
+    // STRIP EXISTING SIGNATURE FROM SAFE ZONE FIRST
+    // Even though we're using setSignatureAsync/prependAsync, we need to
+    // ensure any previously inserted CardByte signature is removed from
+    // the body to prevent duplicates.
+    const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBodyForCheck);
     const alreadyHasSig = hasCardByteSignature(existingBodyForCheck);
-    console.log(`[CardByte] macReplyInsert: alreadyHasSig=${alreadyHasSig}`);
+    const wasStripped = alreadyHasSig && !hasCardByteSignature(safeZone);
+    
+    console.log(`[CardByte] macReplyInsert: alreadyHasSig=${alreadyHasSig}, wasStripped=${wasStripped}`);
+    
+    if (wasStripped) {
+      console.log("[CardByte] macReplyInsert: stripped existing signature from safe zone");
+      
+      // If we stripped a signature, we need to update the body WITHOUT the signature
+      // before inserting the new one. This is safe because we're only modifying
+      // the safe zone (before reply chain), not touching the reply chain.
+      try {
+        const cleanedBody = safeZone + replyChain;
+        if (cleanedBody !== existingBodyForCheck) {
+          await bodySetAsyncMac(item, cleanedBody);
+          console.log("[CardByte] ✅ macReplyInsert: cleaned existing signature from body");
+          // Re-read the body after cleaning
+          existingBodyForCheck = await getBodyHtml(item).catch(() => cleanedBody);
+        }
+      } catch (e) {
+        console.warn("[CardByte] macReplyInsert: failed to clean existing signature:", e.message);
+        // Continue anyway - try insertion methods
+      }
+    }
 
     for (const v of variants) {
       // ── setSignatureAsync: Outlook REPLACES the signature slot ──────────
-      // Calling it a second time overwrites the first — zero duplication risk.
-      // This is the preferred method for both fresh insert and re-apply.
+      // This is now safe because we've already stripped any duplicate from the body
       try {
         await bodySetSignatureAsync(item, v.html);
         console.log(`[CardByte] ✅ macReplyInsert: setSignatureAsync ok (${v.label})`);
@@ -682,9 +689,9 @@ export default function App({ user }) {
       }
 
       // ── prependAsync: safe ONLY when no signature exists yet ────────────
-      // If a CardByte sig is already in the body, prependAsync would add
-      // a second copy above it. Skip it entirely in that case.
-      if (!alreadyHasSig) {
+      // Check using the potentially cleaned body
+      const currentHasSig = hasCardByteSignature(existingBodyForCheck);
+      if (!currentHasSig) {
         try {
           await bodyPrependAsync(item, v.html);
           console.log(`[CardByte] ✅ macReplyInsert: prependAsync ok (${v.label})`);
@@ -693,12 +700,11 @@ export default function App({ user }) {
           console.warn(`[CardByte] macReplyInsert: prependAsync failed (${v.label}): ${e.message}`);
         }
       } else {
-        console.warn(`[CardByte] macReplyInsert: skipping prependAsync (${v.label}) — sig already present, would duplicate`);
+        console.warn(`[CardByte] macReplyInsert: skipping prependAsync (${v.label}) — sig still present`);
       }
     }
 
-    // Do NOT fall through to setAsync here — that would destroy the reply chain.
-    console.error("[CardByte] macReplyInsert: all non-destructive methods exhausted. Returning failure.");
+    console.error("[CardByte] macReplyInsert: all methods exhausted. Returning failure.");
     return { success: false, method: "none" };
   }
 
@@ -746,9 +752,9 @@ export default function App({ user }) {
         processed = await compressImagesInHtml(processed);
       }
 
-      const wrapped        = wrapForOutlook(processed);
+      const wrapped = wrapForOutlook(processed);
       const signatureBlock = `<!-- CARD_BYTE_SIGNATURE_START -->${wrapped}<!-- CARD_BYTE_SIGNATURE_END -->`;
-      const isReply        = detectReplyChain(existingBody);
+      const isReply = detectReplyChain(existingBody);
 
       console.log(`[CardByte] isReply=${isReply}, mac=${mac}, size=${(signatureBlock.length / 1024).toFixed(1)}KB`);
 
@@ -760,8 +766,7 @@ export default function App({ user }) {
       if (isReply) {
         console.log("[CardByte] 📧 Reply/Forward path");
 
-        // ── MAC REPLY: non-destructive only, dedicated function ──────────
-        // setAsync is NEVER called here — see macReplyInsert() docs above.
+        // ── MAC REPLY: non-destructive with stripping ─────────────────────
         if (mac) {
           const result = await macReplyInsert(item, variants);
           if (result.success) return;
@@ -848,54 +853,74 @@ export default function App({ user }) {
       // Compose on Mac is safe for setAsync: getAsync is reliable when there
       // is no reply chain (compose window = clean, untruncated body).
       //
-      // DUPLICATION FIX (v0.0.11):
-      //   Both the REPLACE path and the FRESH INSERT path now call
-      //   stripSigFromSafeZoneOnly() before building fullHtml, so any
-      //   previously inserted CardByte signature is always removed first,
-      //   regardless of which code path is taken.
+      // DUPLICATION FIX (v0.0.12):
+      //   Always strip existing CardByte signature before building fullHtml.
+      //   The previous version had a race condition where freshBody wasn't
+      //   being properly stripped in all cases.
       if (mac) {
         console.log("[CardByte] Mac compose");
 
         // Re-read fresh — safe in compose window (no truncation risk)
         let freshBody = existingBody;
-        try { freshBody = await getBodyHtml(item); } catch { /* use existingBody */ }
+        try {
+          freshBody = await getBodyHtml(item);
+        } catch {
+          // use existingBody 
+        }
+
         if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
           console.warn("[CardByte] ⚠️ Mac stale-read — reverting to existingBody");
           freshBody = existingBody;
         }
 
-        // Always strip existing CardByte sig before building fullHtml.
+        // CRITICAL FIX: Always strip existing CardByte sig before building fullHtml.
         // This handles both the "replace" case (hasCardByteSignature=true)
         // and the "fresh insert" case (no sig yet) in a single unified path.
         const { safeZone, replyChain } = stripSigFromSafeZoneOnly(freshBody);
+
+        // Remove any trailing whitespace/breaks from safe zone
         const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
 
-        if (hasCardByteSignature(existingBody)) {
-          console.log("[CardByte] Mac compose: replacing existing signature");
-        } else {
-          console.log("[CardByte] Mac compose: fresh insert");
-        }
+        // Check if there was actually a signature to remove
+        const hadSignature = hasCardByteSignature(freshBody);
+        console.log(`[CardByte] Mac compose: ${hadSignature ? "replacing existing signature" : "fresh insert"}`);
 
         for (const v of variants) {
           try {
-            const fullHtml = trimmedSafe
-              ? `${trimmedSafe}<br/>${v.html}${replyChain || "<br/>"}`
-              : `<br/>${v.html}<br/>`;
+            // Build HTML without any existing signature
+            let fullHtml;
+            if (trimmedSafe) {
+              // Add a line break between existing content and new signature
+              fullHtml = `${trimmedSafe}<br/>${v.html}`;
+            } else {
+              fullHtml = `${v.html}<br/>`;
+            }
+
+            // Add reply chain if it exists (and wasn't part of safe zone)
+            if (replyChain && replyChain.trim()) {
+              fullHtml += replyChain;
+            }
+
+            console.log(`[CardByte] Mac compose: building HTML with ${fullHtml.length} chars`);
             await bodySetAsyncMac(item, fullHtml);
             console.log(`[CardByte] ✅ Mac compose setAsync ok (${v.label})`);
             return;
-          } catch (e) { console.warn(`[CardByte] Mac compose setAsync failed (${v.label}):`, e.message); }
+          } catch (e) {
+            console.warn(`[CardByte] Mac compose setAsync failed (${v.label}):`, e.message);
+          }
         }
 
-        // Fallback: prependAsync (non-destructive, always safe when compose body is clean)
-        // Only use if no sig exists yet — would duplicate otherwise.
-        if (!hasCardByteSignature(existingBody)) {
+        // Fallback: prependAsync (non-destructive, but only if no sig exists)
+        // Since we already stripped the signature above, this is safe as a fallback
+        if (!hadSignature) {
           for (const v of variants) {
             try {
               await bodyPrependAsync(item, v.html);
               console.log(`[CardByte] ✅ Mac compose prependAsync fallback ok (${v.label})`);
               return;
-            } catch (e) { console.warn(`[CardByte] Mac compose prependAsync fallback failed (${v.label}):`, e.message); }
+            } catch (e) {
+              console.warn(`[CardByte] Mac compose prependAsync fallback failed (${v.label}):`, e.message);
+            }
           }
         }
 
