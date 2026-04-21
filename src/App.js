@@ -182,6 +182,13 @@ function findReplyChainIndex(html) {
     /<div[^>]*class="?WordSection[0-9]"?/i,
     /x_divRplyFwdMsg/i,
     /divRplyFwdMsg/i,
+    // ✅ ADD THESE — Mac Outlook reply markers
+    /<div[^>]*class="[^"]*gmail_extra[^"]*"/i,
+    /<div[^>]*class="[^"]*yahoo_quoted[^"]*"/i,
+    /<!--\s*--original message--\s*-->/i,
+    /On .{10,80} wrote:/i,          // "On Mon, Apr 21 2026, John wrote:"
+    /<hr[^>]*>/i,                    // Mac inserts a plain <hr> before quoted
+    /_{10,}/,                        // "____" separator Mac sometimes uses
   ];
   let earliest = -1;
   for (const marker of replyMarkers) {
@@ -868,20 +875,36 @@ export default function App({ user }) {
         if (hasCardByteSignature(existingBody)) {
           console.log("[CardByte] Mac compose: replacing existing signature via safe-zone strip");
 
+          // let freshBody = existingBody;
+          // try {
+          //   freshBody = await getBodyHtml(item);
+          //   console.log(`[CardByte] Mac compose replace: re-read body ${(freshBody.length / 1024).toFixed(1)}KB`);
+          // } catch (e) {
+          //   console.warn("[CardByte] Mac compose replace: re-read failed, using existingBody:", e.message);
+          // }
+
+          // if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
+          //   console.warn("[CardByte] ⚠️ Mac stale-read on replace — reverting to existingBody");
+          //   freshBody = existingBody;
+          // }
           let freshBody = existingBody;
           try {
-            freshBody = await getBodyHtml(item);
-            console.log(`[CardByte] Mac compose replace: re-read body ${(freshBody.length / 1024).toFixed(1)}KB`);
+            const reread = await getBodyHtml(item);
+            // Only use re-read if it's not suspiciously shorter AND existingBody had no reply chain
+            const existingHadReplyChain = detectReplyChain(existingBody);
+            const suspiciouslyShort = reread.length < existingBody.length * 0.8;
+            if (!existingHadReplyChain && !suspiciouslyShort) {
+              freshBody = reread;
+            } else if (suspiciouslyShort) {
+              console.warn("[CardByte] Mac re-read suspicious — keeping existingBody");
+            }
           } catch (e) {
-            console.warn("[CardByte] Mac compose replace: re-read failed, using existingBody:", e.message);
+            console.warn("[CardByte] Mac re-read failed:", e.message);
           }
 
-          if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
-            console.warn("[CardByte] ⚠️ Mac stale-read on replace — reverting to existingBody");
-            freshBody = existingBody;
-          }
 
           const { safeZone, replyChain } = stripSigFromSafeZoneOnly(freshBody);
+
           const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
 
           for (const v of variants) {
