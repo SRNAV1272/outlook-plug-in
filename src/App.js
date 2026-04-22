@@ -857,7 +857,7 @@ export default function App({ user }) {
         if (mac) {
           const result = await macReplyInsert(item, variants);
           if (result.success) {
-            signatureStateRef.current = "applied";
+            signatureStateRef.current = "idle";
             return;
           }
           // Intentionally NOT falling through to setAsync on Mac reply:
@@ -873,15 +873,15 @@ export default function App({ user }) {
           // T1: signature-only (non-destructive)
           for (const v of variants) {
             const r = await tryInsertSignatureOnly(item, v.html, `MobileReply-T1-${v.label}`);
-            if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+            if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
           }
           // T2/T3: full-body rebuild with safe-zone strip
           const { safeZone, replyChain } = stripSigFromSafeZoneOnly(existingBody);
           const fullHtml = safeZone + signatureBlock + replyChain;
           let r = await tryInsertFullBody(item, fullHtml, "MobileReply-T2");
-          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
           r = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileReply-T3");
-          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
           throw new Error("All mobile reply strategies failed");
         }
 
@@ -892,7 +892,7 @@ export default function App({ user }) {
           if (r.success) {
             if (v.images?.length) await attachImages(item, v.images);
             await stabilizeSelection(item);
-            signatureStateRef.current = "applied";
+            signatureStateRef.current = "idle";
             return;
           }
         }
@@ -904,13 +904,13 @@ export default function App({ user }) {
           const fullHtml = safeZone + compressed + replyChain;
           console.log(`[CardByte] Reply-T2: safeZone=${(safeZone.length / 1024).toFixed(1)}KB replyChain=${(replyChain.length / 1024).toFixed(1)}KB`);
           const r = await tryInsertFullBody(item, fullHtml, "Reply-T2");
-          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         } catch (e) { console.warn("[CardByte] Reply-T2:", e.message); }
 
         // T3: stripped images, signature-only
         {
           const r = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T3");
-          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         }
 
         // T4: stripped images, full-body rebuild (last resort — cursor may move)
@@ -919,7 +919,7 @@ export default function App({ user }) {
           const r = await tryInsertFullBody(
             item, safeZone + stripBase64Images(signatureBlock) + replyChain, "Reply-T4"
           );
-          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         } catch (e) { console.warn("[CardByte] Reply-T4:", e.message); }
 
         // T5 (commands.js Tier 5 equivalent): find exact reply boundary via markers
@@ -946,7 +946,7 @@ export default function App({ user }) {
             fullHtml = existingBody + signatureBlock;
           }
           const r = await tryInsertFullBody(item, stripBase64Images(fullHtml), "Reply-T5");
-          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         }
 
         console.error("[CardByte] All reply insertion tiers failed");
@@ -962,13 +962,13 @@ export default function App({ user }) {
       if (mobile) {
         for (const v of variants) {
           const r = await tryInsertSignatureOnly(item, v.html, `MobileCompose-T1-${v.label}`);
-          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+          if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         }
         const fullHtml = "<br/>" + signatureBlock + "<br/>";
         let r = await tryInsertFullBody(item, fullHtml, "MobileCompose-T2");
-        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         r = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileCompose-T3");
-        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         throw new Error("All mobile compose strategies failed");
       }
 
@@ -982,7 +982,7 @@ export default function App({ user }) {
         // Mirrors commands.js Compose Tier 1
         {
           const result = await tryInsertSignatureOnly(item, signatureBlock, "MacCompose-T1");
-          if (result.success) { signatureStateRef.current = "applied"; return; }
+          if (result.success) { signatureStateRef.current = "idle"; return; }
         }
 
         // Re-read fresh body — safe in compose window (no truncation risk on Mac)
@@ -1007,7 +1007,7 @@ export default function App({ user }) {
           try {
             await bodyPrependAsync(item, signatureBlock);
             console.log("[CardByte] ✅ Mac safe prependAsync succeeded");
-            signatureStateRef.current = "applied";
+            signatureStateRef.current = "idle";
             return;
           } catch (e) {
             console.warn("[CardByte] Mac safe prependAsync failed:", e.message);
@@ -1031,7 +1031,7 @@ export default function App({ user }) {
             console.log(`[CardByte] Mac compose: building HTML with ${fullHtml.length} chars`);
             await bodySetAsyncMac(item, fullHtml);
             console.log(`[CardByte] ✅ Mac compose setAsync ok (${v.label})`);
-            signatureStateRef.current = "applied";
+            signatureStateRef.current = "idle";
             return;
           } catch (e) {
             console.warn(`[CardByte] Mac compose setAsync failed (${v.label}):`, e.message);
@@ -1044,7 +1044,7 @@ export default function App({ user }) {
             try {
               await bodyPrependAsync(item, v.html);
               console.log(`[CardByte] ✅ Mac compose prependAsync fallback ok (${v.label})`);
-              signatureStateRef.current = "applied";
+              signatureStateRef.current = "idle";
               return;
             } catch (e) {
               console.warn(`[CardByte] Mac compose prependAsync fallback failed (${v.label}):`, e.message);
@@ -1058,7 +1058,7 @@ export default function App({ user }) {
       // Compose Tier 1: signature-only (setSignatureAsync → prependAsync)
       {
         const result = await tryInsertSignatureOnly(item, signatureBlock, "Compose-T1");
-        if (result.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+        if (result.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
       }
 
       // Re-read fresh body before any setAsync (mirrors commands.js Mac re-read guard)
@@ -1080,7 +1080,7 @@ export default function App({ user }) {
       // Compose Tier 2: full-body insert
       {
         const r = await tryInsertFullBody(item, fullHtml, "Compose-T2");
-        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
       }
 
       // Compose Tier 3: compress images
@@ -1088,7 +1088,7 @@ export default function App({ user }) {
         const compressed = await compressImagesInHtml(fullHtml);
         console.log(`[CardByte] Compressed size: ${(compressed.length / 1024).toFixed(1)} KB`);
         const r = await tryInsertFullBody(item, compressed, "Compose-T3");
-        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
       } catch (e) { console.warn("[CardByte] Compose-T3:", e.message); }
 
       // Compose Tier 4: CID inline attachments
@@ -1098,7 +1098,7 @@ export default function App({ user }) {
         if (r.success) {
           if (images.length) await attachImages(item, images);
           await stabilizeSelection(item);
-          signatureStateRef.current = "applied";
+          signatureStateRef.current = "idle";
           return;
         }
       } catch (e) { console.warn("[CardByte] Compose-T4:", e.message); }
@@ -1106,7 +1106,7 @@ export default function App({ user }) {
       // Compose Tier 5: strip all images (last resort)
       {
         const r = await tryInsertFullBody(item, stripBase64Images(fullHtml), "Compose-T5");
-        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "applied"; return; }
+        if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
       }
 
       throw new Error("All compose insertion tiers failed");
