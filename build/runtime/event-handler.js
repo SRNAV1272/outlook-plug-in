@@ -998,7 +998,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             // T1: try signature-only insertion (preferred — no full body needed)
             // Only skip this if sig is already present (we must do full-body replace)
             if (!alreadyHasSignature) {
-                const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + signatureBlock, "Reply-T1");
+                const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>", "Reply-T1");
                 if (result.success) { await stabilizeSelection(item); return; }
             }
 
@@ -1006,7 +1006,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             if (!alreadyHasSignature) {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
-                    const result = await tryInsertSignatureOnly(item, compressed, "Reply-T2");
+                    const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>", "Reply-T2");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
             }
@@ -1032,7 +1032,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
 
             // T4: strip images, signature-only
             {
-                const result = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "Reply-T4");
+                const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + stripBase64Images(signatureBlock) + "<div style='margin-top:20px'></div>", "Reply-T4");
                 if (result.success) { await stabilizeSelection(item); return; }
             }
 

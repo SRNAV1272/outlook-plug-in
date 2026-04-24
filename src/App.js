@@ -1063,7 +1063,7 @@ export default function App({ user }) {
         if (draftTextLength < MAC_SAFE_THRESHOLD) {
           console.warn("[CardByte] ⚠️ Mac body near-empty — skipping setAsync to protect draft");
           try {
-            await bodyPrependAsync(item, signatureBlock);
+            await bodyPrependAsync(item, "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>");
             console.log("[CardByte] ✅ Mac safe prependAsync succeeded");
             signatureStateRef.current = "idle";
             return;
@@ -1115,7 +1115,7 @@ export default function App({ user }) {
       // ── WINDOWS DESKTOP / OWA COMPOSE ────────────────────────────────
       // Compose Tier 1: signature-only (setSignatureAsync → prependAsync)
       {
-        const result = await tryInsertSignatureOnly(item, signatureBlock, "Compose-T1");
+        const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>", "Compose-T1");
         if (result.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
       }
 
