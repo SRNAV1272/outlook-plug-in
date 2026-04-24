@@ -4,7 +4,6 @@ import { toast } from "react-toastify";
 import DefaultTemplate from "./SignatureComponents/Assets/Images/DefaultTemplate.svg";
 import usernotfound from "../components/SignatureComponents/Assets/Images/usernotfound.gif";
 import signnotassigned from "../components/SignatureComponents/Assets/Images/signnotassigned.webp";
-import html2canvas from "html2canvas";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Props
@@ -27,23 +26,20 @@ export default function SignatureView({
     const [error, setError] = useState("");
     const [showLegacy, setShowLegacy] = useState(false);
     const [load, setLoad] = useState(false);
-    const [snapshot, setSnapshot] = useState(null);
-    const containerRef = useRef(null);
 
     // Auto-apply state: idle | applying | done | failed
     const [autoApplyStatus, setAutoApplyStatus] = useState("idle");
     // Prevent double-fire if form state re-renders
     const autoApplyFiredRef = useRef(false);
 
-    /* ── Signature preview via html2canvas ──────────────────── */
-    useEffect(() => {
-        if (containerRef.current && !isMobile) {
-            // Skip html2canvas on mobile — it is slow and unreliable on Outlook mobile WebView
-            html2canvas(containerRef.current).then(canvas => {
-                setSnapshot(canvas.toDataURL("image/png"));
-            }).catch(() => setSnapshot(null));
-        }
-    }, [form, isMobile]);
+    // ─── Mac detection ───────────────────────────────────────────────────────
+    // Mac Outlook uses WKWebView which enforces strict cross-origin canvas
+    // security — html2canvas cannot render external or cid: images there.
+    // We detect Mac here so we can render HTML directly (same as mobile),
+    // bypassing any canvas-based preview entirely.
+    const isMac =
+        typeof Office !== "undefined" &&
+        Office?.context?.diagnostics?.platform === Office?.PlatformType?.Mac;
 
     /* ── AUTO-APPLY on form load ─────────────────────────────
        Fires once when:
@@ -54,7 +50,7 @@ export default function SignatureView({
     ────────────────────────────────────────────────────────── */
     useEffect(() => {
         if (!autoApply) return; // manual open — skip
-        if (!form) return; // not loaded yet — wait
+        if (!form) return;      // not loaded yet — wait
         if (autoApplyFiredRef.current) return; // already ran
 
         autoApplyFiredRef.current = true;
@@ -138,7 +134,10 @@ export default function SignatureView({
     async function renderSignatureOnServer(userEmail) {
         try {
             const encryptedMail = await encryptEmail(userEmail);
-            const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+            const diagPlatform = Office?.context?.diagnostics?.platform;
+            const xPlatform =
+                // diagPlatform === Office.PlatformType.Mac ? "MAC" : 
+                "WINDOWS";
             const primaryRes = await fetch(
                 "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
                 {
@@ -146,10 +145,10 @@ export default function SignatureView({
                     headers: {
                         'Content-Type': 'application/json',
                         username: encryptedMail,
-                        "X-Platform": xPlatform
+                        "X-Platform": xPlatform,
                     }
                 }
-            )
+            );
             if (primaryRes.ok) {
                 const data = await primaryRes.text();
                 const decryptedData = await handleAesDecrypt(data);
@@ -213,10 +212,20 @@ export default function SignatureView({
     /* ── RENDER: spinner while auto-applying ─────────────────── */
     if (autoApply && (autoApplyStatus === "idle" || autoApplyStatus === "applying")) {
         return (
-            <Box display="flex" flexDirection="column" alignItems="center" justifyContent="center"
-                sx={{ minHeight: isMobile ? "100vh" : 120, p: 3, gap: 2 }}>
+            <Box
+                display="flex"
+                flexDirection="column"
+                alignItems="center"
+                justifyContent="center"
+                sx={{ minHeight: isMobile ? "100vh" : 120, p: 3, gap: 2 }}
+            >
                 <CircularProgress size={isMobile ? 36 : 28} sx={{ color: "#0b2e79" }} />
-                <Typography fontFamily="Plus Jakarta Sans" fontSize={isMobile ? "14px" : "12px"} color="#555" textAlign="center">
+                <Typography
+                    fontFamily="Plus Jakarta Sans"
+                    fontSize={isMobile ? "14px" : "12px"}
+                    color="#555"
+                    textAlign="center"
+                >
                     Applying your CardByte signature…
                 </Typography>
             </Box>
@@ -241,16 +250,20 @@ export default function SignatureView({
 
                 {/* Auto-apply result banners */}
                 {autoApply && autoApplyStatus === "done" && (
-                    <Box mt={1} px={1.5} py={0.75}
-                        sx={{ background: "#dff6dd", borderRadius: "6px", border: "1px solid #a7d7a8" }}>
+                    <Box
+                        mt={1} px={1.5} py={0.75}
+                        sx={{ background: "#dff6dd", borderRadius: "6px", border: "1px solid #a7d7a8" }}
+                    >
                         <Typography fontFamily="Plus Jakarta Sans" fontSize="12px" color="#107c10">
                             ✓ Signature applied automatically
                         </Typography>
                     </Box>
                 )}
                 {autoApply && autoApplyStatus === "failed" && (
-                    <Box mt={1} px={1.5} py={0.75}
-                        sx={{ background: "#fde7e9", borderRadius: "6px", border: "1px solid #f4b8bd" }}>
+                    <Box
+                        mt={1} px={1.5} py={0.75}
+                        sx={{ background: "#fde7e9", borderRadius: "6px", border: "1px solid #f4b8bd" }}
+                    >
                         <Typography fontFamily="Plus Jakarta Sans" fontSize="12px" color="#a80000">
                             ⚠ Auto-apply failed — tap "Apply Signature" to retry.
                         </Typography>
@@ -260,14 +273,26 @@ export default function SignatureView({
                 {/* Debug info in development */}
                 {process.env.NODE_ENV === "development" && (
                     <Typography fontSize="10px" color="#bbb" mt={0.5}>
-                        platform: {platform} | autoApply: {String(autoApply)}
+                        platform: {platform} | isMac: {String(isMac)} | autoApply: {String(autoApply)}
                     </Typography>
                 )}
             </Grid>
 
             <Grid size={{ xs: 11, lg: 4 }}>
                 {load ? (
-                    <Paper elevation={0} sx={{ p: 1, borderRadius: 8, width: "100%", maxWidth: "800px", margin: "0 auto", display: "flex", flexDirection: "column", alignItems: "center" }}>
+                    <Paper
+                        elevation={0}
+                        sx={{
+                            p: 1,
+                            borderRadius: 8,
+                            width: "100%",
+                            maxWidth: "800px",
+                            margin: "0 auto",
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                        }}
+                    >
                         <Box display="flex" flexDirection="column" alignItems="center" justifyContent="center" mt={4}>
                             <img src={DefaultTemplate} alt="loading" width="100%" />
                             <Box mt={3} width="80%">
@@ -277,7 +302,18 @@ export default function SignatureView({
                         </Box>
                     </Paper>
                 ) : (
-                    <Paper elevation={0} sx={{ borderRadius: 8, width: "100%", maxWidth: "800px", margin: "0 auto", display: "flex", flexDirection: "column", alignItems: "center" }}>
+                    <Paper
+                        elevation={0}
+                        sx={{
+                            borderRadius: 8,
+                            width: "100%",
+                            maxWidth: "800px",
+                            margin: "0 auto",
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                        }}
+                    >
                         {form === null ? (
                             <Box display="flex" flexDirection="column" alignItems="center" justifyContent="center" mt={4}>
                                 <Box textAlign="center">
@@ -291,52 +327,52 @@ export default function SignatureView({
                                 </Box>
                             </Box>
                         ) : (
-                            <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: "8px", padding: "16px", display: "inline-block", minWidth: "100%" }}>
+                            <div style={{
+                                background: "#fff",
+                                border: "1px solid #e5e7eb",
+                                borderRadius: "8px",
+                                padding: "16px",
+                                // Must be block + fixed width so the scroll container
+                                // has a definite boundary to scroll against.
+                                // inline-block would shrink-wrap to content and prevent scrolling.
+                                display: "block",
+                                width: "100%",
+                                boxSizing: "border-box",
+                            }}>
                                 <style>{`
-                  .sig-scroll-box::-webkit-scrollbar { height: 3px; }
-                  .sig-scroll-box::-webkit-scrollbar-track { background: transparent; }
-                  .sig-scroll-box::-webkit-scrollbar-thumb { background: #0B2E79; border-radius: 99px; }
-                `}</style>
+                                    .sig-scroll-box::-webkit-scrollbar { height: 4px; }
+                                    .sig-scroll-box::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 99px; }
+                                    .sig-scroll-box::-webkit-scrollbar-thumb { background: #0B2E79; border-radius: 99px; }
+                                    .sig-scroll-box::-webkit-scrollbar-thumb:hover { background: #144CC9; }
+                                `}</style>
 
-                                <div className="sig-scroll-box" style={{ width: "100%", background: "#fff", borderRadius: "8px", position: "relative", overflowX: "auto", overflowY: "hidden" }}>
-                                    {showLegacy ? (
-                                        <div
-                                            ref={(el) => {
-                                                if (el) {
-                                                    const contentWidth = el.scrollWidth;
-                                                    const containerWidth = el.parentElement?.clientWidth || contentWidth;
-                                                    if (contentWidth > containerWidth) {
-                                                        const scale = containerWidth / contentWidth;
-                                                        el.style.transform = `scale(${scale})`;
-                                                        el.style.transformOrigin = "top left";
-                                                        el.style.width = `${100 / scale}%`;
-                                                        requestAnimationFrame(() => {
-                                                            if (el.parentElement)
-                                                                el.parentElement.style.height = `${el.scrollHeight * scale}px`;
-                                                        });
-                                                    }
-                                                }
-                                            }}
-                                            style={{ display: "inline-block", textAlign: "left", padding: "10px" }}
-                                            dangerouslySetInnerHTML={{ __html: form }}
-                                        />
-                                    ) : isMobile ? (
-                                        // On mobile: render HTML directly — html2canvas is unreliable in mobile WebViews
-                                        <div style={{ padding: "10px", overflowX: "auto" }}
-                                            dangerouslySetInnerHTML={{ __html: form }} />
-                                    ) : snapshot ? (
-                                        <img src={snapshot} alt="Signature preview" style={{ width: "150%", borderRadius: "8px" }} />
-                                    ) : (
-                                        <p>Loading preview…</p>
-                                    )}
+                                <div
+                                    className="sig-scroll-box"
+                                    style={{
+                                        // Do NOT use width: "100%" here — that would clamp the box
+                                        // to the pane and make inner content overflow invisibly.
+                                        // Instead let it be a block that scrolls its own content.
+                                        display: "block",
+                                        overflowX: "auto",
+                                        overflowY: "hidden",
+                                        WebkitOverflowScrolling: "touch", // smooth scroll on iOS
+                                        background: "#fff",
+                                        borderRadius: "8px",
+                                    }}
+                                >
+                                    {/* Render signature HTML directly — works on Windows, Mac
+                                        (WKWebView), OWA, iOS and Android. The inner div uses
+                                        display:inline-block + white-space:nowrap so its natural
+                                        width drives the scrollbar rather than wrapping to fit. */}
+                                    <div
+                                        style={{
+                                            display: "inline-block",
+                                            whiteSpace: "nowrap",
+                                            padding: "10px",
+                                        }}
+                                        dangerouslySetInnerHTML={{ __html: form }}
+                                    />
                                 </div>
-
-                                {/* Hidden off-screen div used by html2canvas on desktop */}
-                                {!isMobile && (
-                                    <div ref={containerRef} style={{ position: "absolute", left: "-9999px" }}>
-                                        <div dangerouslySetInnerHTML={{ __html: form }} />
-                                    </div>
-                                )}
 
                                 <Stack mt={1} direction="row" justifyContent="center" width="100%">
                                     <Button
@@ -353,9 +389,12 @@ export default function SignatureView({
                                             fontFamily: "Plus Jakarta Sans",
                                             textTransform: "capitalize",
                                             color: "#fff",
-                                            // Larger tap target on mobile
                                             touchAction: "manipulation",
-                                            "&:hover": { color: "#fff", borderColor: "#144CC9", backgroundColor: "#506AA3" },
+                                            "&:hover": {
+                                                color: "#fff",
+                                                borderColor: "#144CC9",
+                                                backgroundColor: "#506AA3",
+                                            },
                                         }}
                                     >
                                         Apply Signature
