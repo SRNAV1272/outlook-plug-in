@@ -1022,7 +1022,7 @@ export default function App({ user }) {
           const r = await tryInsertSignatureOnly(item, v.html, `MobileCompose-T1-${v.label}`);
           if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         }
-        const fullHtml = "<br/>" + signatureBlock + "<br/>";
+        const fullHtml = "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>";
         let r = await tryInsertFullBody(item, fullHtml, "MobileCompose-T2");
         if (r.success) { await stabilizeSelection(item); signatureStateRef.current = "idle"; return; }
         r = await tryInsertFullBody(item, stripBase64Images(fullHtml), "MobileCompose-T3");
