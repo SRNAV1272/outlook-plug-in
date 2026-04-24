@@ -948,9 +948,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                     const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>", "MacManual-T1");
                     if (result.success) { return; }
                     const compressed = await compressImagesInHtml(signatureBlock);
-                    const result2 = await tryInsertSignatureOnly(item, compressed, "MacManual-T2");
+                    const result2 = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>", "MacManual-T2");
                     if (result2.success) { return; }
-                    const result3 = await tryInsertSignatureOnly(item, stripBase64Images(signatureBlock), "MacManual-T3");
+                    const result3 = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + stripBase64Images(signatureBlock) + "<div style='margin-top:20px'></div>", "MacManual-T3");
                     if (result3.success) { return; }
                     throw new Error("Mac manual apply: all signature-only tiers failed");
                 }
@@ -1503,7 +1503,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
         try { localStorage.setItem("cardbyte_cached_signature", apiResponse); } catch (e) { }
         // v0.0.10: Do NOT write to localStorage — stale cache causes wrong sig on reload
 
-        await insertSignatureWithoutCursorError(item, apiResponse, { manualApply: isManualApply });
+        await insertSignatureWithoutCursorError(item, "<div style='margin-top:20px'></div>" + apiResponse + "<div style='margin-top:20px'></div>", { manualApply: isManualApply });
 
         SIGNATURE_STATE = "applied";
         console.log("[CardByte] Signature applied successfully");
