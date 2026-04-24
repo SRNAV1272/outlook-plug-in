@@ -721,25 +721,6 @@ function stabilizeSelection(item) {
     });
 }
 
-// function _stripDivById(html, idPattern) {
-//     const openTagRegex = new RegExp(`<div[^>]*id="[^"]*${idPattern.source}[^"]*"[^>]*>`, "i");
-//     const openMatch = openTagRegex.exec(html);
-//     if (!openMatch) return html;
-
-//     const startIndex = openMatch.index;
-//     let pos = startIndex + openMatch[0].length;
-//     let depth = 1;
-
-//     while (pos < html.length && depth > 0) {
-//         const nextOpen = html.indexOf("<div", pos);
-//         const nextClose = html.indexOf("</div>", pos);
-//         if (nextClose === -1) break;
-//         if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen + 4; }
-//         else { depth--; pos = nextClose + 6; }
-//     }
-
-//     return html.slice(0, startIndex) + html.slice(pos);
-// }
 function _stripDivById(html, idPattern) {
     // Find the opening div tag that matches the id pattern
     const tempRegex = new RegExp(`<div[^>]*id="([^"]*)"[^>]*>`, "gi");
