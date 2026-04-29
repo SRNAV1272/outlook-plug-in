@@ -1585,20 +1585,20 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             } catch (e) { console.warn("[CardByte][OnSend] localStorage read failed:", e.message); }
         }
 
-        if (!CACHED_SIGNATURE_HTML) {
-            try {
-                console.log("[CardByte][OnSend] Cache empty — fetching from API...");
-                const userEmail = mailbox?.userProfile?.emailAddress;
-                if (userEmail) {
-                    const fetched = await renderSignatureOnServer(userEmail);
-                    if (fetched) {
-                        CACHED_SIGNATURE_HTML = fetched;
-                        console.log(`[CardByte][OnSend] API fetch succeeded: ${(fetched.length / 1024).toFixed(1)}KB`);
-                        try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (e) { }
-                    } else { console.warn("[CardByte][OnSend] API returned null"); }
-                } else { console.warn("[CardByte][OnSend] No user email — cannot fetch signature"); }
-            } catch (e) { console.warn("[CardByte][OnSend] API fetch failed:", e.message); }
-        }
+        // if (!CACHED_SIGNATURE_HTML) {
+        //     try {
+        //         console.log("[CardByte][OnSend] Cache empty — fetching from API...");
+        //         const userEmail = mailbox?.userProfile?.emailAddress;
+        //         if (userEmail) {
+        //             const fetched = await renderSignatureOnServer(userEmail);
+        //             if (fetched) {
+        //                 CACHED_SIGNATURE_HTML = fetched;
+        //                 console.log(`[CardByte][OnSend] API fetch succeeded: ${(fetched.length / 1024).toFixed(1)}KB`);
+        //                 try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (e) { }
+        //             } else { console.warn("[CardByte][OnSend] API returned null"); }
+        //         } else { console.warn("[CardByte][OnSend] No user email — cannot fetch signature"); }
+        //     } catch (e) { console.warn("[CardByte][OnSend] API fetch failed:", e.message); }
+        // }
 
         console.log("[CardByte][OnSend] cachedSignature:", CACHED_SIGNATURE_HTML
             ? `${(CACHED_SIGNATURE_HTML.length / 1024).toFixed(1)}KB`
@@ -1662,29 +1662,29 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             const stripped = _hasSig(body) ? _stripSig(body) : body;
             console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB`);
 
-            if (!CACHED_SIGNATURE_HTML) {
-                console.warn("[CardByte][OnSend] No signature in cache — attempting live fetch before send");
-                try {
-                    const userEmail = mailbox?.userProfile?.emailAddress;
-                    if (userEmail) {
-                        const fetched = await renderSignatureOnServer(userEmail);
-                        if (fetched) {
-                            CACHED_SIGNATURE_HTML = fetched;
-                            try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (_) { }
-                        } else {
-                            if (_hasSig(body)) await _setBodyHtml(stripped);
-                            event.completed({ allowEvent: true }); return;
-                        }
-                    } else {
-                        if (_hasSig(body)) await _setBodyHtml(stripped);
-                        event.completed({ allowEvent: true }); return;
-                    }
-                } catch (fetchErr) {
-                    console.warn("[CardByte][OnSend] Live fetch failed:", fetchErr.message);
-                    if (_hasSig(body)) await _setBodyHtml(stripped);
-                    event.completed({ allowEvent: true }); return;
-                }
-            }
+            // if (!CACHED_SIGNATURE_HTML) {
+            //     console.warn("[CardByte][OnSend] No signature in cache — attempting live fetch before send");
+            //     try {
+            //         const userEmail = mailbox?.userProfile?.emailAddress;
+            //         if (userEmail) {
+            //             const fetched = await renderSignatureOnServer(userEmail);
+            //             if (fetched) {
+            //                 CACHED_SIGNATURE_HTML = fetched;
+            //                 try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (_) { }
+            //             } else {
+            //                 if (_hasSig(body)) await _setBodyHtml(stripped);
+            //                 event.completed({ allowEvent: true }); return;
+            //             }
+            //         } else {
+            //             if (_hasSig(body)) await _setBodyHtml(stripped);
+            //             event.completed({ allowEvent: true }); return;
+            //         }
+            //     } catch (fetchErr) {
+            //         console.warn("[CardByte][OnSend] Live fetch failed:", fetchErr.message);
+            //         if (_hasSig(body)) await _setBodyHtml(stripped);
+            //         event.completed({ allowEvent: true }); return;
+            //     }
+            // }
 
             console.log("[CardByte][OnSend] Building fresh signature block...");
             const freshBlock = await _buildFreshSignatureBlock();
