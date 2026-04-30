@@ -1662,87 +1662,87 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             const body = await _getBodyHtml();
             console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
 
-            const stripped = _hasSig(body) ? _stripSig(body) : body;
-            console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB`);
+            // const stripped = _hasSig(body) ? _stripSig(body) : body;
+            // console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB`);
 
-            // ── No signature available — strip any stale sig and allow send ──
-            if (!CACHED_SIGNATURE_HTML) {
-                console.warn("[CardByte][OnSend] No cached signature — sending as-is");
-                if (_hasSig(body)) await _setBodyHtml(stripped);
-                safeComplete({ allowEvent: true }); return;
-            }
+            // // ── No signature available — strip any stale sig and allow send ──
+            // if (!CACHED_SIGNATURE_HTML) {
+            //     console.warn("[CardByte][OnSend] No cached signature — sending as-is");
+            //     if (_hasSig(body)) await _setBodyHtml(stripped);
+            //     safeComplete({ allowEvent: true }); return;
+            // }
 
-            console.log("[CardByte][OnSend] Building fresh signature block...");
-            const freshBlock = await _buildFreshSignatureBlock();
-            console.log(`[CardByte][OnSend] Fresh block: ${(freshBlock.length / 1024).toFixed(1)}KB`);
+            // console.log("[CardByte][OnSend] Building fresh signature block...");
+            // const freshBlock = await _buildFreshSignatureBlock();
+            // console.log(`[CardByte][OnSend] Fresh block: ${(freshBlock.length / 1024).toFixed(1)}KB`);
 
-            const replyChainIndex = _findReplyChainIndex(stripped);
-            const isReply = replyChainIndex > -1;
-            console.log(`[CardByte][OnSend] isReply: ${isReply}, replyChainIndex: ${replyChainIndex}`);
+            // const replyChainIndex = _findReplyChainIndex(stripped);
+            // const isReply = replyChainIndex > -1;
+            // console.log(`[CardByte][OnSend] isReply: ${isReply}, replyChainIndex: ${replyChainIndex}`);
 
-            let finalHtml;
-            let beforeChain = "";
-            let replyChain = "";
+            // let finalHtml;
+            // let beforeChain = "";
+            // let replyChain = "";
 
-            if (isReply) {
-                beforeChain = stripped
-                    .slice(0, replyChainIndex)
-                    .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "")
-                    .trimEnd();
-                replyChain = stripped.slice(replyChainIndex);
-                console.log(`[CardByte][OnSend] beforeChain: ${(beforeChain.length / 1024).toFixed(1)}KB, replyChain: ${(replyChain.length / 1024).toFixed(1)}KB`);
-                finalHtml = beforeChain + freshBlock + replyChain;
-            } else {
-                finalHtml = stripped + freshBlock;
-            }
+            // if (isReply) {
+            //     beforeChain = stripped
+            //         .slice(0, replyChainIndex)
+            //         .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "")
+            //         .trimEnd();
+            //     replyChain = stripped.slice(replyChainIndex);
+            //     console.log(`[CardByte][OnSend] beforeChain: ${(beforeChain.length / 1024).toFixed(1)}KB, replyChain: ${(replyChain.length / 1024).toFixed(1)}KB`);
+            //     finalHtml = beforeChain + freshBlock + replyChain;
+            // } else {
+            //     finalHtml = stripped + freshBlock;
+            // }
 
-            console.log(`[CardByte][OnSend] Final body: ${(finalHtml.length / 1024).toFixed(1)}KB`);
+            // console.log(`[CardByte][OnSend] Final body: ${(finalHtml.length / 1024).toFixed(1)}KB`);
 
-            const SETASYNC_LIMIT = 900_000;
+            // const SETASYNC_LIMIT = 900_000;
 
-            if (finalHtml.length <= SETASYNC_LIMIT) {
-                await _setBodyHtml(finalHtml);
-                console.log("[CardByte][OnSend] ✅ Done (direct write)");
-                safeComplete({ allowEvent: true }); return;
-            }
+            // if (finalHtml.length <= SETASYNC_LIMIT) {
+            //     await _setBodyHtml(finalHtml);
+            //     console.log("[CardByte][OnSend] ✅ Done (direct write)");
+            //     safeComplete({ allowEvent: true }); return;
+            // }
 
-            // Tier A: compress full body
-            try {
-                const compressed = await compressImagesInHtml(finalHtml);
-                if (compressed.length <= SETASYNC_LIMIT) {
-                    await _setBodyHtml(compressed);
-                    console.log("[CardByte][OnSend] ✅ Done (Tier A — compressed)");
-                    safeComplete({ allowEvent: true }); return;
-                }
-            } catch (e) { console.warn("[CardByte][OnSend] Tier A failed:", e.message); }
+            // // Tier A: compress full body
+            // try {
+            //     const compressed = await compressImagesInHtml(finalHtml);
+            //     if (compressed.length <= SETASYNC_LIMIT) {
+            //         await _setBodyHtml(compressed);
+            //         console.log("[CardByte][OnSend] ✅ Done (Tier A — compressed)");
+            //         safeComplete({ allowEvent: true }); return;
+            //     }
+            // } catch (e) { console.warn("[CardByte][OnSend] Tier A failed:", e.message); }
 
-            // Tier B: strip base64 from reply chain only
-            if (isReply) {
-                try {
-                    const strippedReplyChain = replyChain.replace(
-                        /(<img[^>]+src=")data:[^"]{100,}(")/gi,
-                        '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
-                    );
-                    const tierBHtml = beforeChain + freshBlock + strippedReplyChain;
-                    if (tierBHtml.length <= SETASYNC_LIMIT) {
-                        await _setBodyHtml(tierBHtml);
-                        console.log("[CardByte][OnSend] ✅ Done (Tier B — reply-chain images stripped)");
-                        safeComplete({ allowEvent: true }); return;
-                    }
-                } catch (e) { console.warn("[CardByte][OnSend] Tier B failed:", e.message); }
-            }
+            // // Tier B: strip base64 from reply chain only
+            // if (isReply) {
+            //     try {
+            //         const strippedReplyChain = replyChain.replace(
+            //             /(<img[^>]+src=")data:[^"]{100,}(")/gi,
+            //             '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
+            //         );
+            //         const tierBHtml = beforeChain + freshBlock + strippedReplyChain;
+            //         if (tierBHtml.length <= SETASYNC_LIMIT) {
+            //             await _setBodyHtml(tierBHtml);
+            //             console.log("[CardByte][OnSend] ✅ Done (Tier B — reply-chain images stripped)");
+            //             safeComplete({ allowEvent: true }); return;
+            //         }
+            //     } catch (e) { console.warn("[CardByte][OnSend] Tier B failed:", e.message); }
+            // }
 
-            // Tier C: strip all base64 images
-            try {
-                const fullyStripped = finalHtml.replace(
-                    /(<img[^>]+src=")data:[^"]{100,}(")/gi,
-                    '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
-                );
-                await _setBodyHtml(fullyStripped);
-                console.log("[CardByte][OnSend] ✅ Done (Tier C — all images stripped)");
-            } catch (e) {
-                console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message);
-            }
+            // // Tier C: strip all base64 images
+            // try {
+            //     const fullyStripped = finalHtml.replace(
+            //         /(<img[^>]+src=")data:[^"]{100,}(")/gi,
+            //         '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
+            //     );
+            //     await _setBodyHtml(fullyStripped);
+            //     console.log("[CardByte][OnSend] ✅ Done (Tier C — all images stripped)");
+            // } catch (e) {
+            //     console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message);
+            // }
 
             safeComplete({ allowEvent: true });
 
