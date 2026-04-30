@@ -1544,7 +1544,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
    ON-SEND HANDLER (unchanged from v0.0.7)
    --------------------------------------------------------- */
 window.onSendHandler = async function (event = { completed: () => { } }) {
-    let CACHED_SIGNATURE_HTML;
     let completedCalled = false;
     const safeComplete = (opts) => {
         if (!completedCalled) {

@@ -838,6 +838,9 @@ export default function App({ user }) {
   // ─────────────────────────────────────────────────────────────────────────
   async function applySignature(signature) {
     if (!signature) return;
+    // Bridge for onSendHandler (runs in separate JS context on desktop Outlook)
+    try { localStorage.setItem("cardbyte_cached_signature", signature); } catch (e) { }
+
     if (typeof Office === "undefined") { console.error("Office.js not available"); return; }
     const item = Office.context?.mailbox?.item;
     if (!item?.body) { console.error("[CardByte] Not in compose mode"); return; }
