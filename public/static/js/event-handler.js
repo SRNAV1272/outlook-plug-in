@@ -1543,7 +1543,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
 /* ---------------------------------------------------------
    ON-SEND HANDLER (unchanged from v0.0.7)
    --------------------------------------------------------- */
-window.onSendHandler = async function (event = { completed: () => { } }) {
+onSendHandler = async function (event = { completed: () => { } }) {
     // ── IMMEDIATE DIAGNOSTIC — fires before anything else ──
     console.log("[CardByte][OnSend] ══ ENTRY ══");
     console.log("[CardByte][OnSend] event type:", typeof event);
@@ -1843,7 +1843,7 @@ window.debugSignatureSize = async function () {
 // ── AT THE VERY BOTTOM OF event.js ──────────────────────────
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("applySignature", window.applySignature);
-    Office.actions.associate("onSendHandler", window.onSendHandler);
+    Office.actions.associate("onSendHandler", onSendHandler);
     console.log("[CardByte] Office.actions.associate registered: applySignature + onSendHandler");
 } else {
     console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
