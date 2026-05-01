@@ -1544,26 +1544,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
    ON-SEND HANDLER (unchanged from v0.0.7)
    --------------------------------------------------------- */
 window.onSendHandler = async function (event = { completed: () => { } }) {
-    // ── IMMEDIATE DIAGNOSTIC — fires before anything else ──
-    console.log("[CardByte][OnSend] ══ ENTRY ══");
-    console.log("[CardByte][OnSend] event type:", typeof event);
-    console.log("[CardByte][OnSend] event.completed type:", typeof event?.completed);
-    console.log("[CardByte][OnSend] CACHED_SIGNATURE_HTML:",
-        typeof CACHED_SIGNATURE_HTML,
-        CACHED_SIGNATURE_HTML ? (CACHED_SIGNATURE_HTML.length / 1024).toFixed(1) + "KB" : "NULL"
-    );
-    console.log("[CardByte][OnSend] localStorage sig:", (() => {
-        try {
-            const s = localStorage.getItem("cardbyte_cached_signature");
-            return s ? (s.length / 1024).toFixed(1) + "KB" : "NULL";
-        } catch (e) { return "ERROR: " + e.message; }
-    })());
-    console.log("[CardByte][OnSend] _stripSig:", typeof _stripSig);
-    console.log("[CardByte][OnSend] _findReplyChainIndex:", typeof _findReplyChainIndex);
-    console.log("[CardByte][OnSend] wrapForOutlook:", typeof wrapForOutlook);
-    console.log("[CardByte][OnSend] compressImagesInHtml:", typeof compressImagesInHtml);
-    console.log("[CardByte][OnSend] isMobile:", typeof isMobile);
-    // ── END DIAGNOSTIC ──
 
     let completedCalled = false;
     const safeComplete = (opts) => {
@@ -1573,10 +1553,10 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         }
     };
 
-    const timeout = setTimeout(() => {
-        console.warn("[CardByte][OnSend] Timeout — forcing event.completed");
-        safeComplete({ allowEvent: true });
-    }, 3500);
+    // const timeout = setTimeout(() => {
+    //     console.warn("[CardByte][OnSend] Timeout — forcing event.completed");
+    //     safeComplete({ allowEvent: true });
+    // }, 3500);
 
     try {
         const mailbox = Office?.context?.mailbox;
