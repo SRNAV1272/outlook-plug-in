@@ -1543,7 +1543,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
 /* ---------------------------------------------------------
    ON-SEND HANDLER (unchanged from v0.0.7)
    --------------------------------------------------------- */
-onSendHandler = async function (event = { completed: () => { } }) {
+async function onSendHandler(event = { completed: () => {} }) {
     // ── IMMEDIATE DIAGNOSTIC — fires before anything else ──
     console.log("[CardByte][OnSend] ══ ENTRY ══");
     console.log("[CardByte][OnSend] event type:", typeof event);
