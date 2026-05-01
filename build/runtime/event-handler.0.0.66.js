@@ -1566,10 +1566,10 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         console.log("[CardByte][OnSend] Handler fired");
         console.log("[CardByte][OnSend] item:", item ? "found" : "NULL");
 
-        if (!item) {
-            console.error("[CardByte][OnSend] No item — allowing send");
-            safeComplete({ allowEvent: true }); return;
-        }
+        // if (!item) {
+        //     console.error("[CardByte][OnSend] No item — allowing send");
+        //     safeComplete({ allowEvent: true }); return;
+        // }
 
         // // ── Restore from localStorage if in-memory cache is empty ──
         // if (!CACHED_SIGNATURE_HTML) {
