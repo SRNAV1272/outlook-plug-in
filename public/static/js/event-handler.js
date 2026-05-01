@@ -1736,7 +1736,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         console.error("[CardByte][OnSend] ❌ Fatal:", err.message);
         safeComplete({ allowEvent: true });
     } finally {
-        clearTimeout(timeout);
+        // clearTimeout(timeout);
         safeComplete({ allowEvent: true }); // no-op if already called
     }
 };
