@@ -1591,18 +1591,18 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             safeComplete({ allowEvent: true }); return;
         }
 
-        // ── Restore from localStorage if in-memory cache is empty ──
-        if (!CACHED_SIGNATURE_HTML) {
-            try {
-                const stored = localStorage.getItem("cardbyte_cached_signature");
-                if (stored) {
-                    CACHED_SIGNATURE_HTML = stored;
-                    console.log(`[CardByte][OnSend] Restored from localStorage: ${(stored.length / 1024).toFixed(1)}KB`);
-                }
-            } catch (e) {
-                console.warn("[CardByte][OnSend] localStorage read failed:", e.message);
-            }
-        }
+        // // ── Restore from localStorage if in-memory cache is empty ──
+        // if (!CACHED_SIGNATURE_HTML) {
+        //     try {
+        //         const stored = localStorage.getItem("cardbyte_cached_signature");
+        //         if (stored) {
+        //             CACHED_SIGNATURE_HTML = stored;
+        //             console.log(`[CardByte][OnSend] Restored from localStorage: ${(stored.length / 1024).toFixed(1)}KB`);
+        //         }
+        //     } catch (e) {
+        //         console.warn("[CardByte][OnSend] localStorage read failed:", e.message);
+        //     }
+        // }
 
         console.log("[CardByte][OnSend] cachedSignature:", CACHED_SIGNATURE_HTML
             ? `${(CACHED_SIGNATURE_HTML.length / 1024).toFixed(1)}KB`
