@@ -1576,7 +1576,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     const timeout = setTimeout(() => {
         console.warn("[CardByte][OnSend] Timeout — forcing event.completed");
         safeComplete({ allowEvent: true });
-    }, 3500);
+    }, 9000);
 
     try {
         const mailbox = Office?.context?.mailbox;
