@@ -221,31 +221,11 @@ async function renderSignatureOnServer(user) {
     const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
-    // ── OWA POPUP NULL-ORIGIN FIX ─────────────────────────────────────────
-    // When compose opens in a popup window (about:blank), the browser sends
-    // Origin: null on all fetch() calls. Most servers reject null origin with
-    // a CORS error → "Failed to fetch". Detect this and log it clearly.
-    // The real fix is on the backend: add "null" to allowed CORS origins.
-    // The mode:"cors" here makes the intent explicit to the browser.
-    const isNullOrigin = (() => {
-        try {
-            return window.location.origin === "null"
-                || window.location.href === "about:blank"
-                || window.location.href.startsWith("about:");
-        } catch (e) { return false; }
-    })();
-    console.log(`[CardByte] renderSignatureOnServer — isNullOrigin: ${isNullOrigin}, origin: ${(() => { try { return window.location.origin; } catch (e) { return "unknown"; } })()}`);
-    // ─────────────────────────────────────────────────────────────────────
-
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-            {
-                method: "GET",
-                mode: "cors",
-                headers: { username: encryptedMail, "X-Platform": xPlatform }
-            }
+            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
         if (primaryRes.ok) {
             const data = await primaryRes.text();
@@ -261,12 +241,7 @@ async function renderSignatureOnServer(user) {
     try {
         const legacyRes = await fetch(
             "https://newqa-renderer.cardbyte.ai/render-signature",
-            {
-                method: "POST",
-                mode: "cors",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email: user })
-            }
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
         const legacyData = await legacyRes.json();
