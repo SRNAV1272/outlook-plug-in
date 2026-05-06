@@ -1413,7 +1413,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
         function is reachable from both the WebView and the
         JS-only runtime.
    --------------------------------------------------------- */
-window.onSendHandler = async function onSendHandler(event = { completed: () => {} }) {
+window.onSendHandler = async function onSendHandler(event = { completed: () => { } }) {
     // ── IMMEDIATE DIAGNOSTIC — fires before anything else ──
     console.log("[CardByte][OnSend] ══ ENTRY ══");
     console.log("[CardByte][OnSend] event type:", typeof event);
@@ -1754,14 +1754,62 @@ if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     console.log("[CardByte] Office.actions not available at module level — LaunchEvent path not active (expected on 2016/2019)");
 }
 
+// // ── Pass 2: inside Office.onReady — safety net for WebView runtimes ──
+// // On older IE11/EdgeHTML WebView builds, Office.actions is not
+// // initialised until onReady fires. The second associate() call is
+// // harmless if Pass 1 already registered the handlers.
+// Office.onReady(() => {
+//     if (typeof Office.actions !== "undefined") {
+//         Office.actions.associate("applySignature", window.applySignature);
+//         Office.actions.associate("onSendHandler", window.onSendHandler);
+//         console.log("[CardByte] onReady Office.actions.associate registered: applySignature + onSendHandler");
+//     }
+// });
+
 // ── Pass 2: inside Office.onReady — safety net for WebView runtimes ──
-// On older IE11/EdgeHTML WebView builds, Office.actions is not
-// initialised until onReady fires. The second associate() call is
-// harmless if Pass 1 already registered the handlers.
-Office.onReady(() => {
+// Also handles OWA popup compose windows where OnNewMessageCompose
+// does not re-fire because OWA treats the popup as the same session.
+Office.onReady(async () => {
     if (typeof Office.actions !== "undefined") {
         Office.actions.associate("applySignature", window.applySignature);
         Office.actions.associate("onSendHandler", window.onSendHandler);
         console.log("[CardByte] onReady Office.actions.associate registered: applySignature + onSendHandler");
     }
+
+    // ── OWA POPUP COMPOSE SELF-TRIGGER ──────────────────────────────────
+    // When the user clicks "Open in new window" in OWA, the compose opens
+    // in a popup (window.opener !== null, URL = about:blank). In this context
+    // OnNewMessageCompose does NOT re-fire — OWA considers it the same session.
+    // We detect the popup and self-trigger applySignature after a short delay
+    // to let OWA finish initialising the compose body.
+    try {
+        const isPopup = window.opener !== null && window.opener !== window;
+
+        if (isPopup && SIGNATURE_STATE === "idle") {
+            console.log("[CardByte] OWA popup compose detected — waiting for item...");
+
+            let item = null;
+            let attempts = 0;
+            const MAX_ATTEMPTS = 15;      // 15 × 300ms = 4.5s max wait
+            const POLL_INTERVAL_MS = 300;
+
+            while (attempts < MAX_ATTEMPTS) {
+                item = Office?.context?.mailbox?.item;
+                if (item?.itemType === Office.MailboxEnums.ItemType.Message) break;
+                await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+                attempts++;
+                console.log(`[CardByte] Popup: waiting for item (attempt ${attempts}/${MAX_ATTEMPTS})`);
+            }
+
+            if (item?.itemType === Office.MailboxEnums.ItemType.Message) {
+                console.log(`[CardByte] Popup item ready after ${attempts + 1} attempt(s) — self-triggering applySignature`);
+                await window.applySignature({ completed: () => { } });
+            } else {
+                console.warn("[CardByte] Popup: item never resolved — giving up");
+            }
+        }
+    } catch (e) {
+        console.warn("[CardByte] Popup self-trigger failed (non-fatal):", e.message);
+    }
+    // ── END OWA POPUP SELF-TRIGGER ───────────────────────────────────────
 });
