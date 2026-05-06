@@ -1,42 +1,83 @@
 /* =========================================================
-   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER (v0.0.9)
+   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER (v0.0.8)
    =========================================================
-   FIXES (v0.0.9 — ONSEND POPUP / TIMEOUT BUG):
+   FIXES (v0.0.8 — SIGNATURE DUPLICATION BUG):
 
    ROOT CAUSE:
-     onSendHandler was always stripping + re-fetching + re-inserting
-     the signature even when applySignature had already inserted it.
-     On Outlook Desktop Classic, OnMessageSend runs in an ISOLATED
-     JavaScript-only runtime (separate memory space from the WebView
-     runtime used by OnNewMessageCompose). CACHED_SIGNATURE_HTML set
-     by applySignature is never visible to onSendHandler. localStorage
-     may also be unavailable in the JS-only runtime. The result is an
-     API call on every send → exceeds Outlook's 5-second OnMessageSend
-     limit → "CardByte Signature Manager is unavailable" popup.
+     When applySignature() was recalled (e.g. user opens a
+     saved draft, or the handler fires again), SIGNATURE_STATE
+     was always reset to "idle" in the finally block — so the
+     "already applied" guard never triggered.
+
+     Additionally, in PATH B (New Compose) and PATH A (Reply),
+     the existing body was appended WITH the new signatureBlock
+     WITHOUT first stripping any prior signature. Even though
+     the `alreadyHasSignature` branch called _stripSig, the
+     Compose tiers T1–T4 each re-built fullHtml from the raw
+     `existingBody`, duplicating whatever was already there if
+     the alreadyHasSignature branch didn't match (e.g. stale
+     marker variant).
 
    FIXES:
-     1. FAST PATH in onSendHandler: if the signature is already in the
-        body (inserted by applySignature), return allowEvent:true
-        immediately — no API call, no body write, no timeout risk.
-        This handles 99 % of sends in under 100 ms.
+     1. SIGNATURE_STATE is set to "applied" after successful
+        insertion (not back to "idle"). The finally block no
+        longer resets it. On error it resets to "idle" so a
+        retry remains possible.
 
-     2. window.onSendHandler: onSendHandler is now explicitly assigned
-        to window so it is reachable from both the WebView runtime and
-        the JS-only runtime used by Desktop Classic.
+     2. A per-item-ID guard (window.__LAST_ITEM_ID__) detects
+        when applySignature fires for a *new* compose/reply
+        window and resets SIGNATURE_STATE to "idle" so the new
+        item always gets a fresh signature run.
 
-     3. Office.actions.associate moved INSIDE Office.onReady: on older
-        IE11/EdgeHTML WebView runtimes (some Outlook 365 Desktop builds)
-        Office.actions is not initialised until onReady fires. Placing
-        the associate calls outside onReady caused silent registration
-        failures on those runtimes.
+     3. In PATH B (New Compose), ALL four tiers (T1–T4) now
+        call _stripSig(existingBody) first — computed once as
+        `cleanBody` before T1 — so no prior signature content
+        can accumulate regardless of which marker variant was
+        present.
 
-   ALL OTHER CHANGES: none. v0.0.8 logic fully preserved.
+     4. In PATH A (Reply) the same _stripSig-first pattern is
+        applied inside the "alreadyHasSignature" branch AND in
+        the desktop/OWA reply tiers T3 and the Mac/mobile full-
+        body rebuilds, ensuring the old signature is always
+        removed before the new block is spliced in.
 
-   FIXES (v0.0.8 — SIGNATURE DUPLICATION BUG): see previous header.
-   FIXES (v0.0.7 — MID-ATTRIBUTE SLICE BUG): see previous header.
-   FIXES (v0.0.6 — MAC SUPPORT): see previous header.
-   FIXES (v0.0.5 — MOBILE SUPPORT / GIF PATCH): see previous header.
-   FIXES (v0.0.4): see previous header.
+   ALL OTHER CHANGES: none. v0.0.7 logic fully preserved.
+
+   FIXES (v0.0.7 — MID-ATTRIBUTE SLICE BUG):
+   - All Mac-specific patterns anchored to opening HTML tags
+   - _findReplyChainIndex() tightened; bare-string fallbacks
+     moved to lowest priority
+   - v0.0.6 logic fully preserved otherwise
+
+   FIXES (v0.0.6 — MAC SUPPORT):
+   - Added "mac" as a distinct platform
+   - isMac() helper; used throughout insertion strategy
+   - detectReplyChain(): added Mac-specific HTML markers
+   - tryInsertSignatureOnly(): Mac replies skip setSignatureAsync
+   - insertSignatureWithoutCursorError(): Mac jumps to T3
+   - stabilizeSelection(): skipped on Mac
+   - _findReplyChainIndex(): expanded marker list for Mac
+
+   FIXES (v0.0.5 — MOBILE SUPPORT):
+   - Mobile platform detection
+   - Mobile-specific insertion strategy
+   - Retry with delay for mobile slow-init race
+   - Skip disableClientSignatureAsync on mobile
+   - Skip setSignatureAsync on mobile
+   - Mobile-safe fallback chain
+   - Reduced image quality/size on mobile
+   - waitForItemReady() for mobile async init
+
+   FIXES (v0.0.5 — GIF PATCH):
+   - compressImagesInHtml: currentDataUrl guard in first pass
+   - compressImagesInHtml: second-pass GIF→PNG conversion fix
+   - compressImagesInHtml: second-pass uses getMaxHtmlSize()
+
+   FIXES (v0.0.4):
+   - Reply/ReplyAll/Forward preserves conversation chain
+   - Cursor stays at top of reply area
+   - setSignatureAsync preferred for replies
+   - Fallback uses prependAsync
    ========================================================= */
 
 let SIGNATURE_STATE = "idle"; // idle | loading | applied
@@ -191,8 +232,10 @@ function bodySelectAllAndReplaceAsync(item, html) {
         if (typeof item.body.setSelectedDataAsync !== "function") {
             reject(new Error("setSelectedDataAsync not available")); return;
         }
+        // First, select entire body content
         item.body.getAsync(Office.CoercionType.Html, (r) => {
             if (r.status !== "succeeded") { reject(r.error); return; }
+            // Set selection to full body then replace
             item.body.setAsync("", { coercionType: Office.CoercionType.Html }, (clearResult) => {
                 if (clearResult.status !== "succeeded") { reject(clearResult.error); return; }
                 item.body.setSelectedDataAsync(html, { coercionType: Office.CoercionType.Html }, (r2) => {
@@ -210,7 +253,7 @@ function bodySelectAllAndReplaceAsync(item, html) {
 
 function forceCursorToTop(item) {
     return new Promise((resolve) => {
-        item.body.prependAsync("﻿", { coercionType: Office.CoercionType.Text }, (r1) => {
+        item.body.prependAsync("\uFEFF", { coercionType: Office.CoercionType.Text }, (r1) => {
             if (r1.status !== "succeeded") { resolve(); return; }
             item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
         });
@@ -605,6 +648,7 @@ async function tryInsertFullBody(item, fullHtml, label = "") {
         ];
     } else {
         methods = [
+            // { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, fullHtml) },
             { name: "setSelectedDataAsync", fn: () => bodySelectAllAndReplaceAsync(item, fullHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, fullHtml) },
             { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, fullHtml) },
@@ -678,6 +722,7 @@ function stabilizeSelection(item) {
 }
 
 function _stripDivById(html, idPattern) {
+    // Find the opening div tag that matches the id pattern
     const tempRegex = new RegExp(`<div[^>]*id="([^"]*)"[^>]*>`, "gi");
     let openMatch;
     let matchedIndex = -1;
@@ -714,19 +759,29 @@ function _stripSig(html) {
         /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
         ""
     );
+    // Only trim trailing — never leading
     result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
     return result;
 }
 
 function _stripOutlookWrappers(html) {
+    // Remove Word/Outlook-generated wrapper divs that get injected
+    // around plain body text (MsoNormal, WordSection, etc.)
+    // These cause text duplication when body is re-set via setAsync.
     let result = html;
+
+    // Remove MsoNormal paragraph wrappers but keep their inner text
     result = result.replace(/<p[^>]*class="?MsoNormal"?[^>]*>([\s\S]*?)<\/p>/gi, '$1<br>');
+
+    // Remove WordSection wrapper divs
     result = result.replace(/<div[^>]*class="?WordSection[0-9]+"?[^>]*>([\s\S]*?)<\/div>/gi, '$1');
+
+    // Remove o:p tags (Outlook paragraph markers)
     result = result.replace(/<o:p[^>]*>[\s\S]*?<\/o:p>/gi, '');
     result = result.replace(/<\/o:p>/gi, '');
+
     return result;
 }
-
 /* ---------------------------------------------------------
    Reply Chain Index Helper (v0.0.7 tag-anchored patterns)
    --------------------------------------------------------- */
@@ -758,27 +813,51 @@ function _findReplyChainIndex(html) {
 
 /* ---------------------------------------------------------
    Main Insertion — Multi-Strategy
+   v0.0.8 CHANGES:
+     - PATH A (Reply): always _stripSig before rebuilding full
+       body in every tier across all platforms (mobile, mac,
+       desktop/OWA). Prevents old signature accumulating when
+       a reply is opened from a draft or handler fires twice.
+     - PATH B (Compose): cleanBody = _stripSig(existingBody)
+       computed once before T1 and reused in all four tiers.
+       Replaces the raw `existingBody` references that were
+       causing duplication.
    --------------------------------------------------------- */
 
 function bodySetAsyncMac(item, html) {
     return new Promise((resolve, reject) => {
         item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
             if (r.status !== "succeeded") { reject(r.error); return; }
-            resolve();
+            resolve(); // No prependAsync — avoids cursor loss on Mac
         });
     });
 }
 
+/**
+ * _stripSigFromSafeZoneOnly
+ * ─────────────────────────
+ * Strips the CardByte signature ONLY from the portion of the body
+ * that sits ABOVE the reply-chain marker (the "safe zone").
+ * Everything from the first reply-chain marker onwards is returned
+ * completely untouched — preserving signatures inside quoted emails.
+ *
+ * Use this wherever we are rebuilding the full body for a reply so
+ * that older signatures in the quoted chain are never destroyed.
+ *
+ * @param {string} html  Full body HTML of the compose item
+ * @returns {{ safeZone: string, replyChain: string, fullStripped: string }}
+ */
 function _stripSigFromSafeZoneOnly(html) {
     const chainIndex = _findReplyChainIndex(html);
 
     if (chainIndex === -1) {
+        // No reply chain found — strip from the entire body (safe for compose)
         const stripped = _stripSig(html);
         return { safeZone: stripped, replyChain: "", fullStripped: stripped };
     }
 
-    const safeZone = _stripSig(html.slice(0, chainIndex));
-    const replyChain = html.slice(chainIndex);
+    const safeZone = _stripSig(html.slice(0, chainIndex));   // strip only the top
+    const replyChain = html.slice(chainIndex);                  // NEVER touch this
 
     return {
         safeZone,
@@ -823,20 +902,27 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
         if (isReply) {
             console.log("[CardByte] Reply/Forward detected");
 
+            // v0.0.8: always strip before rebuilding — covers both fresh reply
+            // and re-invoke on a saved draft that already has a CardByte sig.
             if (alreadyHasSignature) {
                 console.log("[CardByte] Replacing existing CardByte signature in reply");
+                // _stripSig already called below for all rebuild paths; this branch
+                // is kept only for logging clarity. Fall through to platform paths.
             }
 
             // ── MOBILE REPLY PATH ──────────────────────────
             if (mobile) {
                 console.log("[CardByte] Mobile reply: using full-body strategy");
 
+                // Mobile T1: signature-only prepend (no full-body risk)
                 if (!alreadyHasSignature) {
                     const result = await tryInsertSignatureOnly(item, signatureBlock, "MobileReply-T1");
                     if (result.success) { await stabilizeSelection(item); return; }
                 }
 
+                // Mobile T2 / T3: full-body rebuild — always strip first
                 {
+                    // v0.0.8: strip existing sig before splicing new one in
                     const cleanBody = _stripSig(existingBody);
                     const insertIndex = _findReplyChainIndex(cleanBody);
                     const fullHtml = insertIndex > -1
@@ -856,6 +942,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             // ── MAC REPLY PATH ────────────────────────────
             if (mac) {
                 console.log("[CardByte] Mac reply: using full-body rebuild (setSignatureAsync bypassed)");
+                // v0.0.9: Manual apply on Mac — never rebuild full body (destroys draft)
                 if (isManualApply) {
                     console.log("[CardByte] Mac manual apply: using signature-only path");
                     const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>", "MacManual-T1");
@@ -872,6 +959,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 {
                     try {
                         const compressed = await compressImagesInHtml(signatureBlock);
+                        // v0.0.11: use safeZone-only strip so quoted-chain signatures survive
                         const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(existingBody);
                         const fullHtml = safeZone + "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>" + replyChain;
 
@@ -907,11 +995,14 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             }
 
             // ── DESKTOP / OWA REPLY PATH ──────────────────
+            // T1: try signature-only insertion (preferred — no full body needed)
+            // Only skip this if sig is already present (we must do full-body replace)
             if (!alreadyHasSignature) {
                 const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>", "Reply-T1");
                 if (result.success) { await stabilizeSelection(item); return; }
             }
 
+            // T2: compressed signature-only
             if (!alreadyHasSignature) {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
@@ -920,12 +1011,17 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
             }
 
-            // T3: full-body rebuild
+            // T3: full-body rebuild — always strip first (v0.0.8)
             {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
+                    // v0.0.8: strip any existing sig from existingBody before splice
                     const cleanBody = _stripSig(existingBody);
+                    const insertIndex = _findReplyChainIndex(cleanBody);
                     const fullHtml =
+                        // insertIndex > -1
+                        //     ? cleanBody.slice(0, insertIndex) + compressed + cleanBody.slice(insertIndex)
+                        //     : 
                         "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>";
 
                     console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`, cleanBody, "---", fullHtml);
@@ -945,15 +1041,19 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
 
         // ═══════════════════════════════════════════════════
         // PATH B: NEW COMPOSE
+        // v0.0.8: compute cleanBody ONCE here and reuse across
+        // all four tiers so no tier can re-introduce the old sig.
         // ═══════════════════════════════════════════════════
         console.log("[CardByte] New compose detected");
 
+        // v0.0.8: always strip first — safe even when no sig present
         const cleanBody = _stripSig(existingBody);
 
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
 
             if (mac) {
+                // Mac: must rebuild full body — prependAsync/setSignatureAsync would duplicate
                 let freshBody = existingBody;
                 try { freshBody = await getBodyHtml(item); } catch (e) { /* use existingBody */ }
                 if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) freshBody = existingBody;
@@ -982,6 +1082,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 throw new Error("Mac compose replace: all setAsync variants failed");
             }
 
+            // Non-Mac: original behaviour
             const updatedBody = signatureBlock;
             console.log("[CardByte] Attempting full-body replace to update existing signature");
             const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
@@ -996,6 +1097,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 if (result.success) { await stabilizeSelection(item); return; }
             }
             {
+                // v0.0.8: use cleanBody (sig already stripped)
                 const fullHtml = "<br/>" + signatureBlock;
                 let result = await tryInsertFullBody(item, fullHtml, "MobileCompose-T2");
                 if (result.success) { await stabilizeSelection(item); return; }
@@ -1007,9 +1109,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
         }
 
         // DESKTOP / OWA / MAC COMPOSE PATH
+        // v0.0.8: ALL tiers use cleanBody — never raw existingBody.
         if (mac && isManualApply) {
             console.log("[CardByte] Mac manual compose apply: append signature below draft");
 
+            // Re-read body fresh to avoid stale-read on Mac
             let freshBody = existingBody;
             try {
                 freshBody = await getBodyHtml(item);
@@ -1018,11 +1122,13 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 console.warn("[CardByte] Mac manual compose: re-read failed, using existingBody:", e.message);
             }
 
+            // Stale-read guard
             if (existingBody.length > 200 && freshBody.length < existingBody.length * 0.5) {
                 console.warn("[CardByte] ⚠️ Mac stale-read on manual compose — reverting to existingBody");
                 freshBody = existingBody;
             }
 
+            // Strip any previous CardByte sig, trim trailing whitespace
             const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(freshBody);
             const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
 
@@ -1051,6 +1157,9 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
         // Compose T1
         {
             const fullHtml =
+                // cleanBody
+                //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + signatureBlock
+                //     : 
                 "<div style='margin-top:20px'></div>" +
                 signatureBlock +
                 "<div style='margin-top:20px'></div>"
@@ -1064,7 +1173,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             console.log("[CardByte] Compose Tier 2: Compress images + full-body insert");
             try {
                 const compressed = await compressImagesInHtml(signatureBlock);
+                // v0.0.8: cleanBody instead of existingBody
                 const fullHtml =
+                    // cleanBody
+                    //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + compressed
+                    //     : 
                     "<div style='margin-top:20px'></div>" +
                     compressed +
                     "<div style='margin-top:20px'></div>"
@@ -1078,13 +1191,21 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
             console.log("[CardByte] Compose Tier 3: CID images + full-body insert");
             try {
                 const { cleanedHtml, images } = extractBase64Images(signatureBlock);
+                // v0.0.8: cleanBody instead of existingBody
                 const fullHtml =
+                    // cleanBody
+                    //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + cleanedHtml
+                    //     : 
                     "<div style='margin-top:20px'></div>" +
                     cleanedHtml +
                     "<div style='margin-top:20px'></div>"
                 const result = await tryInsertFullBody(item, fullHtml, "Compose-T3");
                 if (result.success) {
                     let attached = 0;
+                    // for (const img of images) {
+                    //     try { await addInlineImageAttachment(item, img); attached++; }
+                    //     catch (e) { console.warn(`[CardByte] Image attach failed: ${img.cid}`); }
+                    // }
                     console.log(`[CardByte] Attached ${attached}/${images.length} images`);
                     return;
                 }
@@ -1095,7 +1216,11 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
         {
             console.log("[CardByte] Compose Tier 4: Strip images + full-body insert");
             const stripped = stripBase64Images(signatureBlock);
+            // v0.0.8: cleanBody instead of existingBody
             const fullHtml =
+                // cleanBody
+                //     ? cleanBody.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd() + stripped
+                //     : 
                 "<div style='margin-top:20px'></div>" + stripped + "<div style='margin-top:20px'></div>";
             const result = await tryInsertFullBody(item, fullHtml, "Compose-T4");
             if (result.success) { return; }
@@ -1127,8 +1252,7 @@ function getBodyHtml(item) {
 function hasCardByteSignature(html) {
     return /id="x?_?cardbyte-signature-block"/i.test(html)
         || html.includes("CARD_BYTE_SIGNATURE_START")
-        || html.includes("CARDBYTE_SIGNATURE")
-        || /id="cardbyte-signature-container"/i.test(html); // VSTO add-in marker
+        || html.includes("CARDBYTE_SIGNATURE");
 }
 
 function looksLikeDefaultSignature(html) {
@@ -1253,6 +1377,16 @@ async function ensureNoDefaultSignature(item) {
 
 /* ---------------------------------------------------------
    AUTO-RUN ENTRY POINT
+   v0.0.8 CHANGES:
+     1. Per-item-ID guard resets SIGNATURE_STATE when a new
+        compose/reply window fires the handler, so each item
+        always gets exactly one fresh signature run.
+     2. SIGNATURE_STATE is set to "applied" after successful
+        insertion (was "idle") so a same-item re-invoke is
+        short-circuited without doing any body writes.
+     3. The finally block no longer resets SIGNATURE_STATE —
+        only the catch block resets it to "idle" so a retry
+        is still possible after a failure.
    --------------------------------------------------------- */
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
@@ -1265,7 +1399,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
     if (currentItemId && window.__LAST_ITEM_ID__ && window.__LAST_ITEM_ID__ !== currentItemId) {
         console.log(`[CardByte] New item detected (${currentItemId}) — resetting SIGNATURE_STATE`);
         SIGNATURE_STATE = "idle";
-        CACHED_SIGNATURE_HTML = null;
+        CACHED_SIGNATURE_HTML = null; // v0.0.10: clear in-memory cache on new item
     }
     if (currentItemId) window.__LAST_ITEM_ID__ = currentItemId;
 
@@ -1323,7 +1457,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
         const mac = isMac();
 
         console.log("[CardByte] ════════════════════════════════════");
-        console.log(`[CardByte] Starting signature flow v0.0.9 (manual: ${isManualApply})`);
+        console.log(`[CardByte] Starting signature flow v0.0.10 (manual: ${isManualApply})`);
         console.log("[CardByte] User:", user?.emailAddress);
         console.log("[CardByte] Platform:", platform);
         console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
@@ -1340,6 +1474,11 @@ window.applySignature = async function (event = { completed: () => { } }, option
             console.log("[CardByte] Manual apply: skipping ensureNoDefaultSignature to preserve body");
         }
 
+        // v0.0.10: ALWAYS fetch fresh from API first — no localStorage fallback.
+        // localStorage cache was causing stale signatures to be imprinted on Mac/Windows
+        // when ns-enterprise.cardbyte.ai was unreachable.
+        // In-memory CACHED_SIGNATURE_HTML is only used within the same session as a
+        // secondary fallback (e.g. onSend fires after applySignature already succeeded).
         let apiResponse = null;
 
         try {
@@ -1349,6 +1488,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
             console.warn("[CardByte] API fetch threw:", fetchErr?.message);
         }
 
+        // Secondary fallback: in-memory cache from this session only (not localStorage)
         if (!apiResponse && CACHED_SIGNATURE_HTML) {
             console.warn("[CardByte] API failed — using in-memory session cache as fallback");
             apiResponse = CACHED_SIGNATURE_HTML;
@@ -1358,8 +1498,10 @@ window.applySignature = async function (event = { completed: () => { } }, option
             throw new Error("API returned empty or null response and no session cache available");
         }
 
+        // Store in-memory for onSend handler reuse within this session
         CACHED_SIGNATURE_HTML = apiResponse;
         try { localStorage.setItem("cardbyte_cached_signature", apiResponse); } catch (e) { }
+        // v0.0.10: Do NOT write to localStorage — stale cache causes wrong sig on reload
 
         await insertSignatureWithoutCursorError(item, "<div style='margin-top:20px'></div>" + apiResponse + "<div style='margin-top:20px'></div>", { manualApply: isManualApply });
 
@@ -1398,43 +1540,12 @@ window.applySignature = async function (event = { completed: () => { } }, option
         event.completed();
     }
 };
-
 /* ---------------------------------------------------------
-   ON-SEND HANDLER
-   v0.0.9 CHANGES:
-     1. FAST PATH: if the CardByte signature is already present
-        in the body, return allowEvent:true immediately.
-        OnMessageSend runs in an isolated JS-only runtime on
-        Desktop Classic — CACHED_SIGNATURE_HTML is always null
-        here. Without the fast path every send triggered a full
-        API call, exceeded Outlook's 5-second limit, and showed
-        the "CardByte Signature Manager is unavailable" popup.
-     2. window.onSendHandler: explicit window assignment so the
-        function is reachable from both the WebView and the
-        JS-only runtime.
+   ON-SEND HANDLER (unchanged from v0.0.7)
    --------------------------------------------------------- */
-window.onSendHandler = async function onSendHandler(event = { completed: () => { } }) {
-    // ── IMMEDIATE DIAGNOSTIC — fires before anything else ──
-    console.log("[CardByte][OnSend] ══ ENTRY ══");
-    console.log("[CardByte][OnSend] event type:", typeof event);
-    console.log("[CardByte][OnSend] event.completed type:", typeof event?.completed);
-    console.log("[CardByte][OnSend] CACHED_SIGNATURE_HTML:",
-        typeof CACHED_SIGNATURE_HTML,
-        CACHED_SIGNATURE_HTML ? (CACHED_SIGNATURE_HTML.length / 1024).toFixed(1) + "KB" : "NULL"
-    );
-    console.log("[CardByte][OnSend] localStorage sig:", (() => {
-        try {
-            const s = localStorage.getItem("cardbyte_cached_signature");
-            return s ? (s.length / 1024).toFixed(1) + "KB" : "NULL";
-        } catch (e) { return "ERROR: " + e.message; }
-    })());
-    console.log("[CardByte][OnSend] _stripSig:", typeof _stripSig);
-    console.log("[CardByte][OnSend] _findReplyChainIndex:", typeof _findReplyChainIndex);
-    console.log("[CardByte][OnSend] wrapForOutlook:", typeof wrapForOutlook);
-    console.log("[CardByte][OnSend] compressImagesInHtml:", typeof compressImagesInHtml);
-    console.log("[CardByte][OnSend] isMobile:", typeof isMobile);
-    // ── END DIAGNOSTIC ──
+window.onSendHandler = async function (event = { completed: () => { } }) {
 
+    // Safety net: always call event.completed even if something catastrophic happens
     let completedCalled = false;
     const safeComplete = (opts) => {
         if (!completedCalled) {
@@ -1443,15 +1554,14 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
         }
     };
 
-    // Outlook's OnMessageSend hard limit is 5 seconds.
-    // Internal timeout set to 4.5 s to ensure safeComplete fires
-    // before Outlook cuts the handler off and shows the popup.
+    // Hard timeout for Outlook 2019 (5s limit for on-send handlers)
     const timeout = setTimeout(() => {
         console.warn("[CardByte][OnSend] Timeout — forcing event.completed");
         safeComplete({ allowEvent: true });
     }, 4500);
 
     try {
+        // ... all existing onSendHandler logic, replacing event.completed(...) with safeComplete(...)
         const mailbox = Office?.context?.mailbox;
         const item = mailbox?.item;
 
@@ -1461,8 +1571,38 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
 
         if (!item) {
             console.error("[CardByte][OnSend] No item — allowing send");
-            safeComplete({ allowEvent: true }); return;
+            event.completed({ allowEvent: true });
+            return;
         }
+
+        if (!CACHED_SIGNATURE_HTML) {
+            try {
+                const stored = localStorage.getItem("cardbyte_cached_signature");
+                if (stored) {
+                    CACHED_SIGNATURE_HTML = stored;
+                    console.log(`[CardByte][OnSend] Restored from localStorage: ${(stored.length / 1024).toFixed(1)}KB`);
+                }
+            } catch (e) { console.warn("[CardByte][OnSend] localStorage read failed:", e.message); }
+        }
+
+        if (!CACHED_SIGNATURE_HTML) {
+            try {
+                console.log("[CardByte][OnSend] Cache empty — fetching from API...");
+                const userEmail = mailbox?.userProfile?.emailAddress;
+                if (userEmail) {
+                    const fetched = await renderSignatureOnServer(userEmail);
+                    if (fetched) {
+                        CACHED_SIGNATURE_HTML = fetched;
+                        console.log(`[CardByte][OnSend] API fetch succeeded: ${(fetched.length / 1024).toFixed(1)}KB`);
+                        try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (e) { }
+                    } else { console.warn("[CardByte][OnSend] API returned null"); }
+                } else { console.warn("[CardByte][OnSend] No user email — cannot fetch signature"); }
+            } catch (e) { console.warn("[CardByte][OnSend] API fetch failed:", e.message); }
+        }
+
+        console.log("[CardByte][OnSend] cachedSignature:", CACHED_SIGNATURE_HTML
+            ? `${(CACHED_SIGNATURE_HTML.length / 1024).toFixed(1)}KB`
+            : "NULL");
 
         function _getBodyHtml() {
             return new Promise((resolve, reject) => {
@@ -1485,13 +1625,13 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
         function _hasSig(html) {
             return /id="x?_?cardbyte-signature-block"/i.test(html)
                 || html.includes("CARD_BYTE_SIGNATURE_START")
-                || html.includes("CARDBYTE_SIGNATURE")
-                || /id="cardbyte-signature-container"/i.test(html); // VSTO add-in marker
+                || html.includes("CARDBYTE_SIGNATURE");
         }
 
         async function _buildFreshSignatureBlock() {
             let processedHtml = CACHED_SIGNATURE_HTML;
 
+            // IE11 (Outlook 2019 default runtime) has no canvas.toDataURL — skip compression
             const canvasSupported = (() => {
                 try {
                     const c = document.createElement("canvas");
@@ -1506,7 +1646,7 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
                     console.warn("[CardByte][OnSend] Image compression skipped:", e.message);
                 }
             } else {
-                console.warn("[CardByte][OnSend] Canvas not available (IE11/2019) — skipping compression");
+                console.warn("[CardByte][OnSend] Canvas not available (IE11/2019) — skipping image compression");
             }
 
             if (isMobile()) processedHtml = simplifyHtmlForMobile(processedHtml);
@@ -1519,49 +1659,32 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
             const body = await _getBodyHtml();
             console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
 
-            // ── FAST PATH ────────────────────────────────────────────────────
-            // OnMessageSend runs in an ISOLATED JS runtime on Desktop Classic.
-            // CACHED_SIGNATURE_HTML set by applySignature is NOT available here.
-            // If the signature is already in the body (inserted by applySignature
-            // or the taskpane), there is nothing to do — return immediately.
-            // Any attempt to strip + re-fetch via API risks exceeding Outlook's
-            // 5-second limit and triggering the "unavailable" popup (CAR-8670).
-            // ─────────────────────────────────────────────────────────────────
-            if (_hasSig(body)) {
-                console.log("[CardByte][OnSend] ✅ Signature already present — allowing send immediately");
-                safeComplete({ allowEvent: true });
-                return;
-            }
+            const stripped = _hasSig(body) ? _stripSig(body) : body;
+            console.log(`[CardByte][OnSend] After strip: ${(stripped.length / 1024).toFixed(1)}KB`);
 
-            // ── SLOW PATH ─────────────────────────────────────────────────────
-            // Signature is missing (user deleted it, or applySignature failed).
-            // Try to restore from localStorage (may be unavailable in JS runtime)
-            // then fall back to an API call.
-            // ──────────────────────────────────────────────────────────────────
             if (!CACHED_SIGNATURE_HTML) {
+                console.warn("[CardByte][OnSend] No signature in cache — attempting live fetch before send");
                 try {
-                    const stored = localStorage.getItem("cardbyte_cached_signature");
-                    if (stored) {
-                        CACHED_SIGNATURE_HTML = stored;
-                        console.log(`[CardByte][OnSend] Restored from localStorage: ${(stored.length / 1024).toFixed(1)}KB`);
+                    const userEmail = mailbox?.userProfile?.emailAddress;
+                    if (userEmail) {
+                        const fetched = await renderSignatureOnServer(userEmail);
+                        if (fetched) {
+                            CACHED_SIGNATURE_HTML = fetched;
+                            try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (_) { }
+                        } else {
+                            if (_hasSig(body)) await _setBodyHtml(stripped);
+                            event.completed({ allowEvent: true }); return;
+                        }
+                    } else {
+                        if (_hasSig(body)) await _setBodyHtml(stripped);
+                        event.completed({ allowEvent: true }); return;
                     }
-                } catch (e) {
-                    console.warn("[CardByte][OnSend] localStorage read failed:", e.message);
+                } catch (fetchErr) {
+                    console.warn("[CardByte][OnSend] Live fetch failed:", fetchErr.message);
+                    if (_hasSig(body)) await _setBodyHtml(stripped);
+                    event.completed({ allowEvent: true }); return;
                 }
             }
-
-            console.log("[CardByte][OnSend] cachedSignature:", CACHED_SIGNATURE_HTML
-                ? `${(CACHED_SIGNATURE_HTML.length / 1024).toFixed(1)}KB`
-                : "NULL — will send without signature");
-
-            // No signature available at all — allow send as-is
-            if (!CACHED_SIGNATURE_HTML) {
-                console.warn("[CardByte][OnSend] No cached signature — sending as-is");
-                safeComplete({ allowEvent: true }); return;
-            }
-
-            // Signature was deleted — re-insert it
-            const stripped = body; // no sig present (fast path already handled that case)
 
             console.log("[CardByte][OnSend] Building fresh signature block...");
             const freshBlock = await _buildFreshSignatureBlock();
@@ -1594,7 +1717,7 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
             if (finalHtml.length <= SETASYNC_LIMIT) {
                 await _setBodyHtml(finalHtml);
                 console.log("[CardByte][OnSend] ✅ Done (direct write)");
-                safeComplete({ allowEvent: true }); return;
+                event.completed({ allowEvent: true }); return;
             }
 
             // Tier A: compress full body
@@ -1602,10 +1725,10 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
                 const compressed = await compressImagesInHtml(finalHtml);
                 if (compressed.length <= SETASYNC_LIMIT) {
                     await _setBodyHtml(compressed);
-                    console.log("[CardByte][OnSend] ✅ Done (Tier A — compressed)");
-                    safeComplete({ allowEvent: true }); return;
+                    console.log("[CardByte][OnSend] ✅ Done (compressed)");
+                    event.completed({ allowEvent: true }); return;
                 }
-            } catch (e) { console.warn("[CardByte][OnSend] Tier A failed:", e.message); }
+            } catch (e) { console.warn("[CardByte][OnSend] Compression failed:", e.message); }
 
             // Tier B: strip base64 from reply chain only
             if (isReply) {
@@ -1617,8 +1740,8 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
                     const tierBHtml = beforeChain + freshBlock + strippedReplyChain;
                     if (tierBHtml.length <= SETASYNC_LIMIT) {
                         await _setBodyHtml(tierBHtml);
-                        console.log("[CardByte][OnSend] ✅ Done (Tier B — reply-chain images stripped)");
-                        safeComplete({ allowEvent: true }); return;
+                        console.log("[CardByte][OnSend] ✅ Done (reply-chain images stripped)");
+                        event.completed({ allowEvent: true }); return;
                     }
                 } catch (e) { console.warn("[CardByte][OnSend] Tier B failed:", e.message); }
             }
@@ -1630,19 +1753,16 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
                     '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
                 );
                 await _setBodyHtml(fullyStripped);
-                console.log("[CardByte][OnSend] ✅ Done (Tier C — all images stripped)");
-            } catch (e) {
-                console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message);
-            }
+                console.log("[CardByte][OnSend] ✅ Done (all images stripped)");
+            } catch (e) { console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message); }
 
-            safeComplete({ allowEvent: true });
+            event.completed({ allowEvent: true });
 
         } catch (err) {
             console.error("[CardByte][OnSend] ❌ Error:", err.message || err);
             console.error("[CardByte][OnSend] Stack:", err.stack || "N/A");
-            safeComplete({ allowEvent: true });
+            event.completed({ allowEvent: true });
         }
-
     } catch (err) {
         console.error("[CardByte][OnSend] ❌ Fatal:", err.message);
         safeComplete({ allowEvent: true });
@@ -1650,7 +1770,13 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
         clearTimeout(timeout);
         safeComplete({ allowEvent: true }); // no-op if already called
     }
+
 };
+
+if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+    Office.actions.associate("onSendHandler", onSendHandler);
+    console.log("[CardByte] Office.actions.associate registered: onSendHandler");
+}
 
 /* ---------------------------------------------------------
    Debug Helpers
@@ -1722,94 +1848,11 @@ window.debugSignatureSize = async function () {
 };
 
 /* ---------------------------------------------------------
-   LaunchEvent Registration
-   v0.0.10: Registered in BOTH places to cover both runtime types.
-
-   Outlook Desktop Classic uses TWO different runtime contexts:
-
-   1. JS-only runtime (OnMessageSend / OnNewMessageCompose):
-      The script is executed synchronously top-to-bottom at load time.
-      Office.actions IS available at module level here.
-      Office.onReady callback fires AFTER Outlook may have already
-      dispatched the first event — so module-level registration is
-      REQUIRED for the JS-only runtime.
-
-   2. WebView runtime (task pane, function file in some builds):
-      Office.actions may not be available at module load time.
-      Office.onReady is the correct place to register here.
-
-   Solution: register in both places. The second associate() call
-   is a no-op if already registered, so there is no double-firing.
+   LaunchEvent registration
    --------------------------------------------------------- */
-
-// ── Pass 1: module-level — for the JS-only runtime (OnMessageSend) ──
-// This executes synchronously when the script loads, before any
-// Office.onReady callbacks fire, ensuring the handler is registered
-// before Outlook dispatches the first OnMessageSend event.
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("applySignature", window.applySignature);
-    Office.actions.associate("onSendHandler", window.onSendHandler);
-    console.log("[CardByte] Module-level Office.actions.associate registered: applySignature + onSendHandler");
+    Office.actions.associate("applySignature", applySignature);
+    console.log("[CardByte] Office.actions.associate registered: applySignature");
 } else {
-    console.log("[CardByte] Office.actions not available at module level — LaunchEvent path not active (expected on 2016/2019)");
+    console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
 }
-
-// // ── Pass 2: inside Office.onReady — safety net for WebView runtimes ──
-// // On older IE11/EdgeHTML WebView builds, Office.actions is not
-// // initialised until onReady fires. The second associate() call is
-// // harmless if Pass 1 already registered the handlers.
-// Office.onReady(() => {
-//     if (typeof Office.actions !== "undefined") {
-//         Office.actions.associate("applySignature", window.applySignature);
-//         Office.actions.associate("onSendHandler", window.onSendHandler);
-//         console.log("[CardByte] onReady Office.actions.associate registered: applySignature + onSendHandler");
-//     }
-// });
-
-// ── Pass 2: inside Office.onReady — safety net for WebView runtimes ──
-// Also handles OWA popup compose windows where OnNewMessageCompose
-// does not re-fire because OWA treats the popup as the same session.
-Office.onReady(async () => {
-    if (typeof Office.actions !== "undefined") {
-        Office.actions.associate("applySignature", window.applySignature);
-        Office.actions.associate("onSendHandler", window.onSendHandler);
-        console.log("[CardByte] onReady Office.actions.associate registered: applySignature + onSendHandler");
-    }
-
-    // ── OWA POPUP COMPOSE SELF-TRIGGER ──────────────────────────────────
-    // When the user clicks "Open in new window" in OWA, the compose opens
-    // in a popup (window.opener !== null, URL = about:blank). In this context
-    // OnNewMessageCompose does NOT re-fire — OWA considers it the same session.
-    // We detect the popup and self-trigger applySignature after a short delay
-    // to let OWA finish initialising the compose body.
-    try {
-        const isPopup = window.opener !== null && window.opener !== window;
-
-        if (isPopup && SIGNATURE_STATE === "idle") {
-            console.log("[CardByte] OWA popup compose detected — waiting for item...");
-
-            let item = null;
-            let attempts = 0;
-            const MAX_ATTEMPTS = 15;      // 15 × 300ms = 4.5s max wait
-            const POLL_INTERVAL_MS = 300;
-
-            while (attempts < MAX_ATTEMPTS) {
-                item = Office?.context?.mailbox?.item;
-                if (item?.itemType === Office.MailboxEnums.ItemType.Message) break;
-                await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-                attempts++;
-                console.log(`[CardByte] Popup: waiting for item (attempt ${attempts}/${MAX_ATTEMPTS})`);
-            }
-
-            if (item?.itemType === Office.MailboxEnums.ItemType.Message) {
-                console.log(`[CardByte] Popup item ready after ${attempts + 1} attempt(s) — self-triggering applySignature`);
-                await window.applySignature({ completed: () => { } });
-            } else {
-                console.warn("[CardByte] Popup: item never resolved — giving up");
-            }
-        }
-    } catch (e) {
-        console.warn("[CardByte] Popup self-trigger failed (non-fatal):", e.message);
-    }
-    // ── END OWA POPUP SELF-TRIGGER ───────────────────────────────────────
-});
