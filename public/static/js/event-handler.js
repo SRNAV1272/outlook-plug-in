@@ -1127,7 +1127,8 @@ function getBodyHtml(item) {
 function hasCardByteSignature(html) {
     return /id="x?_?cardbyte-signature-block"/i.test(html)
         || html.includes("CARD_BYTE_SIGNATURE_START")
-        || html.includes("CARDBYTE_SIGNATURE");
+        || html.includes("CARDBYTE_SIGNATURE")
+        || /id="cardbyte-signature-container"/i.test(html); // VSTO add-in marker
 }
 
 function looksLikeDefaultSignature(html) {
@@ -1484,7 +1485,8 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
         function _hasSig(html) {
             return /id="x?_?cardbyte-signature-block"/i.test(html)
                 || html.includes("CARD_BYTE_SIGNATURE_START")
-                || html.includes("CARDBYTE_SIGNATURE");
+                || html.includes("CARDBYTE_SIGNATURE")
+                || /id="cardbyte-signature-container"/i.test(html); // VSTO add-in marker
         }
 
         async function _buildFreshSignatureBlock() {
@@ -1721,19 +1723,45 @@ window.debugSignatureSize = async function () {
 
 /* ---------------------------------------------------------
    LaunchEvent Registration
-   v0.0.9: Moved inside Office.onReady — on older IE11/EdgeHTML
-   WebView runtimes (some Outlook 365 Desktop builds) Office.actions
-   is not initialised until onReady fires. Calling associate() outside
-   onReady caused silent registration failures on those runtimes.
-   Both handlers are also exposed on window for maximum reachability
-   across WebView and JS-only runtime contexts.
+   v0.0.10: Registered in BOTH places to cover both runtime types.
+
+   Outlook Desktop Classic uses TWO different runtime contexts:
+
+   1. JS-only runtime (OnMessageSend / OnNewMessageCompose):
+      The script is executed synchronously top-to-bottom at load time.
+      Office.actions IS available at module level here.
+      Office.onReady callback fires AFTER Outlook may have already
+      dispatched the first event — so module-level registration is
+      REQUIRED for the JS-only runtime.
+
+   2. WebView runtime (task pane, function file in some builds):
+      Office.actions may not be available at module load time.
+      Office.onReady is the correct place to register here.
+
+   Solution: register in both places. The second associate() call
+   is a no-op if already registered, so there is no double-firing.
    --------------------------------------------------------- */
+
+// ── Pass 1: module-level — for the JS-only runtime (OnMessageSend) ──
+// This executes synchronously when the script loads, before any
+// Office.onReady callbacks fire, ensuring the handler is registered
+// before Outlook dispatches the first OnMessageSend event.
+if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+    Office.actions.associate("applySignature", window.applySignature);
+    Office.actions.associate("onSendHandler", window.onSendHandler);
+    console.log("[CardByte] Module-level Office.actions.associate registered: applySignature + onSendHandler");
+} else {
+    console.log("[CardByte] Office.actions not available at module level — LaunchEvent path not active (expected on 2016/2019)");
+}
+
+// ── Pass 2: inside Office.onReady — safety net for WebView runtimes ──
+// On older IE11/EdgeHTML WebView builds, Office.actions is not
+// initialised until onReady fires. The second associate() call is
+// harmless if Pass 1 already registered the handlers.
 Office.onReady(() => {
     if (typeof Office.actions !== "undefined") {
         Office.actions.associate("applySignature", window.applySignature);
         Office.actions.associate("onSendHandler", window.onSendHandler);
-        console.log("[CardByte] Office.actions.associate registered: applySignature + onSendHandler");
-    } else {
-        console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
+        console.log("[CardByte] onReady Office.actions.associate registered: applySignature + onSendHandler");
     }
 });
