@@ -224,7 +224,7 @@ async function renderSignatureOnServer(user) {
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
-            "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
         if (primaryRes.ok) {
@@ -240,7 +240,7 @@ async function renderSignatureOnServer(user) {
 
     try {
         const legacyRes = await fetch(
-            "https://ns-renderer.cardbyte.ai/render-signature",
+            "https://newqa-renderer.cardbyte.ai/render-signature",
             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
