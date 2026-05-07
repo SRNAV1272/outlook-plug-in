@@ -1560,29 +1560,121 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 };
 /* ---------------------------------------------------------
-   ON-SEND HANDLER (v1.0.0 — SYNCHRONOUS)
+   ON-SEND HANDLER (v2.0.0 — PLATFORM-AWARE TAMPER DETECTION)
    =========================================================
-   ROOT CAUSE OF ALL PREVIOUS FAILURES:
-   Outlook Desktop Classic's JS-only runtime (used for OnMessageSend)
-   is a stripped-down JS engine. Any async operation — body.getAsync,
-   API fetch, setTimeout safety nets — can exceed Outlook's hard 5-second
-   limit and trigger the "CardByte Signature Manager is unavailable" popup.
+   TWO RUNTIMES, TWO BEHAVIOURS:
 
-   SOLUTION:
-   Call event.completed({ allowEvent: true }) SYNCHRONOUSLY and immediately.
-   The signature is already in the body — inserted by applySignature() when
-   the compose window opens (OnNewMessageCompose). There is nothing left for
-   onSendHandler to do. Attempting to verify or re-insert here only causes
-   timeout failures.
+   1. DESKTOP CLASSIC — JS-only runtime (no DOM):
+      typeof document === "undefined".
+      Any async operation can exceed Outlook's hard 5-second limit
+      → "CardByte Signature Manager is unavailable" popup.
+      FIX: call event.completed() SYNCHRONOUSLY and immediately.
+      The signature is already in the body from OnNewMessageCompose.
+
+   2. NEW OUTLOOK / WEB — shared WebView runtime (DOM available):
+      typeof document !== "undefined".
+      Async operations are safe (no 5-second hard limit).
+      FIX: run tamper detection — if the user edited or deleted the
+      CardByte signature, restore the original before the email sends.
+      Uses CACHED_SIGNATURE_HTML (stored during applySignature in the
+      same shared runtime — no extra API call needed).
    --------------------------------------------------------- */
 window.onSendHandler = function onSendHandler(event) {
+    // JS-only runtime detection: Desktop Classic has no DOM.
+    if (typeof document === "undefined" || typeof document.createElement !== "function") {
+        // Synchronous — safe for Desktop Classic, zero chance of popup.
+        try { event.completed({ allowEvent: true }); } catch (e) {}
+        return;
+    }
+    // Shared WebView runtime — async tamper detection is safe here.
+    _runTamperDetection(event);
+};
+
+// ─── Async tamper detection (WebView runtime only) ────────────────────────────
+async function _runTamperDetection(event) {
     try {
+        const item = Office.context.mailbox.item;
+
+        // CACHED_SIGNATURE_HTML is the raw API response stored during applySignature().
+        // Because OnNewMessageCompose and OnMessageSend share the same WebView runtime
+        // in New Outlook, this variable is directly accessible here — no API call needed.
+        const originalSig = CACHED_SIGNATURE_HTML;
+
+        if (!originalSig) {
+            console.log("[CardByte] onSendHandler: no cached signature — allowing send");
+            event.completed({ allowEvent: true });
+            return;
+        }
+
+        // Read current body
+        const currentBody = await new Promise((resolve, reject) => {
+            item.body.getAsync(Office.CoercionType.Html, (r) => {
+                if (r.status === "succeeded") resolve(r.value || "");
+                else reject(r.error);
+            });
+        });
+
+        if (_isSignatureTampered(currentBody, originalSig)) {
+            console.log("[CardByte] onSendHandler: signature tampered or missing — restoring");
+
+            // Rebuild body: strip partial/tampered sig from safe zone, re-inject original.
+            const wrapped = `<!-- CARD_BYTE_SIGNATURE_START -->${wrapForOutlook(originalSig)}<!-- CARD_BYTE_SIGNATURE_END -->`;
+            const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(currentBody);
+            const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+            const restoredBody = (trimmedSafe ? trimmedSafe + "<br>" : "")
+                + wrapped
+                + (replyChain ? replyChain : "");
+
+            await new Promise((resolve, reject) => {
+                item.body.setAsync(restoredBody, { coercionType: Office.CoercionType.Html }, (r) => {
+                    if (r.status === "succeeded") resolve();
+                    else reject(r.error);
+                });
+            });
+            console.log("[CardByte] onSendHandler: signature restored — allowing send");
+        } else {
+            console.log("[CardByte] onSendHandler: signature intact — allowing send");
+        }
+
         event.completed({ allowEvent: true });
     } catch (e) {
-        // If event.completed throws for any reason, there is nothing we can do.
-        // Outlook will handle the timeout on its own.
+        console.warn("[CardByte] onSendHandler error:", e.message);
+        try { event.completed({ allowEvent: true }); } catch (_) {}
     }
-};
+}
+
+// ─── Tamper detection helper ─────────────────────────────────────────────────
+// Returns true if the CardByte signature in bodyHtml is missing OR its text
+// content differs from the original API response (originalSigInnerHtml).
+// Uses DOMParser for robust nested-div extraction — safe in WebView only.
+function _isSignatureTampered(bodyHtml, originalSigInnerHtml) {
+    try {
+        // Quick check: is the signature div present at all?
+        if (!hasCardByteSignature(bodyHtml)) return true;
+
+        // Extract current signature element from body via DOMParser
+        const parser = new DOMParser();
+        const bodyDoc = parser.parseFromString(bodyHtml, "text/html");
+        const sigEl = bodyDoc.querySelector("[id*='cardbyte-signature-block']")
+            || bodyDoc.querySelector("[id*='x_cardbyte-signature-block']")
+            || bodyDoc.querySelector("[id*='_cardbyte-signature-block']");
+        if (!sigEl) return true;
+
+        // Compare text content (normalised) to detect edits inside the sig div
+        const origDoc = parser.parseFromString(originalSigInnerHtml, "text/html");
+        const currentText  = (sigEl.textContent  || "").replace(/\s+/g, " ").trim();
+        const originalText = (origDoc.body.textContent || "").replace(/\s+/g, " ").trim();
+
+        if (currentText !== originalText) {
+            console.log(`[CardByte] Sig tampered — cur: "${currentText.slice(0, 60)}" orig: "${originalText.slice(0, 60)}"`);
+            return true;
+        }
+        return false;
+    } catch (e) {
+        console.warn("[CardByte] _isSignatureTampered:", e.message);
+        return false; // on error, do NOT block the send
+    }
+}
 
 // Register at module level — executes synchronously when script loads,
 // BEFORE Office.onReady fires. This is required for the JS-only runtime
