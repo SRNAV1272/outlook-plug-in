@@ -1560,230 +1560,27 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 };
 /* ---------------------------------------------------------
-   ON-SEND HANDLER (v0.0.9)
-   KEY FIX: fast-path return when signature already present.
-   OnMessageSend runs in an ISOLATED JS runtime on Desktop Classic —
-   CACHED_SIGNATURE_HTML is always null here. Without the fast path,
-   every send triggered a full API call, exceeded Outlook's 5-second
-   limit, and caused the "CardByte Signature Manager is unavailable"
-   popup. With the fast path, 99% of sends return in < 100 ms.
+   ON-SEND HANDLER (v1.0.0 — SYNCHRONOUS)
+   =========================================================
+   ROOT CAUSE OF ALL PREVIOUS FAILURES:
+   Outlook Desktop Classic's JS-only runtime (used for OnMessageSend)
+   is a stripped-down JS engine. Any async operation — body.getAsync,
+   API fetch, setTimeout safety nets — can exceed Outlook's hard 5-second
+   limit and trigger the "CardByte Signature Manager is unavailable" popup.
+
+   SOLUTION:
+   Call event.completed({ allowEvent: true }) SYNCHRONOUSLY and immediately.
+   The signature is already in the body — inserted by applySignature() when
+   the compose window opens (OnNewMessageCompose). There is nothing left for
+   onSendHandler to do. Attempting to verify or re-insert here only causes
+   timeout failures.
    --------------------------------------------------------- */
-window.onSendHandler = async function onSendHandler(event = { completed: () => { } }) {
-
-    // Safety net: call event.completed exactly once no matter what.
-    let completedCalled = false;
-    const safeComplete = (opts) => {
-        if (!completedCalled) {
-            completedCalled = true;
-            try { event.completed(opts || { allowEvent: true }); } catch (e) { }
-        }
-    };
-
-    // Internal timeout slightly under Outlook's 5-second hard limit.
-    const timeout = setTimeout(() => {
-        console.warn("[CardByte][OnSend] Timeout — forcing event.completed");
-        safeComplete({ allowEvent: true });
-    }, 4500);
-
+window.onSendHandler = function onSendHandler(event) {
     try {
-        const mailbox = Office?.context?.mailbox;
-        const item = mailbox?.item;
-
-        console.log("[CardByte][OnSend] ════════════════════════════");
-        console.log("[CardByte][OnSend] Handler fired");
-        console.log("[CardByte][OnSend] item:", item ? "found" : "NULL");
-
-        if (!item) {
-            console.error("[CardByte][OnSend] No item — allowing send");
-            safeComplete({ allowEvent: true }); return;
-        }
-
-        function _getBodyHtml() {
-            return new Promise((resolve, reject) => {
-                item.body.getAsync(Office.CoercionType.Html, (r) => {
-                    if (r.status === "succeeded") resolve(r.value || "");
-                    else reject(new Error(r.error?.message || "getAsync failed"));
-                });
-            });
-        }
-
-        function _setBodyHtml(html) {
-            return new Promise((resolve, reject) => {
-                item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-                    if (r.status === "succeeded") resolve();
-                    else reject(new Error(r.error?.message || "setAsync failed"));
-                });
-            });
-        }
-
-        function _hasSig(html) {
-            // CRITICAL: use plain includes() — NOT regex with double quotes.
-            // Outlook's JS-only runtime (OnMessageSend) normalizes attribute
-            // quotes to single quotes AND strips HTML comments, so both the
-            // double-quote regex id="cardbyte-signature-block" and the comment
-            // marker CARD_BYTE_SIGNATURE_START silently fail even when the
-            // signature is physically present in the body. Plain substring
-            // search is quote-agnostic and comment-independent.
-            return html.includes("cardbyte-signature-block")
-                || html.includes("CARD_BYTE_SIGNATURE_START")
-                || html.includes("CARDBYTE_SIGNATURE")
-                || html.includes("cardbyte-signature-container"); // VSTO add-in sig
-        }
-
-        async function _buildFreshSignatureBlock() {
-            let processedHtml = CACHED_SIGNATURE_HTML;
-            const canvasSupported = (() => {
-                try { const c = document.createElement("canvas"); return typeof c.toDataURL === "function"; }
-                catch (e) { return false; }
-            })();
-            if (canvasSupported) {
-                try { processedHtml = await compressImagesInHtml(processedHtml); }
-                catch (e) { console.warn("[CardByte][OnSend] Image compression skipped:", e.message); }
-            } else {
-                console.warn("[CardByte][OnSend] Canvas not available — skipping compression");
-            }
-            if (isMobile()) processedHtml = simplifyHtmlForMobile(processedHtml);
-            const wrappedHtml = wrapForOutlook(processedHtml);
-            return `<!-- CARD_BYTE_SIGNATURE_START -->${wrappedHtml}<!-- CARD_BYTE_SIGNATURE_END -->`;
-        }
-
-        try {
-            console.log("[CardByte][OnSend] Reading body...");
-            const body = await _getBodyHtml();
-            console.log(`[CardByte][OnSend] Body: ${(body.length / 1024).toFixed(1)}KB, hasSig: ${_hasSig(body)}`);
-
-            // ── FAST PATH ──────────────────────────────────────────────────────
-            // OnMessageSend runs in an ISOLATED JS runtime on Desktop Classic.
-            // CACHED_SIGNATURE_HTML set by applySignature is NEVER visible here.
-            // If the signature is already in the body (inserted by applySignature
-            // or the taskpane), return immediately — no API call, no body write,
-            // no timeout risk. This handles 99% of normal sends in < 100 ms.
-            // ──────────────────────────────────────────────────────────────────
-            if (_hasSig(body)) {
-                console.log("[CardByte][OnSend] ✅ Signature already present — allowing send immediately");
-                safeComplete({ allowEvent: true }); return;
-            }
-
-            // ── SLOW PATH ──────────────────────────────────────────────────────
-            // Signature is missing (user deleted it or applySignature failed).
-            // Try localStorage first, then API as last resort.
-            // ──────────────────────────────────────────────────────────────────
-            console.log("[CardByte][OnSend] Signature missing — attempting to restore...");
-
-            if (!CACHED_SIGNATURE_HTML) {
-                try {
-                    const stored = localStorage.getItem("cardbyte_cached_signature");
-                    if (stored) {
-                        CACHED_SIGNATURE_HTML = stored;
-                        console.log(`[CardByte][OnSend] Restored from localStorage: ${(stored.length / 1024).toFixed(1)}KB`);
-                    }
-                } catch (e) { console.warn("[CardByte][OnSend] localStorage read failed:", e.message); }
-            }
-
-            if (!CACHED_SIGNATURE_HTML) {
-                try {
-                    console.log("[CardByte][OnSend] Cache empty — fetching from API...");
-                    const userEmail = mailbox?.userProfile?.emailAddress;
-                    if (userEmail) {
-                        const fetched = await renderSignatureOnServer(userEmail);
-                        if (fetched) {
-                            CACHED_SIGNATURE_HTML = fetched;
-                            console.log(`[CardByte][OnSend] API fetch succeeded: ${(fetched.length / 1024).toFixed(1)}KB`);
-                            try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (e) { }
-                        }
-                    }
-                } catch (e) { console.warn("[CardByte][OnSend] API fetch failed:", e.message); }
-            }
-
-            // No signature available at all — allow send as-is
-            if (!CACHED_SIGNATURE_HTML) {
-                console.warn("[CardByte][OnSend] No signature available — sending without signature");
-                safeComplete({ allowEvent: true }); return;
-            }
-
-            // Re-insert the signature
-            console.log("[CardByte][OnSend] Building fresh signature block...");
-            const freshBlock = await _buildFreshSignatureBlock();
-            console.log(`[CardByte][OnSend] Fresh block: ${(freshBlock.length / 1024).toFixed(1)}KB`);
-
-            // body has no sig (fast path already handled that) — no strip needed
-            const replyChainIndex = _findReplyChainIndex(body);
-            const isReply = replyChainIndex > -1;
-            console.log(`[CardByte][OnSend] isReply: ${isReply}, replyChainIndex: ${replyChainIndex}`);
-
-            let finalHtml;
-            let beforeChain = "";
-            let replyChain = "";
-
-            if (isReply) {
-                beforeChain = body.slice(0, replyChainIndex)
-                    .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
-                replyChain = body.slice(replyChainIndex);
-                finalHtml = beforeChain + freshBlock + replyChain;
-            } else {
-                finalHtml = body + freshBlock;
-            }
-
-            console.log(`[CardByte][OnSend] Final body: ${(finalHtml.length / 1024).toFixed(1)}KB`);
-
-            const SETASYNC_LIMIT = 900_000;
-
-            if (finalHtml.length <= SETASYNC_LIMIT) {
-                await _setBodyHtml(finalHtml);
-                console.log("[CardByte][OnSend] ✅ Done (direct write)");
-                safeComplete({ allowEvent: true }); return;
-            }
-
-            // Tier A: compress full body
-            try {
-                const compressed = await compressImagesInHtml(finalHtml);
-                if (compressed.length <= SETASYNC_LIMIT) {
-                    await _setBodyHtml(compressed);
-                    console.log("[CardByte][OnSend] ✅ Done (Tier A — compressed)");
-                    safeComplete({ allowEvent: true }); return;
-                }
-            } catch (e) { console.warn("[CardByte][OnSend] Tier A failed:", e.message); }
-
-            // Tier B: strip base64 from reply chain only
-            if (isReply) {
-                try {
-                    const strippedReplyChain = replyChain.replace(
-                        /(<img[^>]+src=")data:[^"]{100,}(")/gi,
-                        '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
-                    );
-                    const tierBHtml = beforeChain + freshBlock + strippedReplyChain;
-                    if (tierBHtml.length <= SETASYNC_LIMIT) {
-                        await _setBodyHtml(tierBHtml);
-                        console.log("[CardByte][OnSend] ✅ Done (Tier B — reply-chain images stripped)");
-                        safeComplete({ allowEvent: true }); return;
-                    }
-                } catch (e) { console.warn("[CardByte][OnSend] Tier B failed:", e.message); }
-            }
-
-            // Tier C: strip all base64 images
-            try {
-                const fullyStripped = finalHtml.replace(
-                    /(<img[^>]+src=")data:[^"]{100,}(")/gi,
-                    '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
-                );
-                await _setBodyHtml(fullyStripped);
-                console.log("[CardByte][OnSend] ✅ Done (Tier C — all images stripped)");
-            } catch (e) {
-                console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message);
-            }
-
-            safeComplete({ allowEvent: true });
-
-        } catch (err) {
-            console.error("[CardByte][OnSend] ❌ Error:", err.message || err);
-            safeComplete({ allowEvent: true });
-        }
-    } catch (err) {
-        console.error("[CardByte][OnSend] ❌ Fatal:", err.message);
-        safeComplete({ allowEvent: true });
-    } finally {
-        clearTimeout(timeout);
-        safeComplete({ allowEvent: true }); // no-op if already called
+        event.completed({ allowEvent: true });
+    } catch (e) {
+        // If event.completed throws for any reason, there is nothing we can do.
+        // Outlook will handle the timeout on its own.
     }
 };
 
