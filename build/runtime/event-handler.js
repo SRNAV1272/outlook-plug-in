@@ -590,9 +590,17 @@ async function tryInsertSignatureOnly(item, signatureHtml, label = "") {
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
         ];
     } else {
+        // Desktop Classic: prependAsync MUST come first.
+        // setSignatureAsync on Desktop puts the signature in Outlook's native
+        // signature slot which is NOT returned by body.getAsync(Html). This means
+        // onSendHandler reads a body with no CardByte markers, _hasSig() returns
+        // false, the slow path makes an API call, and Outlook's 5-second hard
+        // limit triggers the "unavailable" popup. prependAsync inserts directly
+        // into the body HTML so _hasSig() finds the markers and the fast-path
+        // returns in < 100 ms — no API call, no timeout, no popup.
         methods = [
-            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
             { name: "prependAsync", fn: () => bodyPrependAsync(item, signatureHtml) },
+            { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, signatureHtml) },
         ];
     }
 
