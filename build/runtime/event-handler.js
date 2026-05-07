@@ -1,96 +1,58 @@
 /* =========================================================
-   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER (v0.0.12)
+   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER (v0.0.13)
    =========================================================
-   FIXES (v0.0.12 — RECALLED DRAFT BODY WIPE BUG):
+   FIXES (v0.0.13 — RECALLED DRAFT BODY WIPE — PART 2):
 
    ROOT CAUSE:
-     When a user recalls a sent message and opens it as a
-     draft, applySignature fires on the recalled compose
-     window. The recalled draft has body content (the original
-     email text) but no CardByte signature marker — so
-     alreadyHasSignature = false and hasMeaningfulBody = true.
+     v0.0.12 added a hasMeaningfulBody guard in PATH B, but
+     only checked it when alreadyHasSignature = false.
 
-     Previously, PATH B (New Compose) fell straight through to
-     Compose-T1 which called tryInsertFullBody with only the
-     signature block — completely wiping the recalled draft's
-     original body text.
+     When a recalled draft is opened, it already contains the
+     CardByte signature from the original send, so
+     alreadyHasSignature = true — bypassing the v0.0.12 guard
+     entirely. The code then hit the alreadyHasSignature block
+     which unconditionally called tryInsertFullBody with only
+     the signature block, wiping the draft body text.
 
    FIX:
-     A new guard in PATH B checks whether the cleaned body
-     contains meaningful text content (> 5 chars after
-     stripping tags). If it does AND no CardByte sig is
-     present, the code routes to a dedicated "DraftPreserve"
-     path that uses signature-only insertion methods
-     (setSignatureAsync → prependAsync), never touching the
-     existing body content. This correctly handles:
-       - Recalled drafts opened via "Recall and open as draft"
-       - Regular drafts re-opened from the Drafts folder
-       - Any compose window that already has user-typed content
-         before applySignature fires
+     In the non-Mac alreadyHasSignature branch (PATH B), strip
+     the old CardByte sig from the existing body and check if
+     meaningful content remains. If yes, route to a
+     signature-only path (ComposeReplace-T1/T2/T3) that uses
+     setSignatureAsync / prependAsync — which replaces only the
+     Outlook signature slot without touching the compose body.
+     Falls through to full-body replace only if sig-only fails
+     OR if there is no meaningful body content (empty compose).
 
-   ALL OTHER CHANGES: none. v0.0.11 logic fully preserved.
+   ALL OTHER CHANGES: none. v0.0.12 logic fully preserved.
 
    ─────────────────────────────────────────────────────────
+   FIXES (v0.0.12 — RECALLED DRAFT BODY WIPE — PART 1):
+   - New _hasMeaningfulBodyContent() helper.
+   - PATH B: hasMeaningfulBody && !alreadyHasSignature guard
+     routes to DraftPreserve sig-only path instead of
+     Compose-T1 full-body replace.
+
    FIXES (v0.0.11):
-   - _stripSigFromSafeZoneOnly() helper added so Mac reply
-     paths strip CardByte sig only from the safe zone (above
-     reply chain), leaving quoted-chain signatures intact.
+   - _stripSigFromSafeZoneOnly() for Mac reply paths.
 
    FIXES (v0.0.10):
    - Always fetch fresh from API; removed localStorage as
-     primary cache source to prevent stale sig on Mac/Windows.
-   - In-memory CACHED_SIGNATURE_HTML used only as secondary
-     fallback within the same session.
-   - Per-item cache cleared (CACHED_SIGNATURE_HTML = null)
-     when a new item is detected.
+     primary cache to prevent stale sig on reload.
 
    FIXES (v0.0.9):
-   - Mac manual apply: signature-only path (never full-body)
-     to avoid destroying existing draft content on Mac.
+   - Mac manual apply: signature-only path.
 
    FIXES (v0.0.8 — SIGNATURE DUPLICATION BUG):
-   - SIGNATURE_STATE set to "applied" after successful
-     insertion; finally block no longer resets to "idle".
-   - Per-item-ID guard resets SIGNATURE_STATE for new items.
-   - PATH B: cleanBody computed once before T1, reused in all
-     tiers — prevents old sig accumulating on re-invoke.
-   - PATH A: _stripSig called before every full-body rebuild
-     across all platforms.
+   - SIGNATURE_STATE set to "applied" after success.
+   - Per-item-ID guard resets state for new items.
+   - PATH B: cleanBody computed once, reused in all tiers.
+   - PATH A: _stripSig before every full-body rebuild.
 
-   FIXES (v0.0.7 — MID-ATTRIBUTE SLICE BUG):
-   - All Mac-specific patterns anchored to opening HTML tags.
-   - _findReplyChainIndex() tightened; bare-string fallbacks
-     moved to lowest priority.
-
-   FIXES (v0.0.6 — MAC SUPPORT):
-   - Added "mac" as a distinct platform.
-   - isMac() helper used throughout insertion strategy.
-   - detectReplyChain(): added Mac-specific HTML markers.
-   - tryInsertSignatureOnly(): Mac replies skip setSignatureAsync.
-   - insertSignatureWithoutCursorError(): Mac jumps to T3.
-   - stabilizeSelection(): skipped on Mac.
-   - _findReplyChainIndex(): expanded marker list for Mac.
-
-   FIXES (v0.0.5 — MOBILE SUPPORT):
-   - Mobile platform detection.
-   - Mobile-specific insertion strategy.
-   - Retry with delay for mobile slow-init race.
-   - Skip disableClientSignatureAsync on mobile.
-   - Skip setSignatureAsync on mobile.
-   - Mobile-safe fallback chain.
-   - Reduced image quality/size on mobile.
-   - waitForItemReady() for mobile async init.
-
-   FIXES (v0.0.5 — GIF PATCH):
-   - compressImagesInHtml: currentDataUrl guard in first pass.
-   - compressImagesInHtml: second-pass GIF→PNG conversion fix.
-   - compressImagesInHtml: second-pass uses getMaxHtmlSize().
-
-   FIXES (v0.0.4):
-   - Reply/ReplyAll/Forward preserves conversation chain.
-   - Cursor stays at top of reply area.
-   - setSignatureAsync preferred for replies.
-   - Fallback uses prependAsync.
+   FIXES (v0.0.7): Mid-attribute slice bug, tag-anchored patterns.
+   FIXES (v0.0.6): Mac support.
+   FIXES (v0.0.5): Mobile support, GIF patch.
+   FIXES (v0.0.4): Reply/Forward chain preservation.
    ========================================================= */
 
 let SIGNATURE_STATE = "idle"; // idle | loading | applied
@@ -822,8 +784,7 @@ function _findReplyChainIndex(html) {
 
 /* ---------------------------------------------------------
    Safe-Zone Strip Helper (v0.0.11)
-   Strips CardByte sig only from above the reply chain,
-   leaving quoted-chain signatures completely untouched.
+   Strips CardByte sig only from above the reply chain.
    --------------------------------------------------------- */
 function _stripSigFromSafeZoneOnly(html) {
     const chainIndex = _findReplyChainIndex(html);
@@ -844,22 +805,10 @@ function _stripSigFromSafeZoneOnly(html) {
 }
 
 /* ---------------------------------------------------------
-   Main Insertion — Multi-Strategy
-   v0.0.12 CHANGES:
-     - PATH B (New Compose): new hasMeaningfulBody guard.
-       If the body already has user content but no CardByte
-       sig (e.g. a recalled draft or pre-typed compose),
-       routes to DraftPreserve path (signature-only insertion)
-       instead of falling through to Compose-T1 full-body
-       replace. Prevents recalled draft body from being wiped.
+   Draft Content Detection Helper (v0.0.12)
+   Returns true if cleaned body HTML has real user text
+   beyond whitespace/empty tags (threshold > 5 chars).
    --------------------------------------------------------- */
-
-/**
- * _hasMeaningfulBodyContent
- * Returns true if the cleaned body HTML contains real user
- * text beyond whitespace/empty tags (threshold: > 5 chars).
- * Used by PATH B to detect recalled drafts / pre-typed compose.
- */
 function _hasMeaningfulBodyContent(cleanedBodyHtml) {
     const textOnly = cleanedBodyHtml
         .replace(/<[^>]*>/g, "")
@@ -867,6 +816,19 @@ function _hasMeaningfulBodyContent(cleanedBodyHtml) {
         .trim();
     return textOnly.length > 5;
 }
+
+/* ---------------------------------------------------------
+   Main Insertion — Multi-Strategy
+   v0.0.13 CHANGES:
+     - PATH B / alreadyHasSignature / non-Mac:
+       Strip existing sig from body and check for remaining
+       meaningful content. If found, use sig-only insertion
+       (ComposeReplace-T1/T2/T3) to preserve the draft body.
+       Falls through to full-body replace only when body is
+       empty or all sig-only tiers fail.
+       This fixes recalled drafts where alreadyHasSignature=true
+       was bypassing the v0.0.12 hasMeaningfulBody guard.
+   --------------------------------------------------------- */
 
 async function insertSignatureWithoutCursorError(item, signatureHtml, options = {}) {
     const isManualApply = options?.manualApply === true;
@@ -1021,31 +983,23 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
 
         // ═══════════════════════════════════════════════════
         // PATH B: NEW COMPOSE
-        // v0.0.8: compute cleanBody ONCE and reuse across all tiers.
-        // v0.0.12: hasMeaningfulBody guard — if body has existing
-        //   user content but no CardByte sig (e.g. recalled draft,
-        //   pre-typed compose), use signature-only insertion so we
-        //   never wipe the user's content. This is the recalled-
-        //   draft fix.
         // ═══════════════════════════════════════════════════
         console.log("[CardByte] New compose detected");
 
+        // v0.0.8: strip existing sig once; reuse cleanBody across all tiers
         const cleanBody = _stripSig(existingBody);
+
+        // v0.0.12: guard for compose windows that have user content but no sig
+        // (e.g. user typed before add-in loaded, or fresh recalled draft with no sig)
         const hasMeaningfulBody = _hasMeaningfulBodyContent(cleanBody);
 
-        // ── v0.0.12: DRAFT-PRESERVE PATH ─────────────────
-        // Handles recalled drafts and compose windows that
-        // already have user-typed content without a CardByte sig.
         if (hasMeaningfulBody && !alreadyHasSignature) {
             console.log(`[CardByte] Draft has existing content — using signature-only insertion to preserve body`);
 
-            // DraftPreserve-T1: setSignatureAsync / prependAsync (platform-aware via tryInsertSignatureOnly)
             {
                 const result = await tryInsertSignatureOnly(item, signatureBlock, "DraftPreserve-T1");
                 if (result.success) { await stabilizeSelection(item); return; }
             }
-
-            // DraftPreserve-T2: compressed
             {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
@@ -1053,8 +1007,6 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] DraftPreserve-T2:", e.message); }
             }
-
-            // DraftPreserve-T3: stripped images
             {
                 const stripped = stripBase64Images(signatureBlock);
                 const result = await tryInsertSignatureOnly(item, stripped, "DraftPreserve-T3");
@@ -1068,6 +1020,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
         if (alreadyHasSignature) {
             console.log("[CardByte] Replacing existing CardByte signature in compose");
 
+            // ── MAC: always rebuild full body ─────────────
             if (mac) {
                 let freshBody = existingBody;
                 try { freshBody = await getBodyHtml(item); } catch (e) { /* use existingBody */ }
@@ -1097,10 +1050,45 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 throw new Error("Mac compose replace: all setAsync variants failed");
             }
 
-            // Non-Mac: original behaviour
-            const updatedBody = signatureBlock;
+            // ── NON-MAC: v0.0.13 — sig-only when body has content ──
+            // Strip the existing CardByte sig and check if user has
+            // typed anything meaningful (handles recalled drafts where
+            // alreadyHasSignature=true bypassed the v0.0.12 guard).
+            const bodyWithoutSig = cleanBody; // cleanBody = _stripSig(existingBody) — computed above
+            const hasDraftContent = _hasMeaningfulBodyContent(bodyWithoutSig);
+
+            if (hasDraftContent) {
+                console.log(`[CardByte] Compose-Replace: body has content (${bodyWithoutSig.replace(/<[^>]*>/g, "").trim().length} chars) — using sig-only replace to preserve draft`);
+
+                // ComposeReplace-T1: platform-aware sig-only (setSignatureAsync preferred on OWA/desktop)
+                {
+                    const result = await tryInsertSignatureOnly(item, signatureBlock, "ComposeReplace-T1");
+                    if (result.success) { await stabilizeSelection(item); return; }
+                }
+
+                // ComposeReplace-T2: compressed
+                {
+                    try {
+                        const compressed = await compressImagesInHtml(signatureBlock);
+                        const result = await tryInsertSignatureOnly(item, compressed, "ComposeReplace-T2");
+                        if (result.success) { await stabilizeSelection(item); return; }
+                    } catch (e) { console.warn("[CardByte] ComposeReplace-T2:", e.message); }
+                }
+
+                // ComposeReplace-T3: stripped images
+                {
+                    const stripped = stripBase64Images(signatureBlock);
+                    const result = await tryInsertSignatureOnly(item, stripped, "ComposeReplace-T3");
+                    if (result.success) { await stabilizeSelection(item); return; }
+                }
+
+                // All sig-only tiers failed — fall through to full-body as last resort
+                console.warn("[CardByte] ComposeReplace sig-only: all tiers failed — falling back to full-body replace");
+            }
+
+            // Empty compose OR sig-only failed: safe to do full-body replace
             console.log("[CardByte] Attempting full-body replace to update existing signature");
-            const result = await tryInsertFullBody(item, updatedBody, "Compose-Replace");
+            const result = await tryInsertFullBody(item, signatureBlock, "Compose-Replace");
             if (result.success) { return; }
         }
 
@@ -1165,7 +1153,7 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
         }
 
         // ── DESKTOP / OWA / MAC AUTO-RUN COMPOSE PATH ────
-        // v0.0.8: ALL tiers use cleanBody — never raw existingBody.
+        // All tiers use signatureBlock only (v0.0.8: cleanBody already stripped above)
 
         // Compose T1
         {
@@ -1370,13 +1358,6 @@ async function ensureNoDefaultSignature(item) {
 
 /* ---------------------------------------------------------
    AUTO-RUN ENTRY POINT
-   v0.0.8 CHANGES:
-     1. Per-item-ID guard resets SIGNATURE_STATE when a new
-        compose/reply window fires the handler.
-     2. SIGNATURE_STATE set to "applied" after successful
-        insertion (was "idle").
-     3. finally block no longer resets SIGNATURE_STATE —
-        only catch block resets to "idle" for retry.
    --------------------------------------------------------- */
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
@@ -1389,7 +1370,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
     if (currentItemId && window.__LAST_ITEM_ID__ && window.__LAST_ITEM_ID__ !== currentItemId) {
         console.log(`[CardByte] New item detected (${currentItemId}) — resetting SIGNATURE_STATE`);
         SIGNATURE_STATE = "idle";
-        CACHED_SIGNATURE_HTML = null; // v0.0.10: clear in-memory cache on new item
+        CACHED_SIGNATURE_HTML = null;
     }
     if (currentItemId) window.__LAST_ITEM_ID__ = currentItemId;
 
@@ -1447,7 +1428,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
         const mac = isMac();
 
         console.log("[CardByte] ════════════════════════════════════");
-        console.log(`[CardByte] Starting signature flow v0.0.12 (manual: ${isManualApply})`);
+        console.log(`[CardByte] Starting signature flow v0.0.13 (manual: ${isManualApply})`);
         console.log("[CardByte] User:", user?.emailAddress);
         console.log("[CardByte] Platform:", platform);
         console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
@@ -1464,8 +1445,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
             console.log("[CardByte] Manual apply: skipping ensureNoDefaultSignature to preserve body");
         }
 
-        // v0.0.10: ALWAYS fetch fresh from API first — no localStorage fallback.
-        // In-memory CACHED_SIGNATURE_HTML is only used within the same session.
+        // v0.0.10: Always fetch fresh from API. In-memory cache is session-only fallback.
         let apiResponse = null;
 
         try {
