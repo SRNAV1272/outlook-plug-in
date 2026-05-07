@@ -1617,9 +1617,17 @@ window.onSendHandler = async function onSendHandler(event = { completed: () => {
         }
 
         function _hasSig(html) {
-            return /id="x?_?cardbyte-signature-block"/i.test(html)
+            // CRITICAL: use plain includes() — NOT regex with double quotes.
+            // Outlook's JS-only runtime (OnMessageSend) normalizes attribute
+            // quotes to single quotes AND strips HTML comments, so both the
+            // double-quote regex id="cardbyte-signature-block" and the comment
+            // marker CARD_BYTE_SIGNATURE_START silently fail even when the
+            // signature is physically present in the body. Plain substring
+            // search is quote-agnostic and comment-independent.
+            return html.includes("cardbyte-signature-block")
                 || html.includes("CARD_BYTE_SIGNATURE_START")
-                || html.includes("CARDBYTE_SIGNATURE");
+                || html.includes("CARDBYTE_SIGNATURE")
+                || html.includes("cardbyte-signature-container"); // VSTO add-in sig
         }
 
         async function _buildFreshSignatureBlock() {
