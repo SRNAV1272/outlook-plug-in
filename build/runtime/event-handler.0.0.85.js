@@ -1580,67 +1580,95 @@ window.applySignature = async function (event = { completed: () => { } }, option
       same shared runtime — no extra API call needed).
    --------------------------------------------------------- */
 window.onSendHandler = function onSendHandler(event) {
-    // JS-only runtime detection: Desktop Classic has no DOM.
-    if (typeof document === "undefined" || typeof document.createElement !== "function") {
-        // Synchronous — safe for Desktop Classic, zero chance of popup.
+    // RELIABLE platform check: Office.context.platform is synchronously available
+    // in every runtime (JS-only AND WebView) on every Outlook client.
+    //
+    // "PC" = Windows Desktop (Classic Outlook OR New Outlook for Windows).
+    // On Windows Desktop, Outlook enforces a hard 5-second limit for event handlers
+    // AND setTimeout is unreliable in that context — so we MUST be synchronous.
+    //
+    // All other platforms (OfficeOnline / Mac / iOS / Android) use WebView-based
+    // runtimes where async operations are safe and the time limits are generous.
+    var platform = "";
+    try { platform = (Office && Office.context && Office.context.platform) || ""; } catch (e) {}
+
+    if (platform === "PC" || platform === "") {
+        // Windows Desktop — synchronous completion, zero popup risk.
         try { event.completed({ allowEvent: true }); } catch (e) {}
         return;
     }
-    // Shared WebView runtime — async tamper detection is safe here.
+    // Web / Mac / Mobile — async tamper detection is safe here.
     _runTamperDetection(event);
 };
 
 // ─── Async tamper detection (WebView runtime only) ────────────────────────────
-async function _runTamperDetection(event) {
-    try {
-        const item = Office.context.mailbox.item;
-
-        // CACHED_SIGNATURE_HTML is the raw API response stored during applySignature().
-        // Because OnNewMessageCompose and OnMessageSend share the same WebView runtime
-        // in New Outlook, this variable is directly accessible here — no API call needed.
-        const originalSig = CACHED_SIGNATURE_HTML;
-
-        if (!originalSig) {
-            console.log("[CardByte] onSendHandler: no cached signature — allowing send");
-            event.completed({ allowEvent: true });
-            return;
+function _runTamperDetection(event) {
+    // Guard: event.completed must be called exactly once.
+    // Safety timer fires at 4 s — well inside any SoftBlock limit — so
+    // a slow body read on a large email can never cause a "unavailable" popup.
+    var done = false;
+    function safeComplete() {
+        if (!done) {
+            done = true;
+            try { event.completed({ allowEvent: true }); } catch (e) {}
         }
+    }
+    var safetyTimer = setTimeout(function () {
+        console.warn("[CardByte] onSendHandler: 4 s safety timeout — allowing send");
+        safeComplete();
+    }, 4000);
 
-        // Read current body
-        const currentBody = await new Promise((resolve, reject) => {
-            item.body.getAsync(Office.CoercionType.Html, (r) => {
-                if (r.status === "succeeded") resolve(r.value || "");
-                else reject(r.error);
-            });
-        });
+    (async function () {
+        try {
+            const item = Office.context.mailbox.item;
 
-        if (_isSignatureTampered(currentBody, originalSig)) {
-            console.log("[CardByte] onSendHandler: signature tampered or missing — restoring");
+            // CACHED_SIGNATURE_HTML is the raw API response stored during applySignature().
+            // Because OnNewMessageCompose and OnMessageSend share the same WebView runtime
+            // in New Outlook, this variable is directly accessible here — no API call needed.
+            const originalSig = CACHED_SIGNATURE_HTML;
 
-            // Rebuild body: strip partial/tampered sig from safe zone, re-inject original.
-            const wrapped = `<!-- CARD_BYTE_SIGNATURE_START -->${wrapForOutlook(originalSig)}<!-- CARD_BYTE_SIGNATURE_END -->`;
-            const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(currentBody);
-            const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
-            const restoredBody = (trimmedSafe ? trimmedSafe + "<br>" : "")
-                + wrapped
-                + (replyChain ? replyChain : "");
+            if (!originalSig) {
+                console.log("[CardByte] onSendHandler: no cached signature — allowing send");
+                clearTimeout(safetyTimer);
+                safeComplete();
+                return;
+            }
 
-            await new Promise((resolve, reject) => {
-                item.body.setAsync(restoredBody, { coercionType: Office.CoercionType.Html }, (r) => {
-                    if (r.status === "succeeded") resolve();
+            // Read current body
+            const currentBody = await new Promise((resolve, reject) => {
+                item.body.getAsync(Office.CoercionType.Html, (r) => {
+                    if (r.status === "succeeded") resolve(r.value || "");
                     else reject(r.error);
                 });
             });
-            console.log("[CardByte] onSendHandler: signature restored — allowing send");
-        } else {
-            console.log("[CardByte] onSendHandler: signature intact — allowing send");
-        }
 
-        event.completed({ allowEvent: true });
-    } catch (e) {
-        console.warn("[CardByte] onSendHandler error:", e.message);
-        try { event.completed({ allowEvent: true }); } catch (_) {}
-    }
+            if (_isSignatureTampered(currentBody, originalSig)) {
+                console.log("[CardByte] onSendHandler: signature tampered or missing — restoring");
+
+                // Rebuild body: strip partial/tampered sig from safe zone, re-inject original.
+                const wrapped = `<!-- CARD_BYTE_SIGNATURE_START -->${wrapForOutlook(originalSig)}<!-- CARD_BYTE_SIGNATURE_END -->`;
+                const { safeZone, replyChain } = _stripSigFromSafeZoneOnly(currentBody);
+                const trimmedSafe = safeZone.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+                const restoredBody = (trimmedSafe ? trimmedSafe + "<br>" : "")
+                    + wrapped
+                    + (replyChain ? replyChain : "");
+
+                await new Promise((resolve, reject) => {
+                    item.body.setAsync(restoredBody, { coercionType: Office.CoercionType.Html }, (r) => {
+                        if (r.status === "succeeded") resolve();
+                        else reject(r.error);
+                    });
+                });
+                console.log("[CardByte] onSendHandler: signature restored — allowing send");
+            } else {
+                console.log("[CardByte] onSendHandler: signature intact — allowing send");
+            }
+        } catch (e) {
+            console.warn("[CardByte] onSendHandler error:", e.message);
+        }
+        clearTimeout(safetyTimer);
+        safeComplete();
+    })();
 }
 
 // ─── Tamper detection helper ─────────────────────────────────────────────────
