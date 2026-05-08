@@ -732,14 +732,26 @@ function _stripDivById(html, idPattern) {
     return html.slice(0, matchedIndex) + html.slice(pos);
 }
 
+// function _stripSig(html) {
+//     let result = html;
+//     result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
+//     result = result.replace(
+//         /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+//         ""
+//     );
+//     // Only trim trailing — never leading
+//     result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+//     return result;
+// }
+
 function _stripSig(html) {
     let result = html;
-    result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
+    // v0.0.15: match x_cardbyte-signature-block AND x_x_cardbyte-signature-block
+    result = _stripDivById(result, /x*_?cardbyte-signature-block/i);
     result = result.replace(
         /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
         ""
     );
-    // Only trim trailing — never leading
     result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
     return result;
 }
@@ -786,21 +798,47 @@ function _findReplyChainIndex(html) {
    Safe-Zone Strip Helper (v0.0.11)
    Strips CardByte sig only from above the reply chain.
    --------------------------------------------------------- */
+// function _stripSigFromSafeZoneOnly(html) {
+//     const chainIndex = _findReplyChainIndex(html);
+
+//     if (chainIndex === -1) {
+//         const stripped = _stripSig(html);
+//         return { safeZone: stripped, replyChain: "", fullStripped: stripped };
+//     }
+
+//     const safeZone = _stripSig(html.slice(0, chainIndex));
+//     const replyChain = html.slice(chainIndex);
+
+//     return {
+//         safeZone,
+//         replyChain,
+//         fullStripped: safeZone + replyChain,
+//     };
+// }
+
 function _stripSigFromSafeZoneOnly(html) {
-    const chainIndex = _findReplyChainIndex(html);
+    // v0.0.15: On Mac, getAsync wraps the entire body (including the
+    // CardByte sig) inside x_mail-editor-reference-message-container,
+    // which is also detected as a reply chain marker. This causes the
+    // sig to land inside replyChain after the split, making _stripSig
+    // on safeZone a no-op and leaving a ghost sig in the chain.
+    // Fix: strip sig from the full HTML first, THEN find the reply
+    // chain index and split — so the sig is always removed regardless
+    // of which container it ended up in.
+    const fullyStripped = _stripSig(html);
+    const chainIndex = _findReplyChainIndex(fullyStripped);
 
     if (chainIndex === -1) {
-        const stripped = _stripSig(html);
-        return { safeZone: stripped, replyChain: "", fullStripped: stripped };
+        return { safeZone: fullyStripped, replyChain: "", fullStripped: fullyStripped };
     }
 
-    const safeZone = _stripSig(html.slice(0, chainIndex));
-    const replyChain = html.slice(chainIndex);
+    const safeZone = fullyStripped.slice(0, chainIndex);
+    const replyChain = fullyStripped.slice(chainIndex);
 
     return {
         safeZone,
         replyChain,
-        fullStripped: safeZone + replyChain,
+        fullStripped: fullyStripped,
     };
 }
 
@@ -1291,10 +1329,19 @@ function getBodyHtml(item) {
     });
 }
 
+// function hasCardByteSignature(html) {
+//     return /id="x?_?cardbyte-signature-block"/i.test(html)
+//         || html.includes("CARD_BYTE_SIGNATURE_START")
+//         || html.includes("CARDBYTE_SIGNATURE");
+// }
+
 function hasCardByteSignature(html) {
     return /id="x?_?cardbyte-signature-block"/i.test(html)
         || html.includes("CARD_BYTE_SIGNATURE_START")
-        || html.includes("CARDBYTE_SIGNATURE");
+        || html.includes("CARDBYTE_SIGNATURE")
+        // v0.0.15: Mac wraps body in x_mail-editor-reference-message-container
+        // which can contain x_x_cardbyte-signature-block (double-prefixed)
+        || /id="x+_cardbyte-signature-block"/i.test(html);
 }
 
 function looksLikeDefaultSignature(html) {
