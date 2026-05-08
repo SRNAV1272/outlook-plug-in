@@ -156,12 +156,28 @@ function findReplyChainIndex(html) {
 // ─────────────────────────────────────────────────────────────────────────────
 // DETECTION HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
+// function hasCardByteSignature(html) {
+//   if (
+//     html.includes("CARD_BYTE_SIGNATURE_START") ||
+//     html.includes("CARDBYTE_SIGNATURE") ||
+//     html.includes("CB_SIG_START") ||
+//     /id="x?_?cardbyte-signature-block"/i.test(html)
+//   ) return true;
+//   if (isMac()) {
+//     return [
+//       /<div[^>]*style="[^"]*font-family:Calibri[^"]*"[^>]*>[\s\S]*?CardByte/i,
+//       /<div[^>]*contenteditable="false"[^>]*>[\s\S]*?<!-- CARD_BYTE/i,
+//     ].some(p => p.test(html));
+//   }
+//   return false;
+// }
+
 function hasCardByteSignature(html) {
   if (
     html.includes("CARD_BYTE_SIGNATURE_START") ||
     html.includes("CARDBYTE_SIGNATURE") ||
     html.includes("CB_SIG_START") ||
-    /id="x?_?cardbyte-signature-block"/i.test(html)
+    /id="x*_?cardbyte-signature-block"/i.test(html)  // catches x_, x_x_ etc.
   ) return true;
   if (isMac()) {
     return [
@@ -219,14 +235,27 @@ function _stripDivById(html, idPattern) {
 }
 
 
+// function _stripSig(html) {
+//   let result = html;
+//   result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
+//   result = result.replace(
+//     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
+//     ""
+//   );
+//   // Only trim trailing — never leading
+//   result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
+//   return result;
+// }
+
 function _stripSig(html) {
   let result = html;
-  result = _stripDivById(result, /x?_?cardbyte-signature-block/i);
+  // v0.0.15: match x_cardbyte-signature-block AND x_x_cardbyte-signature-block
+  // Mac OWA double-prefixes IDs when body is wrapped in reference container
+  result = _stripDivById(result, /x*_?cardbyte-signature-block/i);
   result = result.replace(
     /<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/gi,
     ""
   );
-  // Only trim trailing — never leading
   result = result.replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd();
   return result;
 }
@@ -234,35 +263,41 @@ function _stripSig(html) {
 // ─────────────────────────────────────────────────────────────────────────────
 // SAFE-ZONE STRIP
 // ─────────────────────────────────────────────────────────────────────────────
+// function stripSigFromSafeZoneOnly(html) {
+//   const chainIndex = findReplyChainIndex(html);
+//   if (chainIndex === -1) {
+//     // No reply chain found — strip from the entire body (safe for compose)
+//     const stripped = _stripSig(html);
+//     return { safeZone: stripped, replyChain: "", fullStripped: stripped };
+//   }
+
+//   const safeZone = _stripSig(html.slice(0, chainIndex));   // strip only the top
+//   const replyChain = html.slice(chainIndex);                  // NEVER touch this
+
+//   return {
+//     safeZone,
+//     replyChain,
+//     fullStripped: safeZone + replyChain,
+//   };
+// }
 function stripSigFromSafeZoneOnly(html) {
-  const chainIndex = findReplyChainIndex(html);
+  // v0.0.15: Strip sig from full HTML FIRST, then split at reply chain.
+  // On Mac, getAsync wraps entire body (including the CardByte sig) inside
+  // x_mail-editor-reference-message-container which is itself detected as
+  // a reply chain marker. Old approach split first → sig ended up in
+  // replyChain → _stripSig(safeZone) was a no-op → ghost sig remained.
+  const fullyStripped = _stripSig(html);
+  const chainIndex = findReplyChainIndex(fullyStripped);
   if (chainIndex === -1) {
-    // No reply chain found — strip from the entire body (safe for compose)
-    const stripped = _stripSig(html);
-    return { safeZone: stripped, replyChain: "", fullStripped: stripped };
+    return { safeZone: fullyStripped, replyChain: "", fullStripped: fullyStripped };
   }
-
-  const safeZone = _stripSig(html.slice(0, chainIndex));   // strip only the top
-  const replyChain = html.slice(chainIndex);                  // NEVER touch this
-
+  const safeZone = fullyStripped.slice(0, chainIndex);
+  const replyChain = fullyStripped.slice(chainIndex);
   return {
     safeZone,
     replyChain,
-    fullStripped: safeZone + replyChain,
+    fullStripped: fullyStripped,
   };
-  // if (chainIndex === -1) {
-  //   const stripped = stripSig(html);
-  //   if (hasCardByteSignature(html) && !hasCardByteSignature(stripped))
-  //     console.log("[CardByte] Successfully stripped signature from safe zone");
-  //   else if (hasCardByteSignature(html) && hasCardByteSignature(stripped))
-  //     console.warn("[CardByte] WARNING: Signature still present after strip!");
-  //   return { safeZone: stripped, replyChain: "", fullStripped: stripped };
-  // }
-  // const safeZone   = stripSig(html.slice(0, chainIndex));
-  // const replyChain = html.slice(chainIndex);
-  // if (hasCardByteSignature(html.slice(0, chainIndex)) && !hasCardByteSignature(safeZone))
-  //   console.log("[CardByte] Successfully stripped signature from safe zone (with reply chain)");
-  // return { safeZone, replyChain, fullStripped: safeZone + replyChain };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
