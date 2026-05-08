@@ -947,38 +947,99 @@ async function insertSignatureWithoutCursorError(item, signatureHtml, options = 
                 throw new Error("All Mac reply insertion tiers failed");
             }
 
+            // // ── DESKTOP / OWA REPLY PATH ──────────────────
+            // if (!alreadyHasSignature) {
+            //     const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>", "Reply-T1");
+            //     if (result.success) { await stabilizeSelection(item); return; }
+            // }
+
+            // if (!alreadyHasSignature) {
+            //     try {
+            //         const compressed = await compressImagesInHtml(signatureBlock);
+            //         const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>", "Reply-T2");
+            //         if (result.success) { await stabilizeSelection(item); return; }
+            //     } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
+            // }
+
+            // // T3: full-body rebuild (v0.0.8 — always strip first)
+            // {
+            //     try {
+            //         const compressed = await compressImagesInHtml(signatureBlock);
+            //         const fullHtml = "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>";
+            //         console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`);
+            //         const result = await tryInsertFullBody(item, fullHtml, "Reply-T3");
+            //         if (result.success) { await stabilizeSelection(item); return; }
+            //     } catch (e) { console.warn("[CardByte] Reply T3:", e.message); }
+            // }
+
+            // // T4: strip images, signature-only
+            // {
+            //     const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + stripBase64Images(signatureBlock) + "<div style='margin-top:20px'></div>", "Reply-T4");
+            //     if (result.success) { await stabilizeSelection(item); return; }
+            // }
+
+            // throw new Error("All reply insertion tiers failed");
+
             // ── DESKTOP / OWA REPLY PATH ──────────────────
-            if (!alreadyHasSignature) {
-                const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>", "Reply-T1");
+            // v0.0.14: T1/T2 no longer gated by !alreadyHasSignature.
+            // setSignatureAsync handles replacement cleanly regardless.
+
+            // T1: sig-only (first-time or replacement)
+            {
+                const result = await tryInsertSignatureOnly(
+                    item,
+                    "<div style='margin-top:20px'></div>" + signatureBlock + "<div style='margin-top:20px'></div>",
+                    "Reply-T1"
+                );
                 if (result.success) { await stabilizeSelection(item); return; }
             }
 
-            if (!alreadyHasSignature) {
+            // T2: sig-only compressed
+            {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
-                    const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>", "Reply-T2");
+                    const result = await tryInsertSignatureOnly(
+                        item,
+                        "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>",
+                        "Reply-T2"
+                    );
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T2:", e.message); }
             }
 
-            // T3: full-body rebuild (v0.0.8 — always strip first)
+            // T3: full-body rebuild — ALWAYS include reply chain
+            // v0.0.14: was writing body with only signature block, wiping the reply chain.
+            // Now always rebuilds with reply chain intact using _findReplyChainIndex.
             {
                 try {
                     const compressed = await compressImagesInHtml(signatureBlock);
-                    const fullHtml = "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>";
+                    const cleanBody = _stripSig(existingBody);
+                    const insertIndex = _findReplyChainIndex(cleanBody);
+                    const fullHtml = insertIndex > -1
+                        ? cleanBody.slice(0, insertIndex)
+                        + "<div style='margin-top:20px'></div>"
+                        + compressed
+                        + "<div style='margin-top:20px'></div>"
+                        + cleanBody.slice(insertIndex)
+                        : "<div style='margin-top:20px'></div>" + compressed + "<div style='margin-top:20px'></div>";
                     console.log(`[CardByte] Reply T3 full-body: ${(fullHtml.length / 1024).toFixed(1)}KB`);
                     const result = await tryInsertFullBody(item, fullHtml, "Reply-T3");
                     if (result.success) { await stabilizeSelection(item); return; }
                 } catch (e) { console.warn("[CardByte] Reply T3:", e.message); }
             }
 
-            // T4: strip images, signature-only
+            // T4: strip images, sig-only
             {
-                const result = await tryInsertSignatureOnly(item, "<div style='margin-top:20px'></div>" + stripBase64Images(signatureBlock) + "<div style='margin-top:20px'></div>", "Reply-T4");
+                const result = await tryInsertSignatureOnly(
+                    item,
+                    "<div style='margin-top:20px'></div>" + stripBase64Images(signatureBlock) + "<div style='margin-top:20px'></div>",
+                    "Reply-T4"
+                );
                 if (result.success) { await stabilizeSelection(item); return; }
             }
 
             throw new Error("All reply insertion tiers failed");
+
         }
 
         // ═══════════════════════════════════════════════════
