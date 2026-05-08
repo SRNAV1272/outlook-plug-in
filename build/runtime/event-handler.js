@@ -1506,7 +1506,21 @@ window.applySignature = async function (event = { completed: () => { } }, option
 };
 
 /* ---------------------------------------------------------
-   ON-SEND HANDLER (unchanged from v0.0.7)
+   ON-SEND HANDLER (v0.0.14 — CID IMAGE PRESERVATION)
+   
+   FIX: Reply chains with CID-attached images (OWA blob URLs)
+   were being broken by full-body setAsync replacing the entire
+   body including reply chain. OWA blob URLs are session-scoped
+   and become invalid when re-written via setAsync.
+   
+   FIX STRATEGY:
+   1. If reply chain contains CID images → use setSignatureAsync
+      only (touches signature slot only, never the reply chain).
+   2. If setSignatureAsync unavailable/fails → fall back to
+      full-body rebuild but ONLY strip images from freshBlock,
+      never from replyChain.
+   3. Size-reduction tiers now operate on freshBlock only,
+      replyChain is always passed through untouched.
    --------------------------------------------------------- */
 window.onSendHandler = async function (event = { completed: () => { } }) {
 
@@ -1534,7 +1548,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
 
         if (!item) {
             console.error("[CardByte][OnSend] No item — allowing send");
-            event.completed({ allowEvent: true });
+            safeComplete({ allowEvent: true });
             return;
         }
 
@@ -1585,10 +1599,31 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             });
         }
 
+        function _setSignatureHtml(html) {
+            return new Promise((resolve, reject) => {
+                if (typeof item.body?.setSignatureAsync !== "function") {
+                    reject(new Error("setSignatureAsync not available"));
+                    return;
+                }
+                item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+                    if (r.status === "succeeded") resolve();
+                    else reject(new Error(r.error?.message || "setSignatureAsync failed"));
+                });
+            });
+        }
+
         function _hasSig(html) {
             return /id="x?_?cardbyte-signature-block"/i.test(html)
                 || html.includes("CARD_BYTE_SIGNATURE_START")
                 || html.includes("CARDBYTE_SIGNATURE");
+        }
+
+        // Detects CID-attached images in reply chain (OWA blob URLs)
+        // These become invalid if the body is rewritten via setAsync
+        function _hasCidImages(html) {
+            return /data-imagetype="AttachmentByCid"/i.test(html)
+                || /src="cid:/i.test(html)
+                || /originalsrc="cid:/i.test(html);
         }
 
         async function _buildFreshSignatureBlock() {
@@ -1635,16 +1670,16 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
                             try { localStorage.setItem("cardbyte_cached_signature", fetched); } catch (_) { }
                         } else {
                             if (_hasSig(body)) await _setBodyHtml(stripped);
-                            event.completed({ allowEvent: true }); return;
+                            safeComplete({ allowEvent: true }); return;
                         }
                     } else {
                         if (_hasSig(body)) await _setBodyHtml(stripped);
-                        event.completed({ allowEvent: true }); return;
+                        safeComplete({ allowEvent: true }); return;
                     }
                 } catch (fetchErr) {
                     console.warn("[CardByte][OnSend] Live fetch failed:", fetchErr.message);
                     if (_hasSig(body)) await _setBodyHtml(stripped);
-                    event.completed({ allowEvent: true }); return;
+                    safeComplete({ allowEvent: true }); return;
                 }
             }
 
@@ -1656,120 +1691,123 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             const isReply = replyChainIndex > -1;
             console.log(`[CardByte][OnSend] isReply: ${isReply}, replyChainIndex: ${replyChainIndex}`);
 
-            let finalHtml;
-            let beforeChain = "";
-            let replyChain = "";
+            // Split body into parts we control vs reply chain we must not corrupt
+            const beforeChain = isReply
+                ? stripped.slice(0, replyChainIndex).replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "").trimEnd()
+                : stripped;
+            const replyChain = isReply ? stripped.slice(replyChainIndex) : "";
 
-            if (isReply) {
-                beforeChain = stripped
-                    .slice(0, replyChainIndex)
-                    .replace(/(\s|<br\s*\/?>|&nbsp;)+$/gi, "")
-                    .trimEnd();
-                replyChain = stripped.slice(replyChainIndex);
-                console.log(`[CardByte][OnSend] beforeChain: ${(beforeChain.length / 1024).toFixed(1)}KB, replyChain: ${(replyChain.length / 1024).toFixed(1)}KB`);
-                finalHtml = beforeChain + freshBlock + replyChain;
-            } else {
-                finalHtml = stripped + freshBlock;
+            console.log(`[CardByte][OnSend] beforeChain: ${(beforeChain.length / 1024).toFixed(1)}KB, replyChain: ${(replyChain.length / 1024).toFixed(1)}KB`);
+
+            // ── CID IMAGE GUARD ──────────────────────────────────────
+            // If the reply chain contains CID-attached images (rendered
+            // as OWA blob:// URLs), a full-body setAsync will break them
+            // because blob URLs are session-scoped and lose their CID
+            // mapping when body HTML is re-written.
+            // Solution: use setSignatureAsync which only touches the
+            // Outlook signature slot and never rewrites the reply chain.
+            const replyChainHasCidImages = isReply && _hasCidImages(replyChain);
+            console.log(`[CardByte][OnSend] replyChainHasCidImages: ${replyChainHasCidImages}`);
+
+            if (replyChainHasCidImages) {
+                console.log("[CardByte][OnSend] CID images detected in reply chain — using setSignatureAsync to preserve attachments");
+
+                // CID-T1: setSignatureAsync with full freshBlock
+                try {
+                    await _setSignatureHtml(freshBlock);
+                    console.log("[CardByte][OnSend] ✅ Done (CID-T1: setSignatureAsync succeeded)");
+                    safeComplete({ allowEvent: true }); return;
+                } catch (e) {
+                    console.warn("[CardByte][OnSend] CID-T1 setSignatureAsync failed:", e.message);
+                }
+
+                // CID-T2: setSignatureAsync with compressed block
+                try {
+                    const compressed = await compressImagesInHtml(freshBlock);
+                    await _setSignatureHtml(compressed);
+                    console.log("[CardByte][OnSend] ✅ Done (CID-T2: setSignatureAsync compressed succeeded)");
+                    safeComplete({ allowEvent: true }); return;
+                } catch (e) {
+                    console.warn("[CardByte][OnSend] CID-T2 setSignatureAsync compressed failed:", e.message);
+                }
+
+                // CID-T3: setSignatureAsync with images stripped
+                try {
+                    const strippedBlock = stripBase64Images(freshBlock);
+                    await _setSignatureHtml(strippedBlock);
+                    console.log("[CardByte][OnSend] ✅ Done (CID-T3: setSignatureAsync stripped succeeded)");
+                    safeComplete({ allowEvent: true }); return;
+                } catch (e) {
+                    console.warn("[CardByte][OnSend] CID-T3 setSignatureAsync stripped failed:", e.message);
+                }
+
+                // CID-T4: all setSignatureAsync tiers failed — fall through to
+                // full-body rebuild but ONLY strip from freshBlock, never replyChain
+                console.warn("[CardByte][OnSend] All setSignatureAsync tiers failed — falling back to full-body (replyChain untouched)");
             }
+
+            // ── FULL BODY REBUILD ────────────────────────────────────
+            // Assemble: beforeChain + freshBlock + replyChain (untouched)
+            const finalHtml = isReply
+                ? beforeChain + freshBlock + replyChain
+                : beforeChain + freshBlock;
 
             console.log(`[CardByte][OnSend] Final body: ${(finalHtml.length / 1024).toFixed(1)}KB`);
 
-            // const SETASYNC_LIMIT = 900_000;
-
-            // if (finalHtml.length <= SETASYNC_LIMIT) {
-            //     await _setBodyHtml(finalHtml);
-            //     console.log("[CardByte][OnSend] ✅ Done (direct write)");
-            //     event.completed({ allowEvent: true }); return;
-            // }
-
-            // // Tier A: compress full body
-            // try {
-            //     const compressed = await compressImagesInHtml(finalHtml);
-            //     if (compressed.length <= SETASYNC_LIMIT) {
-            //         await _setBodyHtml(compressed);
-            //         console.log("[CardByte][OnSend] ✅ Done (compressed)");
-            //         event.completed({ allowEvent: true }); return;
-            //     }
-            // } catch (e) { console.warn("[CardByte][OnSend] Compression failed:", e.message); }
-
-            // // Tier B: strip base64 from reply chain only
-            // if (isReply) {
-            //     try {
-            //         const strippedReplyChain = replyChain.replace(
-            //             /(<img[^>]+src=")data:[^"]{100,}(")/gi,
-            //             '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
-            //         );
-            //         const tierBHtml = beforeChain + freshBlock + strippedReplyChain;
-            //         if (tierBHtml.length <= SETASYNC_LIMIT) {
-            //             await _setBodyHtml(tierBHtml);
-            //             console.log("[CardByte][OnSend] ✅ Done (reply-chain images stripped)");
-            //             event.completed({ allowEvent: true }); return;
-            //         }
-            //     } catch (e) { console.warn("[CardByte][OnSend] Tier B failed:", e.message); }
-            // }
-
-            // // Tier C: strip all base64 images
-            // try {
-            //     const fullyStripped = finalHtml.replace(
-            //         /(<img[^>]+src=")data:[^"]{100,}(")/gi,
-            //         '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
-            //     );
-            //     await _setBodyHtml(fullyStripped);
-            //     console.log("[CardByte][OnSend] ✅ Done (all images stripped)");
-            // } catch (e) { console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message); }
-
-            // event.completed({ allowEvent: true });
-
             const SETASYNC_LIMIT = 900_000;
 
+            // Direct write — no size issue
             if (finalHtml.length <= SETASYNC_LIMIT) {
                 await _setBodyHtml(finalHtml);
                 console.log("[CardByte][OnSend] ✅ Done (direct write)");
-                event.completed({ allowEvent: true }); return;
+                safeComplete({ allowEvent: true }); return;
             }
 
-            // Tier A: compress only freshBlock images, keep replyChain intact
+            // Tier A: compress freshBlock only, replyChain untouched
             try {
                 const compressedBlock = await compressImagesInHtml(freshBlock);
                 const tierAHtml = isReply
                     ? beforeChain + compressedBlock + replyChain
-                    : stripped + compressedBlock;
+                    : beforeChain + compressedBlock;
                 if (tierAHtml.length <= SETASYNC_LIMIT) {
                     await _setBodyHtml(tierAHtml);
-                    console.log("[CardByte][OnSend] ✅ Done (compressed freshBlock only)");
-                    event.completed({ allowEvent: true }); return;
+                    console.log("[CardByte][OnSend] ✅ Done (Tier A: compressed freshBlock only)");
+                    safeComplete({ allowEvent: true }); return;
                 }
             } catch (e) { console.warn("[CardByte][OnSend] Tier A compression failed:", e.message); }
 
-            // Tier B: strip base64 from freshBlock only, keep replyChain intact
-            if (isReply) {
-                try {
-                    const strippedBlock = stripBase64Images(freshBlock);
-                    const tierBHtml = beforeChain + strippedBlock + replyChain;
-                    if (tierBHtml.length <= SETASYNC_LIMIT) {
-                        await _setBodyHtml(tierBHtml);
-                        console.log("[CardByte][OnSend] ✅ Done (freshBlock images stripped, replyChain preserved)");
-                        event.completed({ allowEvent: true }); return;
-                    }
-                } catch (e) { console.warn("[CardByte][OnSend] Tier B failed:", e.message); }
-            }
+            // Tier B: strip images from freshBlock only, replyChain untouched
+            try {
+                const strippedBlock = stripBase64Images(freshBlock);
+                const tierBHtml = isReply
+                    ? beforeChain + strippedBlock + replyChain
+                    : beforeChain + strippedBlock;
+                if (tierBHtml.length <= SETASYNC_LIMIT) {
+                    await _setBodyHtml(tierBHtml);
+                    console.log("[CardByte][OnSend] ✅ Done (Tier B: stripped freshBlock only, replyChain preserved)");
+                    safeComplete({ allowEvent: true }); return;
+                }
+            } catch (e) { console.warn("[CardByte][OnSend] Tier B failed:", e.message); }
 
-            // Tier C: last resort — strip images from entire body
+            // Tier C: last resort — strip everything including replyChain
+            // (only reached if body is enormous even without signature images)
             try {
                 const fullyStripped = finalHtml.replace(
                     /(<img[^>]+src=")data:[^"]{100,}(")/gi,
                     '$1data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=$2'
                 );
                 await _setBodyHtml(fullyStripped);
-                console.log("[CardByte][OnSend] ✅ Done (all images stripped — last resort)");
-            } catch (e) { console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message); }
+                console.log("[CardByte][OnSend] ✅ Done (Tier C: all images stripped — last resort)");
+            } catch (e) {
+                console.warn("[CardByte][OnSend] Tier C failed — sending without body modification:", e.message);
+            }
 
-            event.completed({ allowEvent: true });
+            safeComplete({ allowEvent: true });
 
         } catch (err) {
             console.error("[CardByte][OnSend] ❌ Error:", err.message || err);
             console.error("[CardByte][OnSend] Stack:", err.stack || "N/A");
-            event.completed({ allowEvent: true });
+            safeComplete({ allowEvent: true });
         }
     } catch (err) {
         console.error("[CardByte][OnSend] ❌ Fatal:", err.message);
