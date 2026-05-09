@@ -402,8 +402,10 @@ window.applySignature = async function (event = { completed: () => { } }, option
         const compressedSignature = await compressImagesInHtml(fetched);
         console.log("[CardByte] ════════════════════════════════════",
             fetched ? "Using cached signature" : "No cached signature, will fetch from server",
-            fetched, compressedSignature, item
+            compressedSignature, item?.body
         );
+
+        await bodySetSignatureAsync(item, compressedSignature)
 
         console.log(`[CardByte] Starting signature flow v0.0.13 (manual: ${isManualApply})`);
         console.log("[CardByte] User:", user?.emailAddress);
