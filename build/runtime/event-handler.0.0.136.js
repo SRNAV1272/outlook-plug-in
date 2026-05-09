@@ -396,51 +396,14 @@ window.applySignature = async function (event = { completed: () => { } }, option
 };
 
 window.onSendHandler = function onSendHandler(event) {
-    var platform = "";
-    try { platform = (Office && Office.context && Office.context.platform) || ""; } catch (e) { }
-
-    // Complete synchronously on Desktop Classic — three checks for maximum reliability:
-    // 1. platform === "PC"  → Office.context.platform raw value for Windows Desktop
-    // 2. platform === ""    → fallback if Office.context.platform is unavailable
-    // 3. detectPlatform() === "desktop" → our own detection using platform + userAgent
-    // Any one of these being true means we are on Desktop Classic.
-    // VSTO handles tamper detection here — JS must not block the send.
-    var isDesktop = (platform === "PC" || platform === "" || detectPlatform() === "desktop");
-    console.log("[CardByte] onSendHandler: platform=" + platform + " isDesktop=" + isDesktop);
-
-    if (isDesktop) {
-        try { event.completed({ allowEvent: true }); } catch (e) { }
-        return;
+    // Always allow send immediately — synchronous, no async operations, no timer.
+    // On Desktop Classic: VSTO (ItemSend) handles tamper detection.
+    // On Web / Mac: signature was already set at compose time via applySignature.
+    // Keeping this synchronous guarantees the "taking longer" popup can never appear
+    // on any platform, regardless of what Office.context.platform reports.
+    try { event.completed({ allowEvent: true }); } catch (e) {
+        try { event.completed(); } catch (e2) { }
     }
-
-    // Web / Mac / Mobile — async tamper detection with safety timer.
-    var done = false;
-    function safeComplete() {
-        if (!done) {
-            done = true;
-            try { event.completed({ allowEvent: true }); } catch (e) { }
-        }
-    }
-
-    // Safety timer: always fires within 4 s no matter what, so the popup can never appear.
-    var safetyTimer = setTimeout(function () {
-        console.warn("[CardByte] onSendHandler: 4 s safety timeout — allowing send");
-        safeComplete();
-    }, 4000);
-
-    (async function () {
-        try {
-            const mailbox = Office?.context?.mailbox;
-            const item = mailbox?.item;
-            if (item) {
-                await _applySignatureCore(item, mailbox, { fetchIfMissing: false });
-            }
-        } catch (err) {
-            console.error("[CardByte] Error in onSendHandler:", err);
-        }
-        clearTimeout(safetyTimer);
-        safeComplete();
-    })();
 };
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
