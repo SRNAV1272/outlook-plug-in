@@ -358,6 +358,18 @@ function bodySetSignatureAsync(item, html) {
 /* ---------------------------------------------------------
    AUTO-RUN ENTRY POINT
    --------------------------------------------------------- */
+function moveCursorToTop(item) {
+    return new Promise((resolve) => {
+        try {
+            if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
+            // prependAsync with empty text moves the insertion point to before all content
+            item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
+                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
+                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+            });
+        } catch { resolve(); }
+    });
+}
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
     const mailbox = Office?.context?.mailbox;
@@ -399,7 +411,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
         );
 
         await bodySetSignatureAsync(item, compressedSignature)
-
+        await moveCursorToTop(item);
         console.log("[CardByte] User:", user?.emailAddress);
         console.log("[CardByte] Platform:", platform);
         console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
