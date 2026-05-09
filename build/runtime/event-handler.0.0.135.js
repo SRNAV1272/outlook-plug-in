@@ -399,9 +399,16 @@ window.onSendHandler = function onSendHandler(event) {
     var platform = "";
     try { platform = (Office && Office.context && Office.context.platform) || ""; } catch (e) { }
 
-    if (platform === "PC" || platform === "") {
-        // Windows Desktop Classic — synchronous completion, zero popup risk.
-        // VSTO add-in handles tamper detection on Desktop Classic.
+    // Complete synchronously on Desktop Classic — three checks for maximum reliability:
+    // 1. platform === "PC"  → Office.context.platform raw value for Windows Desktop
+    // 2. platform === ""    → fallback if Office.context.platform is unavailable
+    // 3. detectPlatform() === "desktop" → our own detection using platform + userAgent
+    // Any one of these being true means we are on Desktop Classic.
+    // VSTO handles tamper detection here — JS must not block the send.
+    var isDesktop = (platform === "PC" || platform === "" || detectPlatform() === "desktop");
+    console.log("[CardByte] onSendHandler: platform=" + platform + " isDesktop=" + isDesktop);
+
+    if (isDesktop) {
         try { event.completed({ allowEvent: true }); } catch (e) { }
         return;
     }
