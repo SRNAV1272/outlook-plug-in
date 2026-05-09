@@ -1409,6 +1409,60 @@ async function ensureNoDefaultSignature(item) {
    --------------------------------------------------------- */
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
+    // ── VSTO GUARD ───────────────────────────────────────────────────────────
+    // On Desktop Classic Outlook, the VSTO add-in owns signature insertion
+    // and ItemSend tamper detection. The XML manifest is centrally deployed
+    // and cannot be scoped to exclude Desktop Classic — so we always bail out
+    // here immediately to prevent double-insertion and popup conflicts.
+    //
+    // detectPlatform() === "desktop" when Office.context.platform === "PC"
+    // (Classic Outlook on Windows). event.completed() is called synchronously
+    // before any async work so there is zero popup risk from this handler.
+    //
+    // A background diagnostic check fires after 3 s and logs a console warning
+    // if VSTO's signature div (cardbyte-signature-container) is absent — this
+    // helps IT admins detect machines where VSTO failed to load.
+    // Registry key: HKCU\Software\CardByte\VSTOActive (written by VSTO on
+    // startup, deleted on shutdown) is the primary admin diagnostic tool.
+    // ────────────────────────────────────────────────────────────────────────
+    if (detectPlatform() === "desktop") {
+        // Desktop Classic Outlook: VSTO add-in owns signature insertion and
+        // ItemSend tamper detection. Always bail out immediately to prevent
+        // double-insertion regardless of VSTO timing.
+        //
+        // WHY NOT a conditional fallback:
+        //   VSTO has a 400 ms delay PLUS an API call (300 ms – 3000 ms).
+        //   Any fixed wait (e.g. 900 ms) risks JS inserting while VSTO is
+        //   still mid-API-call, then VSTO inserting too → double signature.
+        //
+        // SAFEGUARD — background diagnostic only (fire-and-forget):
+        //   After 3 s, check if VSTO actually inserted. If not, log a
+        //   warning so IT admins can investigate via console/logging tools.
+        //   The registry key HKCU\Software\CardByte\VSTOActive written by
+        //   VSTO on startup is the primary admin diagnostic tool.
+        //   This check does NOT affect the bail-out; event.completed() is
+        //   already called below before the async check even starts.
+        console.log("[CardByte] Desktop Classic — VSTO owns this client. JS add-in standing down.");
+        try { event.completed(); } catch (e) {}
+
+        // Background diagnostic check (does not block or affect the event)
+        (async () => {
+            try {
+                await new Promise(r => setTimeout(r, 3000));
+                const diagBody = await getBodyHtml(Office.context.mailbox.item);
+                if (diagBody.toLowerCase().includes("cardbyte-signature-container")) {
+                    console.log("[CardByte] Diagnostic: VSTO signature confirmed present ✓");
+                } else {
+                    console.warn("[CardByte] Diagnostic WARNING: VSTO signature not found after 3 s. " +
+                        "Check HKCU\\Software\\CardByte\\VSTOActive registry key. " +
+                        "VSTO add-in may not be installed or failed to load on this machine.");
+                }
+            } catch (e) { /* diagnostic only — ignore errors */ }
+        })();
+
+        return;
+    }
+
     const isManualApply = options?.forceApply === true;
 
     const mailbox = Office?.context?.mailbox;
