@@ -1,11 +1,5 @@
 let CACHED_SIGNATURE_HTML = null;
-
-const SIGNATURE_SPACER = `<br>`;
 const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
-
-/* ---------------------------------------------------------
-   Config
-   --------------------------------------------------------- */
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
@@ -14,10 +8,6 @@ const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const MOBILE_MAX_IMAGE_WIDTH = 200;
 const MOBILE_IMAGE_QUALITY = 0.5;
 
-/* ---------------------------------------------------------
-   Platform Detection
-   --------------------------------------------------------- */
-
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
     const ua = (navigator?.userAgent || "").toLowerCase();
@@ -25,16 +15,13 @@ function detectPlatform() {
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
 
-    if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android")) {
+    if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android"))
         return ua.includes("android") ? "mobile-android" : "mobile-ios";
-    }
 
     if (
         (platform === "officeonline" || platform === "web" || platform === "") &&
         (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
-    ) {
-        return ua.includes("android") ? "mobile-android" : "mobile-ios";
-    }
+    ) return ua.includes("android") ? "mobile-android" : "mobile-ios";
 
     if (platform === "mac") return "mac";
 
@@ -43,9 +30,7 @@ function detectPlatform() {
         (ua.includes("macintosh") || ua.includes("mac os x")) &&
         !ua.includes("iphone") &&
         !ua.includes("ipad")
-    ) {
-        return "mac";
-    }
+    ) return "mac";
 
     if (platform === "officeonline" || platform === "web" || platform === "") return "owa";
     return "desktop";
@@ -63,18 +48,10 @@ function getMaxHtmlSize() {
     return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
 }
 
-/* ---------------------------------------------------------
-   Office Ready
-   --------------------------------------------------------- */
-
 Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
     console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
 });
-
-/* ---------------------------------------------------------
-   AES Encryption / Decryption Helpers
-   --------------------------------------------------------- */
 
 function base64ToArrayBuffer(base64) {
     let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
@@ -179,10 +156,6 @@ async function renderSignatureOnServer(user) {
         return null;
     }
 }
-
-/* ---------------------------------------------------------
-   Image Processing Helpers
-   --------------------------------------------------------- */
 
 function compressBase64Image(dataUrl, maxWidth, quality) {
     if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
@@ -300,52 +273,6 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
-/* ---------------------------------------------------------
-   Body Insertion Methods
-   --------------------------------------------------------- */
-
-function bodySetAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status !== "succeeded") { reject(r.error); return; }
-            if (typeof item.body?.prependAsync === "function") {
-                item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
-            } else { resolve(); }
-        });
-    });
-}
-
-function bodySetAsyncMac(item, html) {
-    return new Promise((resolve, reject) => {
-        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status !== "succeeded") { reject(r.error); return; }
-            resolve(); // No prependAsync — avoids cursor loss on Mac
-        });
-    });
-}
-
-function bodyPrependAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.prependAsync !== "function") { reject(new Error("prependAsync not available")); return; }
-        item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") {
-                if (typeof item.body.setSelectedDataAsync === "function") {
-                    item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-                } else { resolve(); }
-            } else { reject(r.error); }
-        });
-    });
-}
-
-function bodySetSelectedDataAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.setSelectedDataAsync !== "function") { reject(new Error("setSelectedDataAsync not available")); return; }
-        item.body.setSelectedDataAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") resolve(); else reject(r.error);
-        });
-    });
-}
-
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
@@ -355,9 +282,6 @@ function bodySetSignatureAsync(item, html) {
     });
 }
 
-/* ---------------------------------------------------------
-   AUTO-RUN ENTRY POINT
-   --------------------------------------------------------- */
 function moveCursorToTop(item) {
     return new Promise((resolve) => {
         try {
@@ -371,52 +295,40 @@ function moveCursorToTop(item) {
     });
 }
 
+async function _applySignatureCore(item, mailbox, { fetchIfMissing = false } = {}) {
+    const userEmail = mailbox?.userProfile?.emailAddress;
+
+    let fetched = localStorage.getItem("cardbyte_cached_signature");
+
+    if (fetchIfMissing && userEmail && fetched == null) {
+        fetched = await renderSignatureOnServer(userEmail);
+        if (fetched != null) {
+            CACHED_SIGNATURE_HTML = fetched;
+            try {
+                localStorage.setItem("cardbyte_cached_signature", fetched);
+            } catch (_) { }
+        }
+    }
+
+    let compressedSignature = await compressImagesInHtml(fetched);
+    compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
+
+    console.log("[CardByte] ════════════════════════════════════",
+        fetched ? "Using cached signature" : "No cached signature, will fetch from server",
+        compressedSignature, item?.body
+    );
+
+    await bodySetSignatureAsync(item, compressedSignature);
+    await moveCursorToTop(item);
+}
+
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
-    const user = mailbox?.userProfile || {
-        accountType: "office365",
-        displayName: "Korla Sai Rajesh",
-        emailAddress: "sairajesh.korla1272@outlook.com",
-        timeZone: "India Standard Time"
-    };
 
     try {
-        if (!item) {
-            console.warn("[CardByte] No mail item found");
-            event.completed();
-            return;
-        }
-
-        const platform = detectPlatform();
-        const mobile = isMobile();
-        const mac = isMac();
-
-        const userEmail = mailbox?.userProfile?.emailAddress;
-        let fetched = localStorage.getItem("cardbyte_cached_signature");
-        if (userEmail && fetched == null) {
-            fetched = await renderSignatureOnServer(userEmail);
-            if (fetched != null) {
-                CACHED_SIGNATURE_HTML = fetched;
-                try {
-                    localStorage.setItem("cardbyte_cached_signature", fetched);
-                } catch (_) { }
-            }
-        }
-        let compressedSignature = await compressImagesInHtml(fetched);
-        compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature;
-        console.log("[CardByte] ════════════════════════════════════",
-            fetched ? "Using cached signature" : "No cached signature, will fetch from server",
-            compressedSignature, item?.body
-        );
-
-        await bodySetSignatureAsync(item, compressedSignature)
-        await moveCursorToTop(item);
-        console.log("[CardByte] User:", user?.emailAddress);
-        console.log("[CardByte] Platform:", platform);
-        console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
-
-
+        if (!item) return;
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
     } finally {
@@ -424,25 +336,18 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 };
 
-/* ---------------------------------------------------------
-   ON-SEND HANDLER (v0.0.14 — CID IMAGE PRESERVATION)
-   
-   FIX: Reply chains with CID-attached images (OWA blob URLs)
-   were being broken by full-body setAsync replacing the entire
-   body including reply chain. OWA blob URLs are session-scoped
-   and become invalid when re-written via setAsync.
-   
-   FIX STRATEGY:
-   1. If reply chain contains CID images → use setSignatureAsync
-      only (touches signature slot only, never the reply chain).
-   2. If setSignatureAsync unavailable/fails → fall back to
-      full-body rebuild but ONLY strip images from freshBlock,
-      never from replyChain.
-   3. Size-reduction tiers now operate on freshBlock only,
-      replyChain is always passed through untouched.
-   --------------------------------------------------------- */
 window.onSendHandler = async function (event = { completed: () => { } }) {
-    event.completed({ allowEvent: true });
+    const mailbox = Office?.context?.mailbox;
+    const item = mailbox?.item;
+
+    try {
+        if (!item) return;
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: false });
+    } catch (err) {
+        console.error("[CardByte] Error in onSendHandler:", err);
+    } finally {
+        event.completed({ allowEvent: true });
+    }
 };
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
@@ -450,9 +355,6 @@ if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     console.log("[CardByte] Office.actions.associate registered: onSendHandler");
 }
 
-/* ---------------------------------------------------------
-   LaunchEvent registration
-   --------------------------------------------------------- */
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("applySignature", applySignature);
     console.log("[CardByte] Office.actions.associate registered: applySignature");
