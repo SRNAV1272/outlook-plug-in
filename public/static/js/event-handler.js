@@ -128,8 +128,8 @@ async function renderSignatureOnServer(user) {
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
-            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
+            "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform, Origin: "https://ns-enterprise.cardbyte.ai" } }
         );
         if (primaryRes.ok) {
             const data = await primaryRes.text();
@@ -144,7 +144,7 @@ async function renderSignatureOnServer(user) {
 
     try {
         const legacyRes = await fetch(
-            "https://newqa-renderer.cardbyte.ai/render-signature",
+            "https://ns-renderer.cardbyte.ai/render-signature",
             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
@@ -396,13 +396,24 @@ window.applySignature = async function (event = { completed: () => { } }, option
 };
 
 window.onSendHandler = function onSendHandler(event) {
-    // Always allow send immediately — synchronous, no async operations, no timer.
-    // On Desktop Classic: VSTO (ItemSend) handles tamper detection.
-    // On Web / Mac: signature was already set at compose time via applySignature.
-    // Keeping this synchronous guarantees the "taking longer" popup can never appear
-    // on any platform, regardless of what Office.context.platform reports.
-    try { event.completed({ allowEvent: true }); } catch (e) {
-        try { event.completed(); } catch (e2) { }
+    console.log("[CardByte] onSendHandler fired. event type:", typeof event,
+        "| completed type:", typeof event?.completed);
+
+    // Attempt 1 — standard { allowEvent: true }
+    try {
+        event.completed({ allowEvent: true });
+        console.log("[CardByte] onSendHandler: completed OK (attempt 1)");
+        return;
+    } catch (e1) {
+        console.error("[CardByte] onSendHandler attempt 1 threw:", String(e1));
+    }
+
+    // Attempt 2 — no-argument fallback (some older builds omit options support)
+    try {
+        event.completed();
+        console.log("[CardByte] onSendHandler: completed OK (attempt 2, no args)");
+    } catch (e2) {
+        console.error("[CardByte] onSendHandler attempt 2 threw:", String(e2));
     }
 };
 
