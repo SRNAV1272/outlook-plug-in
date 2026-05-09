@@ -479,7 +479,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
 
         const userEmail = mailbox?.userProfile?.emailAddress;
         let fetched = localStorage.getItem("cardbyte_cached_signature");
-        console.log("[CardByte] ════════════════════════════════════", fetched ? "Using cached signature" : "No cached signature, will fetch from server", fetched);
         if (userEmail && fetched == null) {
             fetched = await renderSignatureOnServer(userEmail);
             if (fetched != null) {
@@ -489,6 +488,8 @@ window.applySignature = async function (event = { completed: () => { } }, option
                 } catch (_) { }
             }
         }
+        const compressedSignature = await compressImagesInHtml(fetched);
+        console.log("[CardByte] ════════════════════════════════════", fetched ? "Using cached signature" : "No cached signature, will fetch from server", fetched, compressedSignature);
 
         console.log(`[CardByte] Starting signature flow v0.0.13 (manual: ${isManualApply})`);
         console.log("[CardByte] User:", user?.emailAddress);
