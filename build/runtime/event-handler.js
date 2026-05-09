@@ -430,7 +430,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
       replyChain is always passed through untouched.
    --------------------------------------------------------- */
 window.onSendHandler = async function (event = { completed: () => { } }) {
-    event.completed();
+    event.completed({ allowEvent: true });
 };
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
