@@ -273,6 +273,40 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
+function getBodyHtml(item) {
+    return new Promise((resolve, reject) => {
+        item.body.getAsync(Office.CoercionType.Html, (r) => {
+            if (r.status === "succeeded") resolve(r.value || "");
+            else reject(r.error);
+        });
+    });
+}
+
+function convertGifToStaticPng(dataUrl, maxWidth) {
+    if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+            try {
+                const canvas = document.createElement("canvas");
+                let width = img.width;
+                let height = img.height;
+                if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext("2d");
+                ctx.clearRect(0, 0, width, height);
+                ctx.drawImage(img, 0, 0, width, height);
+                const result = canvas.toDataURL("image/png");
+                console.log(`[CardByte] GIF->PNG: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
+                resolve(result);
+            } catch (e) { console.warn("[CardByte] GIF->PNG conversion failed:", e); resolve(dataUrl); }
+        };
+        img.onerror = () => resolve(dataUrl);
+        img.src = dataUrl;
+    });
+}
+
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
@@ -308,6 +342,11 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false } = {
                 localStorage.setItem("cardbyte_cached_signature", fetched);
             } catch (_) { }
         }
+    }
+
+    if (!fetched) {
+        console.warn("[CardByte] _applySignatureCore: no signature available — skipping insertion.");
+        return;
     }
 
     let compressedSignature = await compressImagesInHtml(fetched);
@@ -356,37 +395,51 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 };
 
-window.onSendHandler = async function (event = { completed: () => { } }) {
+window.onSendHandler = function onSendHandler(event) {
     var platform = "";
     try { platform = (Office && Office.context && Office.context.platform) || ""; } catch (e) { }
 
     if (platform === "PC" || platform === "") {
-        // Windows Desktop — synchronous completion, zero popup risk.
+        // Windows Desktop Classic — synchronous completion, zero popup risk.
+        // VSTO add-in handles tamper detection on Desktop Classic.
         try { event.completed({ allowEvent: true }); } catch (e) { }
         return;
     }
-    
-    const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
 
-    try {
-        if (!item) return;
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false });
-    } catch (err) {
-        console.error("[CardByte] Error in onSendHandler:", err);
-    } finally {
-        event.completed({ allowEvent: true });
+    // Web / Mac / Mobile — async tamper detection with safety timer.
+    var done = false;
+    function safeComplete() {
+        if (!done) {
+            done = true;
+            try { event.completed({ allowEvent: true }); } catch (e) { }
+        }
     }
+
+    // Safety timer: always fires within 4 s no matter what, so the popup can never appear.
+    var safetyTimer = setTimeout(function () {
+        console.warn("[CardByte] onSendHandler: 4 s safety timeout — allowing send");
+        safeComplete();
+    }, 4000);
+
+    (async function () {
+        try {
+            const mailbox = Office?.context?.mailbox;
+            const item = mailbox?.item;
+            if (item) {
+                await _applySignatureCore(item, mailbox, { fetchIfMissing: false });
+            }
+        } catch (err) {
+            console.error("[CardByte] Error in onSendHandler:", err);
+        }
+        clearTimeout(safetyTimer);
+        safeComplete();
+    })();
 };
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("onSendHandler", onSendHandler);
-    console.log("[CardByte] Office.actions.associate registered: onSendHandler");
-}
-
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("applySignature", applySignature);
-    console.log("[CardByte] Office.actions.associate registered: applySignature");
+    Office.actions.associate("onSendHandler", window.onSendHandler);
+    Office.actions.associate("applySignature", window.applySignature);
+    console.log("[CardByte] Office.actions.associate registered: onSendHandler, applySignature");
 } else {
     console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
 }
