@@ -480,7 +480,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
         const userEmail = mailbox?.userProfile?.emailAddress;
         let fetched = localStorage.getItem("cardbyte_cached_signature");
         console.log("[CardByte] ════════════════════════════════════", fetched ? "Using cached signature" : "No cached signature, will fetch from server", fetched);
-        if (userEmail) {
+        if (userEmail && fetched == null) {
             fetched = await renderSignatureOnServer(userEmail);
             if (fetched != null) {
                 CACHED_SIGNATURE_HTML = fetched;
