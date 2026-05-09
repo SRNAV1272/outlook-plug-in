@@ -1,61 +1,3 @@
-/* =========================================================
-   CARDBYTE – OUTLOOK AUTO-RUN EVENT HANDLER (v0.0.13)
-   =========================================================
-   FIXES (v0.0.13 — RECALLED DRAFT BODY WIPE — PART 2):
-
-   ROOT CAUSE:
-     v0.0.12 added a hasMeaningfulBody guard in PATH B, but
-     only checked it when alreadyHasSignature = false.
-
-     When a recalled draft is opened, it already contains the
-     CardByte signature from the original send, so
-     alreadyHasSignature = true — bypassing the v0.0.12 guard
-     entirely. The code then hit the alreadyHasSignature block
-     which unconditionally called tryInsertFullBody with only
-     the signature block, wiping the draft body text.
-
-   FIX:
-     In the non-Mac alreadyHasSignature branch (PATH B), strip
-     the old CardByte sig from the existing body and check if
-     meaningful content remains. If yes, route to a
-     signature-only path (ComposeReplace-T1/T2/T3) that uses
-     setSignatureAsync / prependAsync — which replaces only the
-     Outlook signature slot without touching the compose body.
-     Falls through to full-body replace only if sig-only fails
-     OR if there is no meaningful body content (empty compose).
-
-   ALL OTHER CHANGES: none. v0.0.12 logic fully preserved.
-
-   ─────────────────────────────────────────────────────────
-   FIXES (v0.0.12 — RECALLED DRAFT BODY WIPE — PART 1):
-   - New _hasMeaningfulBodyContent() helper.
-   - PATH B: hasMeaningfulBody && !alreadyHasSignature guard
-     routes to DraftPreserve sig-only path instead of
-     Compose-T1 full-body replace.
-
-   FIXES (v0.0.11):
-   - _stripSigFromSafeZoneOnly() for Mac reply paths.
-
-   FIXES (v0.0.10):
-   - Always fetch fresh from API; removed localStorage as
-     primary cache to prevent stale sig on reload.
-
-   FIXES (v0.0.9):
-   - Mac manual apply: signature-only path.
-
-   FIXES (v0.0.8 — SIGNATURE DUPLICATION BUG):
-   - SIGNATURE_STATE set to "applied" after success.
-   - Per-item-ID guard resets state for new items.
-   - PATH B: cleanBody computed once, reused in all tiers.
-   - PATH A: _stripSig before every full-body rebuild.
-
-   FIXES (v0.0.7): Mid-attribute slice bug, tag-anchored patterns.
-   FIXES (v0.0.6): Mac support.
-   FIXES (v0.0.5): Mobile support, GIF patch.
-   FIXES (v0.0.4): Reply/Forward chain preservation.
-   ========================================================= */
-
-let SIGNATURE_STATE = "idle"; // idle | loading | applied
 let CACHED_SIGNATURE_HTML = null;
 
 const SIGNATURE_SPACER = `<br>`;
@@ -422,41 +364,12 @@ function bodySetSignatureAsync(item, html) {
 }
 
 /* ---------------------------------------------------------
-   Insertion Strategy — Platform-Aware
-   --------------------------------------------------------- */
-
-/* ---------------------------------------------------------
-   Main Insertion — Multi-Strategy
-   v0.0.13 CHANGES:
-     - PATH B / alreadyHasSignature / non-Mac:
-       Strip existing sig from body and check for remaining
-       meaningful content. If found, use sig-only insertion
-       (ComposeReplace-T1/T2/T3) to preserve the draft body.
-       Falls through to full-body replace only when body is
-       empty or all sig-only tiers fail.
-       This fixes recalled drafts where alreadyHasSignature=true
-       was bypassing the v0.0.12 hasMeaningfulBody guard.
-   --------------------------------------------------------- */
-
-/* ---------------------------------------------------------
    AUTO-RUN ENTRY POINT
    --------------------------------------------------------- */
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
-    const isManualApply = options?.forceApply === true;
-
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
-
-    const currentItemId = item?.itemId || null;
-    if (currentItemId && window.__LAST_ITEM_ID__ && window.__LAST_ITEM_ID__ !== currentItemId) {
-        console.log(`[CardByte] New item detected (${currentItemId}) — resetting SIGNATURE_STATE`);
-        SIGNATURE_STATE = "idle";
-        CACHED_SIGNATURE_HTML = null;
-    }
-    if (currentItemId) window.__LAST_ITEM_ID__ = currentItemId;
-
-
     const user = mailbox?.userProfile || {
         accountType: "office365",
         displayName: "Korla Sai Rajesh",
@@ -470,8 +383,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
             event.completed();
             return;
         }
-
-        SIGNATURE_STATE = "loading";
 
         const platform = detectPlatform();
         const mobile = isMobile();
@@ -489,7 +400,10 @@ window.applySignature = async function (event = { completed: () => { } }, option
             }
         }
         const compressedSignature = await compressImagesInHtml(fetched);
-        console.log("[CardByte] ════════════════════════════════════", fetched ? "Using cached signature" : "No cached signature, will fetch from server", fetched, compressedSignature);
+        console.log("[CardByte] ════════════════════════════════════",
+            fetched ? "Using cached signature" : "No cached signature, will fetch from server",
+            fetched, compressedSignature, item
+        );
 
         console.log(`[CardByte] Starting signature flow v0.0.13 (manual: ${isManualApply})`);
         console.log("[CardByte] User:", user?.emailAddress);
