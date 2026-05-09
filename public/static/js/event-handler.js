@@ -391,7 +391,8 @@ window.applySignature = async function (event = { completed: () => { } }, option
                 } catch (_) { }
             }
         }
-        const compressedSignature = await compressImagesInHtml(fetched);
+        let compressedSignature = await compressImagesInHtml(fetched);
+        compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature;
         console.log("[CardByte] ════════════════════════════════════",
             fetched ? "Using cached signature" : "No cached signature, will fetch from server",
             compressedSignature, item?.body
@@ -399,7 +400,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
 
         await bodySetSignatureAsync(item, compressedSignature)
 
-        console.log(`[CardByte] Starting signature flow v0.0.13 (manual: ${isManualApply})`);
         console.log("[CardByte] User:", user?.emailAddress);
         console.log("[CardByte] Platform:", platform);
         console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
