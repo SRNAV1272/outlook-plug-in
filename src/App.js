@@ -40,6 +40,14 @@ export function detectPlatform() {
   } catch { return "desktop"; }
 }
 
+function isMobile() {
+  const p = detectPlatform();
+  return p === "mobile-ios" || p === "mobile-android";
+}
+
+function isOWA() { return detectPlatform() === "owa"; }
+function isMac() { return detectPlatform() === "mac"; }
+
 export function isMobilePlatform() {
   const p = detectPlatform();
   return p === "mobile-ios" || p === "mobile-android";
@@ -62,53 +70,6 @@ function isAutoApplyContext() {
   try {
     return new URLSearchParams(window.location.search).get("autoApply") === "1";
   } catch { return false; }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MOBILE: wait for the mail item to be fully ready before touching it.
-// On iOS / Android the compose item is sometimes not initialised when the
-// taskpane fires.
-// ─────────────────────────────────────────────────────────────────────────────
-async function waitForItemReady(item, maxRetries = 6, delayMs = 500) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      await new Promise((resolve, reject) => {
-        item.body.getAsync(Office.CoercionType.Html, (r) => {
-          if (r.status === "succeeded") resolve(); else reject(r.error);
-        });
-      });
-      console.log(`[CardByte] Item ready after ${i + 1} attempt(s)`);
-      return true;
-    } catch (e) {
-      console.warn(`[CardByte] Item not ready (${i + 1}/${maxRetries}): ${e?.message || e}`);
-      if (i < maxRetries - 1) await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  console.error("[CardByte] Item never became ready");
-  return false;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MOBILE HTML SIMPLIFICATION
-// Strips CSS links, <style> blocks and MSO conditionals that mobile Outlook
-// ignores — inline styles are far more reliable on mobile.
-// ─────────────────────────────────────────────────────────────────────────────
-function simplifyHtmlForMobile(html) {
-  return html
-    .replace(/<link[^>]*rel="stylesheet"[^>]*>/gi, "")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<!--\[if[^>]*>[\s\S]*?<!\[endif\]-->/gi, "")
-    .replace(/(<table[^>]*?)width\s*=\s*"?\d+"?/gi, '$1width="100%" style="max-width:100%;"');
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// OUTLOOK WRAPPER — simpler markup for mobile (MSO styles break on iOS/Android)
-// ─────────────────────────────────────────────────────────────────────────────
-function wrapForOutlook(innerHtml) {
-  if (isMobilePlatform()) {
-    return `<div style="font-family:Arial,sans-serif;font-size:14px;"><table cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:100%;"><tbody><tr><td style="padding:0;margin:0;">${innerHtml}</td></tr></tbody></table></div>`;
-  }
-  return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;mso-line-height-rule:exactly;"><table cellpadding="0" cellspacing="0" border="0" style="font-family:inherit;font-size:inherit;color:inherit;"><tbody><tr><td style="padding:0;margin:0;">${innerHtml}</td></tr></tbody></table></div>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,129 +105,12 @@ export default function App({ user }) {
 
   /* ── Outlook body helpers ────────────────────────────────── */
 
-  function getBodyHtml(item) {
-    return new Promise((res, rej) => {
-      item.body.getAsync(Office.CoercionType.Html, (r) =>
-        r.status === "succeeded" ? res(r.value || "") : rej(r.error));
-    });
-  }
-  function bodySetAsync(item, html) {
-    return new Promise((res, rej) => {
-      item.body.setAsync(html, { coercionType: Office.CoercionType.Html },
-        (r) => r.status === "succeeded" ? res() : rej(r.error));
-    });
-  }
-  function bodyPrependAsync(item, html) {
-    return new Promise((res, rej) => {
-      if (typeof item.body.prependAsync !== "function") { rej(new Error("prependAsync not available")); return; }
-      item.body.prependAsync(html, { coercionType: Office.CoercionType.Html },
-        (r) => r.status === "succeeded" ? res() : rej(r.error));
-    });
-  }
-  function bodySetSelectedDataAsync(item, html) {
-    return new Promise((res, rej) => {
-      if (typeof item.body.setSelectedDataAsync !== "function") { rej(new Error("setSelectedDataAsync not available")); return; }
-      item.body.setSelectedDataAsync(html, { coercionType: Office.CoercionType.Html },
-        (r) => r.status === "succeeded" ? res() : rej(r.error));
-    });
-  }
   function bodySetSignatureAsync(item, html) {
     return new Promise((res, rej) => {
       if (typeof item.body.setSignatureAsync !== "function") { rej(new Error("setSignatureAsync not available")); return; }
       item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html },
         (r) => r.status === "succeeded" ? res() : rej(r.error));
     });
-  }
-
-  /* ── Detection helpers ───────────────────────────────────── */
-
-  function hasCardByteSignature(html) {
-    return html.includes("CARD_BYTE_SIGNATURE_START") ||
-      html.includes("CARDBYTE_SIGNATURE") ||
-      html.includes("CB_SIG_START");
-  }
-  function containsGifImages(html) { return /data:image\/gif;base64,/i.test(html); }
-  function detectReplyChain(html) {
-    return [/divRplyFwdMsg/i, /appendonsend/i, /OriginalMessage/i, /<blockquote/i,
-      /x_divRplyFwdMsg/i, /class="?OutlookMessageHeader"?/i,
-      /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i].some(p => p.test(html));
-  }
-
-  /* ── Default signature detection / strip ────────────────── */
-
-  function looksLikeDefaultSignature(html) {
-    return [/class="?MsoNormal"?/i, /<meta name="Generator" content="Microsoft/i,
-      /id="?Signature"?/i, /id="?ms-outlook-mobile-signature"?/i,
-      /class="?OutlookMessageHeader"?/i, /--\s*<br\s*\/?>/i, /^--\s*$/m,
-      /Sent from (my )?(iPhone|iPad|Galaxy|Samsung|Android|Outlook|Mail)/i,
-      /Get Outlook for (iOS|Android)/i, /Sent from Yahoo Mail/i,
-      /Sent via the Samsung/i, /class="?gmail_signature"?/i,
-      /class="?AppleMailSignature"?/i, /class="?moz-signature"?/i,
-    ].some(p => p.test(html));
-  }
-
-  function stripDefaultSignature(html) {
-    const containerPatterns = [
-      /<div[^>]*id="?ms-outlook-mobile-signature"?[^>]*>[\s\S]*?<\/div>/gi,
-      /<div[^>]*class="?gmail_signature"?[^>]*>[\s\S]*?<\/div>/gi,
-      /<div[^>]*class="?AppleMailSignature"?[^>]*>[\s\S]*?<\/div>/gi,
-      /<div[^>]*class="?moz-signature"?[^>]*>[\s\S]*?<\/div>/gi,
-      /<div[^>]*id="?Signature"?[^>]*>[\s\S]*?<\/div>/gi,
-      /<div[^>]*>.*?Get Outlook for (iOS|Android).*?<\/div>/gi,
-    ];
-    let cleaned = html;
-    for (const p of containerPatterns) cleaned = cleaned.replace(p, "");
-    if (cleaned.length < html.length) return cleaned.trim();
-
-    for (const p of [/--\s*<br\s*\/?>/i,
-      /Sent from (my )?(iPhone|iPad|Galaxy|Samsung|Android|Outlook|Mail)/i,
-      /Get Outlook for (iOS|Android)/i, /Sent from Yahoo Mail/i, /Sent via the Samsung/i]) {
-      const idx = cleaned.search(p);
-      if (idx > -1) return cleaned.slice(0, idx).trim();
-    }
-    if (cleaned.replace(/<[^>]*>/g, "").trim().length < 200) {
-      const msoIdx = cleaned.search(/<div[^>]*class="?MsoNormal"?/i);
-      if (msoIdx > -1) return cleaned.slice(0, msoIdx).trim();
-    }
-    return cleaned;
-  }
-
-  async function disableClientSignature(item) {
-    // These APIs do not exist on mobile Outlook
-    if (mobile) { console.log("[CardByte] Mobile: skipping disableClientSignature (unsupported)"); return false; }
-    try {
-      if (typeof item.body?.setSignatureAsync === "function") {
-        await new Promise((res, rej) => {
-          item.body.setSignatureAsync("", { coercionType: Office.CoercionType.Html },
-            (r) => r.status === "succeeded" ? res() : rej(r.error));
-        });
-        console.log("[CardByte] ✅ Cleared client signature slot");
-        return true;
-      }
-    } catch (e) { console.warn("[CardByte] setSignatureAsync clear failed:", e.message); }
-    try {
-      if (typeof item.disableClientSignatureAsync === "function") {
-        await new Promise((res, rej) => {
-          item.disableClientSignatureAsync((r) => r.status === "succeeded" ? res() : rej(r.error));
-        });
-        console.log("[CardByte] ✅ Disabled client signature");
-        return true;
-      }
-    } catch (e) { console.warn("[CardByte] disableClientSignatureAsync failed:", e.message); }
-    return false;
-  }
-
-  async function ensureNoDefaultSignature(item) {
-    try {
-      await disableClientSignature(item);
-      const html = await getBodyHtml(item);
-      if (hasCardByteSignature(html) || detectReplyChain(html)) return false;
-      if (looksLikeDefaultSignature(html)) {
-        const cleaned = stripDefaultSignature(html);
-        if (cleaned.length < html.length) { await bodySetAsync(item, cleaned); return true; }
-      }
-      return false;
-    } catch (e) { console.warn("[CardByte] ensureNoDefaultSignature (non-fatal):", e.message); return false; }
   }
 
   /* ── Image processing — mobile-aware ────────────────────── */
@@ -356,66 +200,6 @@ export default function App({ user }) {
     return result;
   }
 
-  function extractBase64Images(html) {
-    const images = []; let index = 0;
-    const cleanedHtml = html.replace(
-      /src\s*=\s*"data:(image\/([^;]+));base64,([^"]+)"/gi,
-      (_m, mimeType, extension, base64Data) => {
-        const cid = `cardbyte_img_${index}`;
-        images.push({ cid, fileName: `${cid}.${extension.replace(/[^a-z0-9]/gi, "") || "png"}`, mimeType, base64Data });
-        index++;
-        return `src="cid:${cid}"`;
-      }
-    );
-    return { cleanedHtml, images };
-  }
-
-  function stripBase64Images(html) {
-    return html.replace(/<img[^>]*src\s*=\s*"data:image\/[^"]*"[^>]*\/?>/gi,
-      '<span style="color:#999;font-size:11px;">[image]</span>');
-  }
-
-  function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
-    return new Promise((res, rej) => {
-      if (typeof item.addFileAttachmentFromBase64Async !== "function") { res(false); return; }
-      item.addFileAttachmentFromBase64Async(base64Data, fileName, { isInline: true, contentId: cid },
-        (r) => r.status === Office.AsyncResultStatus.Succeeded ? res(true) : rej(r.error));
-    });
-  }
-
-  /* ── Tiered insertion methods — platform-aware ───────────── */
-
-  /**
-   * Signature-only (does NOT touch existing body content).
-   *
-   * MOBILE:  setSignatureAsync unavailable → prependAsync only.
-   * DESKTOP: setSignatureAsync preferred, prependAsync as fallback.
-   */
-  async function tryInsertSignatureOnly(item, html, label = "") {
-    let methods;
-    if (mobile) {
-      methods = [{ name: "prependAsync", fn: () => bodyPrependAsync(item, html) }];
-      if (typeof item.body?.setSignatureAsync === "function")
-        methods.push({ name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) });
-    } else if (isOWAPlatform() && containsGifImages(html)) {
-      methods = [
-        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
-        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
-      ];
-    } else {
-      methods = [
-        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
-        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
-      ];
-    }
-    console.log(`[CardByte] ${label} [${platform}]: ${methods.map(m => m.name).join(" → ")}`);
-    for (const m of methods) {
-      try { await m.fn(); console.log(`[CardByte] ✅ ${m.name} ok`); return { success: true, method: m.name }; }
-      catch (err) { console.warn(`[CardByte] ${m.name} failed: ${err?.message || err?.code}`); }
-    }
-    return { success: false, method: "none" };
-  }
-
   /**
    * Full-body replacement (last resort / mobile default).
    *
@@ -434,194 +218,43 @@ export default function App({ user }) {
       } catch { resolve(); }
     });
   }
-  async function tryInsertFullBody(item, html, label = "") {
-    let methods;
-    if (mobile) {
-      methods = [
-        { name: "setAsync", fn: () => bodySetAsync(item, html) },
-        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
-      ];
-    } else if (isOWAPlatform() || containsGifImages(html)) {
-      methods = [
-        { name: "setAsync", fn: () => bodySetAsync(item, html) },
-        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
-        { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
-        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
-      ];
-    } else {
-      methods = [
-        { name: "setSignatureAsync", fn: () => bodySetSignatureAsync(item, html) },
-        { name: "setAsync", fn: () => bodySetAsync(item, html) },
-        { name: "prependAsync", fn: () => bodyPrependAsync(item, html) },
-        { name: "setSelectedDataAsync", fn: () => bodySetSelectedDataAsync(item, html) },
-      ];
-    }
-    console.log(`[CardByte] ${label} [${platform}]: ${methods.map(m => m.name).join(" → ")}`);
-    for (const m of methods) {
-      try { await m.fn(); console.log(`[CardByte] ✅ ${m.name} ok`); return { success: true, method: m.name }; }
-      catch (err) { console.warn(`[CardByte] ${m.name} failed: ${err?.message || err?.code}`); }
-    }
-    return { success: false, method: "none" };
-  }
 
   /* ── Main applySignature — all platforms ─────────────────── */
 
   async function applySignature(signature) {
     if (!signature) return;
     if (typeof Office === "undefined") { console.error("Office.js not available"); return; }
-    const item = Office.context?.mailbox?.item;
-    if (!item?.body) { console.error("[CardByte] Not in compose mode"); return; }
-
-    console.log(`[CardByte] ══ applySignature — platform: ${platform} ══`);
-    console.log(`[CardByte] API: setSignatureAsync=${typeof item.body?.setSignatureAsync}, prependAsync=${typeof item.body?.prependAsync}, setAsync=${typeof item.body?.setAsync}`);
+    const mailbox = Office?.context?.mailbox;
+    const item = mailbox?.item;
 
     try {
-      // MOBILE: wait for item to fully initialise before any API calls
-      if (mobile) {
-        const ready = await waitForItemReady(item);
-        if (!ready) throw new Error("Mail item never became ready on mobile");
-      }
-
-      await ensureNoDefaultSignature(item);
-
-      const existingBody = await getBodyHtml(item);
-      if (hasCardByteSignature(existingBody)) {
-        console.log("[CardByte] ✅ Already present — skipping"); return;
-      }
-
-      // MOBILE: simplify + aggressively compress up-front
-      let processed = signature;
-      if (mobile) {
-        console.log("[CardByte] Mobile: pre-processing HTML");
-        processed = simplifyHtmlForMobile(processed);
-        processed = await compressImagesInHtml(processed);
-      }
-
-      const wrapped = wrapForOutlook(processed);
-      const signatureBlock = `<!-- CARD_BYTE_SIGNATURE_START -->${wrapped}<!-- CARD_BYTE_SIGNATURE_END -->`;
-      const isReply = detectReplyChain(existingBody);
-      const alreadyHasSig = hasCardByteSignature(existingBody);
-
-      console.log(`[CardByte] isReply: ${isReply}, alreadyHasSig: ${alreadyHasSig}, size: ${(signatureBlock.length / 1024).toFixed(1)}KB`);
-
-      const variants = await buildSignatureVariants(signatureBlock);
-
-      // ─── PATH A: REPLY / FORWARD ─────────────────────────────
-      if (isReply) {
-        console.log("[CardByte] 📧 Reply/Forward path");
-
-        if (alreadyHasSig) {
-          for (const v of variants) {
-            const updated = existingBody.replace(/<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/, v.html);
-            if ((await tryInsertFullBody(item, updated, `Reply-Replace-${v.label}`)).success) return;
-          }
-        }
-
-        if (mobile) {
-          // Mobile: try signature-only first (prependAsync), then full-body
-          for (const v of variants) {
-            if ((await tryInsertSignatureOnly(item, v.html, `MobileReply-${v.label}`)).success) return;
-          }
-          const r = await tryInsertFullBody(item, buildReplyHtml(existingBody, stripBase64Images(signatureBlock)), "MobileReply-FullBody");
-          if (r.success) return;
-          throw new Error("All mobile reply strategies failed");
-        }
-
-        // Desktop / OWA
-        for (const v of variants) {
-          const r = await tryInsertSignatureOnly(item, v.html, `Reply-${v.label}`);
-          if (r.success) { if (v.images?.length) await attachImages(item, v.images); return; }
-        }
-        await tryInsertFullBody(item, buildReplyHtml(existingBody, stripBase64Images(signatureBlock)), "Reply-LastResort");
+      if (!item) {
+        console.warn("[CardByte] No mail item found");
         return;
       }
 
-      // ─── PATH B: NEW COMPOSE ─────────────────────────────────
-      console.log("[CardByte] ✉️ New compose path");
+      const platform = detectPlatform();
+      const mobile = isMobile();
+      const mac = isMac();
+      let compressedSignature = await compressImagesInHtml(signature);
+      compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature;
+      console.log("[CardByte] ════════════════════════════════════",
+        signature ? "Using provided signature" : "No signature provided",
+        compressedSignature, item?.body
+      );
 
-      if (alreadyHasSig) {
-        for (const v of variants) {
-          const updated = existingBody.replace(/<!-- CARD_BYTE_SIGNATURE_START -->[\s\S]*?<!-- CARD_BYTE_SIGNATURE_END -->/, v.html);
-          if ((await tryInsertFullBody(item, updated, `Compose-Replace-${v.label}`)).success) {
-            await moveCursorToTop(item);   // ← ADD
-            return;
-          };
-        }
-      }
+      await bodySetSignatureAsync(item, compressedSignature)
 
-      if (mobile) {
-        for (const v of variants) {
-          if ((await tryInsertSignatureOnly(item, v.html, `MobileCompose-${v.label}`)).success) {
-            await moveCursorToTop(item);   // ← ADD
-            return;
-          };
-        }
-        const fullHtml = `${existingBody}<br/>${stripBase64Images(signatureBlock)}`;
-        if ((await tryInsertFullBody(item, fullHtml, "MobileCompose-FullBody")).success) {
-          await moveCursorToTop(item);   // ← ADD
-          return;
-        };
-        throw new Error("All mobile compose strategies failed");
-      }
+      console.log("[CardByte] User:", user?.emailAddress);
+      console.log("[CardByte] Platform:", platform);
+      console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
 
-      // Desktop / OWA
-      for (const v of variants) {
-        const r = await tryInsertSignatureOnly(item, v.html, `Compose-${v.label}`);
-        if (r.success) {
-          if (v.images?.length) await attachImages(item, v.images); {
-            await moveCursorToTop(item);   // ← ADD
-            return;
-          };
-        }
-      }
-      await tryInsertFullBody(item, `${existingBody}<br/>${stripBase64Images(signatureBlock)}`, "Compose-LastResort");
-      await moveCursorToTop(item);
 
-    } catch (e) {
-      console.error("[CardByte] applySignature failed:", e);
-      throw e;
+    } catch (err) {
+      console.error("[CardByte] Error in applySignature:", err);
+    } finally {
+      // event.completed();
     }
-  }
-
-  function buildReplyHtml(existingBody, sigBlock) {
-    const markers = [
-      /<div[^>]*id="?divRplyFwdMsg"?/i, /<div[^>]*id="?appendonsend"?/i,
-      /<div[^>]*id="?x_divRplyFwdMsg"?/i,
-      /<hr[^>]*style="[^"]*display\s*:\s*inline-block/i,
-      /<blockquote/i, /<!-- OriginalMessage -->/i,
-    ];
-    let idx = -1;
-    for (const p of markers) { const i = existingBody.search(p); if (i > -1) { idx = i; break; } }
-    return idx > -1
-      ? `${existingBody.slice(0, idx)}${sigBlock}${existingBody.slice(idx)}`
-      : `${existingBody}${sigBlock}`;
-  }
-
-  async function attachImages(item, images) {
-    let attached = 0;
-    for (const img of images) {
-      try { await addInlineImageAttachment(item, img); attached++; }
-      catch { console.warn(`[CardByte] Attach failed: ${img.cid}`); }
-    }
-    console.log(`[CardByte] Attached ${attached}/${images.length} images`);
-  }
-
-  async function buildSignatureVariants(signatureBlock) {
-    const maxSize = getMaxHtmlSize();
-    const variants = [];
-    if (signatureBlock.length <= maxSize)
-      variants.push({ label: "Original", html: signatureBlock, images: null });
-    try {
-      const c = await compressImagesInHtml(signatureBlock);
-      if (c.length <= maxSize) variants.push({ label: "Compressed", html: c, images: null });
-    } catch { /* non-fatal */ }
-    try {
-      const { cleanedHtml, images } = extractBase64Images(signatureBlock);
-      if (images.length) variants.push({ label: "CID", html: cleanedHtml, images });
-    } catch { /* non-fatal */ }
-    variants.push({ label: "Stripped", html: stripBase64Images(signatureBlock), images: null });
-    console.log(`[CardByte] Variants: ${variants.map(v => `${v.label}(${(v.html.length / 1024).toFixed(1)}KB)`).join(", ")}`);
-    return variants;
   }
 
   /* ── Auth / load ─────────────────────────────────────────── */
