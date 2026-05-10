@@ -2,6 +2,41 @@ let CACHED_SIGNATURE_HTML = null;
 const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
+// ─── Session-based cache buster ───────────────────────────────────────────────
+const SESSION_KEY = "cardbyte_session_id";
+const CACHE_KEY = "cardbyte_cached_signature";
+const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
+
+function getOrCreateSessionId() {
+    let sid = sessionStorage.getItem(SESSION_KEY);
+    if (!sid) {
+        sid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36);
+        sessionStorage.setItem(SESSION_KEY, sid);
+    }
+    return sid;
+}
+
+function getCachedSignature() {
+    const currentSid = getOrCreateSessionId();
+    const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
+
+    // Session mismatch → bust the cache
+    if (cachedSid !== currentSid) {
+        console.log("[CardByte] New session detected — clearing cached signature");
+        localStorage.removeItem(CACHE_KEY);
+        localStorage.removeItem(CACHE_SESSION_KEY);
+        return null;
+    }
+    return localStorage.getItem(CACHE_KEY);
+}
+
+function setCachedSignature(html) {
+    const currentSid = getOrCreateSessionId();
+    try {
+        localStorage.setItem(CACHE_KEY, html);
+        localStorage.setItem(CACHE_SESSION_KEY, currentSid);
+    } catch (_) { }
+}
 
 const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
@@ -298,15 +333,15 @@ function moveCursorToTop(item) {
 async function _applySignatureCore(item, mailbox, { fetchIfMissing = false } = {}) {
     const userEmail = mailbox?.userProfile?.emailAddress;
 
-    let fetched = localStorage.getItem("cardbyte_cached_signature");
+    // ↓ use helper instead of localStorage.getItem directly
+    let fetched = getCachedSignature();
 
     if (fetchIfMissing && userEmail && fetched == null) {
         fetched = await renderSignatureOnServer(userEmail);
         if (fetched != null) {
             CACHED_SIGNATURE_HTML = fetched;
-            try {
-                localStorage.setItem("cardbyte_cached_signature", fetched);
-            } catch (_) { }
+            // ↓ use helper instead of localStorage.setItem directly
+            setCachedSignature(fetched);
         }
     }
 
