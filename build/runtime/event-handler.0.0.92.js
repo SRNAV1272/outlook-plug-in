@@ -358,26 +358,26 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false } = {
 }
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
-    if (detectPlatform() === "desktop") {
-        console.log("[CardByte] Desktop Classic — VSTO owns this client. JS add-in standing down.");
-        try { event.completed(); } catch (e) { }
-        // Background diagnostic check (does not block or affect the event)
-        (async () => {
-            try {
-                await new Promise(r => setTimeout(r, 3000));
-                const diagBody = await getBodyHtml(Office.context.mailbox.item);
-                if (diagBody.toLowerCase().includes("cardbyte-signature-container")) {
-                    console.log("[CardByte] Diagnostic: VSTO signature confirmed present ✓");
-                } else {
-                    console.warn("[CardByte] Diagnostic WARNING: VSTO signature not found after 3 s. " +
-                        "Check HKCU\\Software\\CardByte\\VSTOActive registry key. " +
-                        "VSTO add-in may not be installed or failed to load on this machine.");
-                }
-            } catch (e) { /* diagnostic only — ignore errors */ }
-        })();
+    // if (detectPlatform() === "desktop") {
+    //     console.log("[CardByte] Desktop Classic — VSTO owns this client. JS add-in standing down.");
+    //     try { event.completed(); } catch (e) { }
+    //     // Background diagnostic check (does not block or affect the event)
+    //     (async () => {
+    //         try {
+    //             await new Promise(r => setTimeout(r, 3000));
+    //             const diagBody = await getBodyHtml(Office.context.mailbox.item);
+    //             if (diagBody.toLowerCase().includes("cardbyte-signature-container")) {
+    //                 console.log("[CardByte] Diagnostic: VSTO signature confirmed present ✓");
+    //             } else {
+    //                 console.warn("[CardByte] Diagnostic WARNING: VSTO signature not found after 3 s. " +
+    //                     "Check HKCU\\Software\\CardByte\\VSTOActive registry key. " +
+    //                     "VSTO add-in may not be installed or failed to load on this machine.");
+    //             }
+    //         } catch (e) { /* diagnostic only — ignore errors */ }
+    //     })();
 
-        return;
-    }
+    //     return;
+    // }
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
@@ -395,11 +395,11 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     var platform = "";
     try { platform = (Office && Office.context && Office.context.platform) || ""; } catch (e) { }
 
-    if (platform === "PC" || platform === "") {
-        // Windows Desktop — synchronous completion, zero popup risk.
-        try { event.completed({ allowEvent: true }); } catch (e) { }
-        return;
-    }
+    // if (platform === "PC" || platform === "") {
+    //     // Windows Desktop — synchronous completion, zero popup risk.
+    //     try { event.completed({ allowEvent: true }); } catch (e) { }
+    //     return;
+    // }
 
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
