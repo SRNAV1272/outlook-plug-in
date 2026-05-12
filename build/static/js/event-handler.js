@@ -6,6 +6,8 @@ const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
+const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
@@ -25,8 +27,20 @@ function getCachedSignature() {
         console.log("[CardByte] New session detected — clearing cached signature");
         localStorage.removeItem(CACHE_KEY);
         localStorage.removeItem(CACHE_SESSION_KEY);
+        localStorage.removeItem(CACHE_TIMESTAMP_KEY);
         return null;
     }
+
+    // TTL check → bust if stale
+    const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
+    if (Date.now() - ts > CACHE_TTL_MS) {
+        console.log("[CardByte] Cache TTL expired — clearing cached signature");
+        localStorage.removeItem(CACHE_KEY);
+        localStorage.removeItem(CACHE_SESSION_KEY);
+        localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+        return null;
+    }
+
     return localStorage.getItem(CACHE_KEY);
 }
 
@@ -35,6 +49,7 @@ function setCachedSignature(html) {
     try {
         localStorage.setItem(CACHE_KEY, html);
         localStorage.setItem(CACHE_SESSION_KEY, currentSid);
+        localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now().toString());
     } catch (_) { }
 }
 
