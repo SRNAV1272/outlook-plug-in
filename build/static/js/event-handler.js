@@ -18,11 +18,10 @@ function getOrCreateSessionId() {
     return sid;
 }
 
-function getCachedSignature() {
+function getCachedSignature({ skipTtl = false } = {}) {
     const currentSid = getOrCreateSessionId();
     const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
 
-    // Session mismatch → bust the cache
     if (cachedSid !== currentSid) {
         console.log("[CardByte] New session detected — clearing cached signature");
         localStorage.removeItem(CACHE_KEY);
@@ -31,14 +30,15 @@ function getCachedSignature() {
         return null;
     }
 
-    // TTL check → bust if stale
-    const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
-    if (Date.now() - ts > CACHE_TTL_MS) {
-        console.log("[CardByte] Cache TTL expired — clearing cached signature");
-        localStorage.removeItem(CACHE_KEY);
-        localStorage.removeItem(CACHE_SESSION_KEY);
-        localStorage.removeItem(CACHE_TIMESTAMP_KEY);
-        return null;
+    if (!skipTtl) {
+        const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
+        if (Date.now() - ts > CACHE_TTL_MS) {
+            console.log("[CardByte] Cache TTL expired — clearing cached signature");
+            localStorage.removeItem(CACHE_KEY);
+            localStorage.removeItem(CACHE_SESSION_KEY);
+            localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+            return null;
+        }
     }
 
     return localStorage.getItem(CACHE_KEY);
@@ -345,11 +345,11 @@ function moveCursorToTop(item) {
     });
 }
 
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false } = {}) {
+async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false } = {}) {
     const userEmail = mailbox?.userProfile?.emailAddress;
 
     // ↓ use helper instead of localStorage.getItem directly
-    let fetched = getCachedSignature();
+    let fetched = getCachedSignature({ skipTtl });
 
     if (fetchIfMissing && userEmail && fetched == null) {
         fetched = await renderSignatureOnServer(userEmail);
@@ -421,7 +421,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return;
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false });
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true });
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
