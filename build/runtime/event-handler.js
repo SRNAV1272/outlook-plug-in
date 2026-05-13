@@ -6,6 +6,8 @@ const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
+const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
@@ -16,17 +18,29 @@ function getOrCreateSessionId() {
     return sid;
 }
 
-function getCachedSignature() {
+function getCachedSignature({ skipTtl = false } = {}) {
     const currentSid = getOrCreateSessionId();
     const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
 
-    // Session mismatch → bust the cache
     if (cachedSid !== currentSid) {
         console.log("[CardByte] New session detected — clearing cached signature");
         localStorage.removeItem(CACHE_KEY);
         localStorage.removeItem(CACHE_SESSION_KEY);
+        localStorage.removeItem(CACHE_TIMESTAMP_KEY);
         return null;
     }
+
+    if (!skipTtl) {
+        const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
+        if (Date.now() - ts > CACHE_TTL_MS) {
+            console.log("[CardByte] Cache TTL expired — clearing cached signature");
+            localStorage.removeItem(CACHE_KEY);
+            localStorage.removeItem(CACHE_SESSION_KEY);
+            localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+            return null;
+        }
+    }
+
     return localStorage.getItem(CACHE_KEY);
 }
 
@@ -35,6 +49,7 @@ function setCachedSignature(html) {
     try {
         localStorage.setItem(CACHE_KEY, html);
         localStorage.setItem(CACHE_SESSION_KEY, currentSid);
+        localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now().toString());
     } catch (_) { }
 }
 
@@ -330,11 +345,11 @@ function moveCursorToTop(item) {
     });
 }
 
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false } = {}) {
+async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false } = {}) {
     const userEmail = mailbox?.userProfile?.emailAddress;
 
     // ↓ use helper instead of localStorage.getItem directly
-    let fetched = getCachedSignature();
+    let fetched = getCachedSignature({ skipTtl });
 
     if (fetchIfMissing && userEmail && fetched == null) {
         fetched = await renderSignatureOnServer(userEmail);
@@ -354,30 +369,30 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false } = {
     );
 
     await bodySetSignatureAsync(item, compressedSignature);
-    await moveCursorToTop(item);
+    // await moveCursorToTop(item);
 }
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
-    if (detectPlatform() === "desktop") {
-        console.log("[CardByte] Desktop Classic — VSTO owns this client. JS add-in standing down.");
-        try { event.completed(); } catch (e) { }
-        // Background diagnostic check (does not block or affect the event)
-        (async () => {
-            try {
-                await new Promise(r => setTimeout(r, 3000));
-                const diagBody = await getBodyHtml(Office.context.mailbox.item);
-                if (diagBody.toLowerCase().includes("cardbyte-signature-container")) {
-                    console.log("[CardByte] Diagnostic: VSTO signature confirmed present ✓");
-                } else {
-                    console.warn("[CardByte] Diagnostic WARNING: VSTO signature not found after 3 s. " +
-                        "Check HKCU\\Software\\CardByte\\VSTOActive registry key. " +
-                        "VSTO add-in may not be installed or failed to load on this machine.");
-                }
-            } catch (e) { /* diagnostic only — ignore errors */ }
-        })();
+    // if (detectPlatform() === "desktop") {
+    //     console.log("[CardByte] Desktop Classic — VSTO owns this client. JS add-in standing down.");
+    //     try { event.completed(); } catch (e) { }
+    //     // Background diagnostic check (does not block or affect the event)
+    //     (async () => {
+    //         try {
+    //             await new Promise(r => setTimeout(r, 3000));
+    //             const diagBody = await getBodyHtml(Office.context.mailbox.item);
+    //             if (diagBody.toLowerCase().includes("cardbyte-signature-container")) {
+    //                 console.log("[CardByte] Diagnostic: VSTO signature confirmed present ✓");
+    //             } else {
+    //                 console.warn("[CardByte] Diagnostic WARNING: VSTO signature not found after 3 s. " +
+    //                     "Check HKCU\\Software\\CardByte\\VSTOActive registry key. " +
+    //                     "VSTO add-in may not be installed or failed to load on this machine.");
+    //             }
+    //         } catch (e) { /* diagnostic only — ignore errors */ }
+    //     })();
 
-        return;
-    }
+    //     return;
+    // }
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
@@ -395,18 +410,18 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     var platform = "";
     try { platform = (Office && Office.context && Office.context.platform) || ""; } catch (e) { }
 
-    if (platform === "PC" || platform === "") {
-        // Windows Desktop — synchronous completion, zero popup risk.
-        try { event.completed({ allowEvent: true }); } catch (e) { }
-        return;
-    }
+    // if (platform === "PC" || platform === "") {
+    //     // Windows Desktop — synchronous completion, zero popup risk.
+    //     try { event.completed({ allowEvent: true }); } catch (e) { }
+    //     return;
+    // }
 
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
     try {
         if (!item) return;
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false });
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true });
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
