@@ -369,7 +369,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     );
 
     await bodySetSignatureAsync(item, compressedSignature);
-    await moveCursorToTop(item);
+    // await moveCursorToTop(item);
 }
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
