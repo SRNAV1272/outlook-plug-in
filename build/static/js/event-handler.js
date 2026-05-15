@@ -1,7 +1,11 @@
 let CACHED_SIGNATURE_HTML = null;
-const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
+
+// ─── Unified marker (attribute-based — survives Outlook editor round-trips) ───
+const SIGNATURE_MARKER = "data-cardbyte-signature";
+
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
+
 // ─── Session-based cache buster ───────────────────────────────────────────────
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
@@ -9,6 +13,23 @@ const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// ─── Watcher config ───────────────────────────────────────────────────────────
+const WATCHER_CONFIG = {
+    intervalMs: 1500,
+    maxRuntimeMs: 30000,
+    maxInsertAttempts: 5,
+    startupDelayMs: 2000
+};
+
+// ─── Watcher state ────────────────────────────────────────────────────────────
+let watcherInterval = null;
+let watcherStarted = false;
+let insertionInProgress = false;
+let insertAttempts = 0;
+let watcherStartTime = null;
+let lastKnownBodyHash = null;
+
+// ─── Session helpers ──────────────────────────────────────────────────────────
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
     if (!sid) {
@@ -53,6 +74,7 @@ function setCachedSignature(html) {
     } catch (_) { }
 }
 
+// ─── Platform detection ───────────────────────────────────────────────────────
 const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const MOBILE_MAX_IMAGE_WIDTH = 200;
@@ -86,23 +108,12 @@ function detectPlatform() {
     return "desktop";
 }
 
-function isMobile() {
-    const p = detectPlatform();
-    return p === "mobile-ios" || p === "mobile-android";
-}
-
+function isMobile() { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; }
 function isOWA() { return detectPlatform() === "owa"; }
 function isMac() { return detectPlatform() === "mac"; }
+function getMaxHtmlSize() { return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE; }
 
-function getMaxHtmlSize() {
-    return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
-}
-
-Office.onReady(() => {
-    console.log("✅ Office.onReady is Started !");
-    console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
-});
-
+// ─── Crypto helpers ───────────────────────────────────────────────────────────
 function base64ToArrayBuffer(base64) {
     let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
     const padding = base64Data.length % 4;
@@ -171,6 +182,7 @@ async function encryptEmail(email = "") {
     }
 }
 
+// ─── Server fetch ─────────────────────────────────────────────────────────────
 async function renderSignatureOnServer(user) {
     const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
@@ -207,6 +219,7 @@ async function renderSignatureOnServer(user) {
     }
 }
 
+// ─── Image compression ────────────────────────────────────────────────────────
 function compressBase64Image(dataUrl, maxWidth, quality) {
     if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
     if (quality === undefined) quality = isMobile() ? MOBILE_IMAGE_QUALITY : 0.7;
@@ -290,6 +303,7 @@ async function compressImagesInHtml(html) {
     return result;
 }
 
+// ─── Attachment helpers ───────────────────────────────────────────────────────
 function extractBase64Images(html) {
     const images = [];
     let index = 0;
@@ -323,6 +337,7 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
+// ─── Body helpers ─────────────────────────────────────────────────────────────
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
@@ -336,7 +351,6 @@ function moveCursorToTop(item) {
     return new Promise((resolve) => {
         try {
             if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-            // prependAsync with empty text moves the insertion point to before all content
             item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
                 if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
                 item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
@@ -345,23 +359,32 @@ function moveCursorToTop(item) {
     });
 }
 
+// ─── Core signature apply ─────────────────────────────────────────────────────
 async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false } = {}) {
     const userEmail = mailbox?.userProfile?.emailAddress;
 
-    // ↓ use helper instead of localStorage.getItem directly
     let fetched = getCachedSignature({ skipTtl });
 
     if (fetchIfMissing && userEmail && fetched == null) {
         fetched = await renderSignatureOnServer(userEmail);
         if (fetched != null) {
             CACHED_SIGNATURE_HTML = fetched;
-            // ↓ use helper instead of localStorage.setItem directly
             setCachedSignature(fetched);
         }
     }
 
+    if (!fetched) {
+        console.warn("[CardByte] No signature available to apply");
+        return;
+    }
+
     let compressedSignature = await compressImagesInHtml(fetched);
-    compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
+
+    // ✅ Wrap with unified marker so watcher can detect presence reliably
+    compressedSignature =
+        `<div style='margin-top:40px'></div>` +
+        `<div ${SIGNATURE_MARKER}="true">` + compressedSignature + `</div>` +
+        `<div style='margin-top:40px'></div>`;
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Using cached signature" : "No cached signature, will fetch from server",
@@ -372,32 +395,154 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     // await moveCursorToTop(item);
 }
 
-window.applySignature = async function (event = { completed: () => { } }, options = {}) {
-    // if (detectPlatform() === "desktop") {
-    //     console.log("[CardByte] Desktop Classic — VSTO owns this client. JS add-in standing down.");
-    //     try { event.completed(); } catch (e) { }
-    //     // Background diagnostic check (does not block or affect the event)
-    //     (async () => {
-    //         try {
-    //             await new Promise(r => setTimeout(r, 3000));
-    //             const diagBody = await getBodyHtml(Office.context.mailbox.item);
-    //             if (diagBody.toLowerCase().includes("cardbyte-signature-container")) {
-    //                 console.log("[CardByte] Diagnostic: VSTO signature confirmed present ✓");
-    //             } else {
-    //                 console.warn("[CardByte] Diagnostic WARNING: VSTO signature not found after 3 s. " +
-    //                     "Check HKCU\\Software\\CardByte\\VSTOActive registry key. " +
-    //                     "VSTO add-in may not be installed or failed to load on this machine.");
-    //             }
-    //         } catch (e) { /* diagnostic only — ignore errors */ }
-    //     })();
+// ─── Watcher ──────────────────────────────────────────────────────────────────
 
-    //     return;
-    // }
+/**
+ * Starts the signature watcher — polls body every intervalMs,
+ * calls _applySignatureCore if signature is missing.
+ * Stops after maxRuntimeMs or maxInsertAttempts.
+ * Safe to call multiple times — runs only once per compose window.
+ */
+function startSignatureWatcher() {
+
+    if (watcherStarted) return;
+
+    watcherStarted = true;
+    watcherStartTime = Date.now();
+    insertAttempts = 0;
+    lastKnownBodyHash = null;
+
+    console.log("[CardByte] Signature watcher started");
+
+    watcherInterval = setInterval(async () => {
+        try {
+            const shouldStop = await watcherTick();
+            if (shouldStop) stopSignatureWatcher();
+        } catch (err) {
+            console.error("[CardByte] Watcher tick error:", err);
+        }
+    }, WATCHER_CONFIG.intervalMs);
+}
+
+function stopSignatureWatcher() {
+    if (watcherInterval) clearInterval(watcherInterval);
+    watcherInterval = null;
+    watcherStarted = false;
+    console.log("[CardByte] Signature watcher stopped");
+}
+
+async function watcherTick() {
+
+    // Stop after timeout
+    if (Date.now() - watcherStartTime >= WATCHER_CONFIG.maxRuntimeMs) {
+        console.log("[CardByte] Watcher timeout reached");
+        return true;
+    }
+
+    // Don't overlap with an in-progress insertion
+    if (insertionInProgress) return false;
+
+    const html = await getBodyHtmlSafe();
+    if (!html) return false;
+
+    // Track body hash to detect editor recreation
+    const currentHash = generateSimpleHash(html);
+    const bodyChanged = lastKnownBodyHash && currentHash !== lastKnownBodyHash;
+    lastKnownBodyHash = currentHash;
+
+    // ✅ Uses the same attribute marker as _applySignatureCore
+    const hasSignature = html.includes(SIGNATURE_MARKER);
+
+    if (hasSignature) {
+        console.log("[CardByte] Watcher: signature already present");
+        return false;
+    }
+
+    if (bodyChanged) {
+        console.log("[CardByte] Watcher: compose editor likely recreated — reinserting");
+    } else {
+        console.log("[CardByte] Watcher: signature missing");
+    }
+
+    if (insertAttempts >= WATCHER_CONFIG.maxInsertAttempts) {
+        console.warn("[CardByte] Watcher: max insertion attempts reached");
+        return true;
+    }
+
+    // ✅ Delegate to the real core — same path as applySignature event handler
+    await insertSignatureSafe();
+
+    return false;
+}
+
+function getBodyHtmlSafe() {
+    return new Promise((resolve) => {
+        try {
+            const item = Office.context.mailbox.item;
+            if (!item || !item.body) { resolve(null); return; }
+            item.body.getAsync(Office.CoercionType.Html, (result) => {
+                if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                    console.warn("[CardByte] Watcher: getAsync failed");
+                    resolve(null); return;
+                }
+                resolve(result.value || "");
+            });
+        } catch (err) {
+            console.error("[CardByte] getBodyHtmlSafe error:", err);
+            resolve(null);
+        }
+    });
+}
+
+/**
+ * ✅ Patched — routes through _applySignatureCore instead of buildSignatureHtml()
+ */
+async function insertSignatureSafe() {
+    insertionInProgress = true;
+    insertAttempts++;
+
+    console.log(`[CardByte] Watcher insertion attempt #${insertAttempts}`);
+
+    try {
+        const mailbox = Office?.context?.mailbox;
+        const item = mailbox?.item;
+
+        if (!item) {
+            console.warn("[CardByte] Watcher: no item available, skipping");
+            return;
+        }
+
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
+
+        console.log("[CardByte] Watcher: signature inserted successfully");
+
+    } catch (err) {
+        console.error("[CardByte] Watcher: insertion failed:", err);
+    } finally {
+        insertionInProgress = false;
+    }
+}
+
+function generateSimpleHash(str) {
+    let hash = 0;
+    if (!str.length) return hash;
+    for (let i = 0; i < str.length; i++) {
+        const chr = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + chr;
+        hash |= 0;
+    }
+    return hash;
+}
+
+// ─── Event handlers ───────────────────────────────────────────────────────────
+window.applySignature = async function (event = { completed: () => { } }, options = {}) {
+    console.log("[CardByte] applySignature INVOKED — platform:", detectPlatform());
+
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
     try {
-        if (!item) return;
+        if (!item) { console.warn("[CardByte] applySignature: no item"); return; }
         await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
@@ -407,20 +552,13 @@ window.applySignature = async function (event = { completed: () => { } }, option
 };
 
 window.onSendHandler = async function (event = { completed: () => { } }) {
-    var platform = "";
-    try { platform = (Office && Office.context && Office.context.platform) || ""; } catch (e) { }
-
-    // if (platform === "PC" || platform === "") {
-    //     // Windows Desktop — synchronous completion, zero popup risk.
-    //     try { event.completed({ allowEvent: true }); } catch (e) { }
-    //     return;
-    // }
+    console.log("[CardByte] onSendHandler INVOKED — platform:", detectPlatform());
 
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
     try {
-        if (!item) return;
+        if (!item) { console.warn("[CardByte] onSendHandler: no item"); return; }
         await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true });
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
@@ -429,14 +567,21 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     }
 };
 
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("onSendHandler", onSendHandler);
-    console.log("[CardByte] Office.actions.associate registered: onSendHandler");
-}
+// ─── Office bootstrap ─────────────────────────────────────────────────────────
+Office.onReady(() => {
+    console.log("[CardByte] Office Ready — platform:", detectPlatform());
 
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("applySignature", applySignature);
-    console.log("[CardByte] Office.actions.associate registered: applySignature");
-} else {
-    console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
-}
+    // ✅ Register LaunchEvent handlers inside onReady so Office.actions is guaranteed ready
+    if (typeof Office.actions !== "undefined") {
+        Office.actions.associate("onSendHandler", onSendHandler);
+        Office.actions.associate("applySignature", applySignature);
+        console.log("[CardByte] LaunchEvent handlers registered ✓");
+    } else {
+        console.log("[CardByte] Office.actions not available — Outlook 2016/2019, LaunchEvents not supported");
+    }
+
+    // ✅ Start watcher after startup delay to let compose item initialise
+    setTimeout(() => {
+        startSignatureWatcher();
+    }, WATCHER_CONFIG.startupDelayMs);
+});
