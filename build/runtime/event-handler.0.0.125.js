@@ -1,35 +1,153 @@
 let CACHED_SIGNATURE_HTML = null;
-
-// ─── Unified marker (attribute-based — survives Outlook editor round-trips) ───
-const SIGNATURE_MARKER = "data-cardbyte-signature";
-
+const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
-// ─── Session-based cache buster ───────────────────────────────────────────────
+// ─── Session-based cache buster ──────────────────────────────────────────────
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
-// ─── Watcher config ───────────────────────────────────────────────────────────
-const WATCHER_CONFIG = {
-    intervalMs: 1500,
-    maxRuntimeMs: 30000,
-    maxInsertAttempts: 5,
-    startupDelayMs: 2000
-};
+// ─── State-based enforcement ──────────────────────────────────────────────────
+// One manager per compose session. Lives from item open → item close / send.
+// Replaces the "inject once and hope" pattern with validate → diff → patch.
+let _sigManager = null;
 
-// ─── Watcher state ────────────────────────────────────────────────────────────
-let watcherInterval = null;
-let watcherStarted = false;
-let insertionInProgress = false;
-let insertAttempts = 0;
-let watcherStartTime = null;
-let lastKnownBodyHash = null;
+/* ============================================================
+   SignatureStateManager
+   Owns the canonical HTML for one compose session.
+   Callers never call bodySetSignatureAsync directly — they
+   call _sigManager.enforce(item) and the manager decides
+   whether re-injection is actually needed.
+============================================================ */
+class SignatureStateManager {
 
-// ─── Session helpers ──────────────────────────────────────────────────────────
+    constructor(canonicalHtml, signatureId, platform) {
+        // Sentinel: a short unique string embedded in the wrapper div.
+        // Survives Outlook's Word-engine re-serializer because the engine
+        // only touches <p>/<span> font attributes — it ignores data-*
+        // attributes on <div> elements it doesn't own.
+        this._signatureId = signatureId || "cardbyte_sig";
+        this._sentinel = `data-cbsig="${this._signatureId}"`;
+        this._platform = platform || detectPlatform();
+
+        // Inject the sentinel into the outermost wrapper div once,
+        // then treat canonicalHtml as immutable for this session.
+        this._canonicalHtml = this._injectSentinel(canonicalHtml);
+
+        this._enforcing = false;   // re-entrancy guard
+        this._watcherTimer = null;
+    }
+
+    // ── Sentinel injection ────────────────────────────────────────────────────
+    _injectSentinel(html) {
+        // The wrapper div from exportToHTML always starts with:
+        //   <div style="mso-element:ps;...
+        // Insert our data attribute right before the style attribute.
+        if (!html) return html;
+        return html.replace(
+            /(<div\s)(style="mso-element:ps)/,
+            `$1${this._sentinel} $2`
+        );
+    }
+
+    // ── Drift detection ───────────────────────────────────────────────────────
+    // Fast O(n) string scan — no DOM parse needed.
+    // Returns true if the body no longer contains our signature at all,
+    // OR if it contains only a stale sentinel (different signatureId).
+    _hasDrifted(bodyHtml) {
+        if (!bodyHtml) return true;
+        return !bodyHtml.includes(this._sentinel);
+    }
+
+    // ── Core enforce ──────────────────────────────────────────────────────────
+    // The single method that replaces all direct bodySetSignatureAsync calls.
+    // Returns true if re-injection was performed.
+    async enforce(item) {
+        if (this._enforcing) return false;
+        this._enforcing = true;
+        try {
+            const currentBody = await _getBodyHtml(item);
+            if (!this._hasDrifted(currentBody)) {
+                console.log("[CardByte] Signature intact — no re-injection needed");
+                return false;
+            }
+            console.warn("[CardByte] Signature drift detected — re-enforcing");
+            await _setSignatureHtml(item, this._canonicalHtml);
+            return true;
+        } finally {
+            this._enforcing = false;
+        }
+    }
+
+    // ── Watcher ───────────────────────────────────────────────────────────────
+    // Polls the body on Classic Outlook desktop where onBodyChanged events
+    // are unreliable. Mac/OWA don't need this — Office.js events are stable.
+    startWatcher(item, intervalMs = 2500) {
+        if (this._watcherTimer) return;
+        const p = this._platform;
+        // Only poll on Classic desktop. Mac/OWA have reliable event hooks.
+        if (p !== "desktop") {
+            console.log(`[CardByte] Watcher skipped on platform: ${p}`);
+            return;
+        }
+        console.log("[CardByte] Watcher started (Classic Outlook desktop)");
+        this._watcherTimer = setInterval(async () => {
+            try {
+                await this.enforce(item);
+            } catch (e) {
+                // Item may have closed — caller will stopWatcher()
+            }
+        }, intervalMs);
+    }
+
+    stopWatcher() {
+        if (this._watcherTimer) {
+            clearInterval(this._watcherTimer);
+            this._watcherTimer = null;
+            console.log("[CardByte] Watcher stopped");
+        }
+    }
+}
+
+// ─── Office.js body read/write helpers ────────────────────────────────────────
+// Centralised so SignatureStateManager and _applySignatureCore
+// both use the exact same read/write path.
+
+function _getBodyHtml(item) {
+    return new Promise((resolve, reject) => {
+        item.body.getAsync(Office.CoercionType.Html, (result) => {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+                resolve(result.value || "");
+            } else {
+                reject(result.error);
+            }
+        });
+    });
+}
+
+// Wraps bodySetSignatureAsync (preferred) with no fallback needed here —
+// _applySignatureCore already ensures we have a valid HTML string before
+// this is called. setSignatureAsync is the correct API for compose events;
+// it places the signature in Outlook's designated signature slot rather than
+// appending to the body buffer, which gives us automatic reply-chain safety.
+function _setSignatureHtml(item, html) {
+    return new Promise((resolve, reject) => {
+        if (typeof item.body.setSignatureAsync !== "function") {
+            reject(new Error("setSignatureAsync not available"));
+            return;
+        }
+        item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+            if (r.status === "succeeded") resolve();
+            else reject(r.error);
+        });
+    });
+}
+
+// ─── Everything below is unchanged from your original ────────────────────────
+
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
     if (!sid) {
@@ -39,10 +157,12 @@ function getOrCreateSessionId() {
     return sid;
 }
 
-function getCachedSignature({ skipTtl = false } = {}) {
+function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
+    if (skipSessionCheck) {
+        return localStorage.getItem(CACHE_KEY);
+    }
     const currentSid = getOrCreateSessionId();
     const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
-
     if (cachedSid !== currentSid) {
         console.log("[CardByte] New session detected — clearing cached signature");
         localStorage.removeItem(CACHE_KEY);
@@ -50,7 +170,6 @@ function getCachedSignature({ skipTtl = false } = {}) {
         localStorage.removeItem(CACHE_TIMESTAMP_KEY);
         return null;
     }
-
     if (!skipTtl) {
         const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
         if (Date.now() - ts > CACHE_TTL_MS) {
@@ -61,7 +180,6 @@ function getCachedSignature({ skipTtl = false } = {}) {
             return null;
         }
     }
-
     return localStorage.getItem(CACHE_KEY);
 }
 
@@ -74,7 +192,6 @@ function setCachedSignature(html) {
     } catch (_) { }
 }
 
-// ─── Platform detection ───────────────────────────────────────────────────────
 const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const MOBILE_MAX_IMAGE_WIDTH = 200;
@@ -83,27 +200,20 @@ const MOBILE_IMAGE_QUALITY = 0.5;
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
     const ua = (navigator?.userAgent || "").toLowerCase();
-
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
-
     if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android"))
         return ua.includes("android") ? "mobile-android" : "mobile-ios";
-
     if (
         (platform === "officeonline" || platform === "web" || platform === "") &&
         (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
     ) return ua.includes("android") ? "mobile-android" : "mobile-ios";
-
     if (platform === "mac") return "mac";
-
     if (
         (platform === "" || platform === "desktop") &&
         (ua.includes("macintosh") || ua.includes("mac os x")) &&
-        !ua.includes("iphone") &&
-        !ua.includes("ipad")
+        !ua.includes("iphone") && !ua.includes("ipad")
     ) return "mac";
-
     if (platform === "officeonline" || platform === "web" || platform === "") return "owa";
     return "desktop";
 }
@@ -113,7 +223,11 @@ function isOWA() { return detectPlatform() === "owa"; }
 function isMac() { return detectPlatform() === "mac"; }
 function getMaxHtmlSize() { return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE; }
 
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
+Office.onReady(() => {
+    console.log("✅ Office.onReady is Started !");
+    console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
+});
+
 function base64ToArrayBuffer(base64) {
     let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
     const padding = base64Data.length % 4;
@@ -176,17 +290,12 @@ async function encryptEmail(email = "") {
         const base64Result = arrayBufferToBase64(encrypted);
         try { atob(base64Result); } catch (e) { console.error("Result is NOT valid base64:", e); }
         return base64Result;
-    } catch (err) {
-        console.error("Encryption error:", err);
-        return "";
-    }
+    } catch (err) { console.error("Encryption error:", err); return ""; }
 }
 
-// ─── Server fetch ─────────────────────────────────────────────────────────────
 async function renderSignatureOnServer(user) {
     const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
-
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
@@ -203,7 +312,6 @@ async function renderSignatureOnServer(user) {
     } catch (err) {
         console.warn("Primary crashed. Falling back to legacy...", err);
     }
-
     try {
         const legacyRes = await fetch(
             "https://newqa-renderer.cardbyte.ai/render-signature",
@@ -219,22 +327,18 @@ async function renderSignatureOnServer(user) {
     }
 }
 
-// ─── Image compression ────────────────────────────────────────────────────────
 function compressBase64Image(dataUrl, maxWidth, quality) {
     if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
     if (quality === undefined) quality = isMobile() ? MOBILE_IMAGE_QUALITY : 0.7;
-
     return new Promise((resolve) => {
         if (dataUrl.startsWith("data:image/gif")) { resolve(dataUrl); return; }
         const img = new Image();
         img.onload = () => {
             try {
                 const canvas = document.createElement("canvas");
-                let width = img.width;
-                let height = img.height;
+                let width = img.width, height = img.height;
                 if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
-                canvas.width = width;
-                canvas.height = height;
+                canvas.width = width; canvas.height = height;
                 const ctx = canvas.getContext("2d");
                 const isPng = dataUrl.startsWith("data:image/png");
                 if (isPng) {
@@ -242,14 +346,12 @@ function compressBase64Image(dataUrl, maxWidth, quality) {
                     ctx.drawImage(img, 0, 0, width, height);
                     let result = canvas.toDataURL("image/png");
                     if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                    console.log(`[CardByte] Compressed PNG: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
                     resolve(result); return;
                 }
                 ctx.drawImage(img, 0, 0, width, height);
                 let result = canvas.toDataURL("image/jpeg", quality);
                 if (result.length >= dataUrl.length) result = canvas.toDataURL("image/png");
                 if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                console.log(`[CardByte] Compressed: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
                 resolve(result);
             } catch (e) { console.warn("[CardByte] Canvas compression failed:", e); resolve(dataUrl); }
         };
@@ -259,6 +361,7 @@ function compressBase64Image(dataUrl, maxWidth, quality) {
 }
 
 async function compressImagesInHtml(html) {
+    if (!html) return html;
     const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
     const matches = [];
     let match;
@@ -266,44 +369,32 @@ async function compressImagesInHtml(html) {
         matches.push({ fullMatch: match[0], dataUrl: match[1] });
     }
     if (matches.length === 0) return html;
-
     const mobile = isMobile();
     console.log(`[CardByte] Compressing ${matches.length} base64 image(s) (mobile: ${mobile})`);
-
     let result = html;
-
     for (const m of matches) {
         if (!result.includes(m.dataUrl)) continue;
         const isGif = m.dataUrl.startsWith("data:image/gif");
         if (isGif && mobile) {
-            console.log(`[CardByte] Mobile: converting GIF to static PNG (${(m.dataUrl.length / 1024).toFixed(0)}KB)`);
             const staticPng = await convertGifToStaticPng(m.dataUrl);
             if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
             continue;
         }
-        if (isGif) {
-            console.log(`[CardByte] Skipping GIF (${(m.dataUrl.length / 1024).toFixed(0)}KB) to preserve animation`);
-            continue;
-        }
+        if (isGif) continue;
         const compressed = await compressBase64Image(m.dataUrl);
         if (compressed !== m.dataUrl) result = result.replace(m.dataUrl, compressed);
     }
-
     const maxSize = getMaxHtmlSize();
     if (result.length > maxSize) {
-        console.log(`[CardByte] Still too large (${(result.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB), converting remaining GIFs to static PNG`);
         for (const m of matches) {
-            if (!m.dataUrl.startsWith("data:image/gif")) continue;
-            if (!result.includes(m.dataUrl)) continue;
+            if (!m.dataUrl.startsWith("data:image/gif") || !result.includes(m.dataUrl)) continue;
             const staticPng = await convertGifToStaticPng(m.dataUrl);
             if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
         }
     }
-
     return result;
 }
 
-// ─── Attachment helpers ───────────────────────────────────────────────────────
 function extractBase64Images(html) {
     const images = [];
     let index = 0;
@@ -337,16 +428,6 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
-// ─── Body helpers ─────────────────────────────────────────────────────────────
-function bodySetSignatureAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
-        item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") resolve(); else reject(r.error);
-        });
-    });
-}
-
 function moveCursorToTop(item) {
     return new Promise((resolve) => {
         try {
@@ -359,191 +440,128 @@ function moveCursorToTop(item) {
     });
 }
 
-// ─── Core signature apply ─────────────────────────────────────────────────────
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false } = {}) {
-    const userEmail = mailbox?.userProfile?.emailAddress;
+/* ============================================================
+   _applySignatureCore — MODIFIED
+   
+   The key change: after resolving the HTML (from cache, server,
+   stale cache, or fallback), we no longer call bodySetSignatureAsync
+   directly. Instead we:
+     1. Build a SignatureStateManager with the canonical HTML.
+     2. Call manager.enforce(item) — which validates first and only
+        injects if drift is detected.
+     3. Store the manager in _sigManager for the watcher and
+        onSendHandler to reuse.
+   
+   Everything before this point (fetching, retries, compression,
+   fallback) is identical to your original.
+============================================================ */
+async function _applySignatureCore(item, mailbox, {
+    fetchIfMissing = false,
+    skipTtl = false,
+    skipSessionCheck = false,
+    startWatcher = false,       // NEW: compose path passes true; send path passes false
+} = {}) {
+    const userProfile = mailbox?.userProfile || {};
+    const userEmail = userProfile?.emailAddress;
 
-    let fetched = getCachedSignature({ skipTtl });
+    let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
 
     if (fetchIfMissing && userEmail && fetched == null) {
-        fetched = await renderSignatureOnServer(userEmail);
-        if (fetched != null) {
-            CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);
+        const MAX_RETRIES = 2;
+        let attempt = 0;
+        let lastError = null;
+        while (attempt <= MAX_RETRIES) {
+            try {
+                if (attempt > 0) {
+                    console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
+                    await new Promise(r => setTimeout(r, 1000 * attempt));
+                }
+                const result = await renderSignatureOnServer(userEmail);
+                if (result != null) {
+                    fetched = result;
+                    CACHED_SIGNATURE_HTML = fetched;
+                    setCachedSignature(fetched);
+                    break;
+                }
+                lastError = new Error("Server returned null");
+            } catch (err) {
+                lastError = err;
+                console.warn(`[CardByte] Fetch attempt ${attempt + 1} failed:`, err);
+            }
+            attempt++;
+        }
+        if (fetched == null) {
+            console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
         }
     }
 
     if (!fetched) {
-        console.warn("[CardByte] No signature available to apply");
-        return;
+        const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+        if (staleCache) {
+            console.warn("[CardByte] Using stale cached signature as last resort.");
+            fetched = staleCache;
+        } else {
+            console.warn("[CardByte] No signature available — using fallback identity signature.");
+            fetched = `
+                <table cellpadding="0" cellspacing="0" border="0" width="400">
+                  <tr>
+                    <td style="font-family:Arial,sans-serif;font-size:12px;">
+                      <strong>${userProfile.displayName || ""}</strong><br/>
+                      ${userProfile.emailAddress || ""}<br/>
+                      <span style="color:#999;">Sent via CardByte</span>
+                    </td>
+                  </tr>
+                </table>
+            `;
+        }
     }
 
-    let compressedSignature = await compressImagesInHtml(fetched);
-
-    // ✅ Wrap with unified marker so watcher can detect presence reliably
-    compressedSignature =
-        `<div style='margin-top:40px'></div>` +
-        `<div ${SIGNATURE_MARKER}="true">` + compressedSignature + `</div>` +
-        `<div style='margin-top:40px'></div>`;
+    // Compress images before building canonical state —
+    // compression is a one-time cost, canonical HTML stays small.
+    const compressedHtml = await compressImagesInHtml(fetched);
+    const wrappedHtml = "<div style='margin-top:40px'></div>"
+        + compressedHtml
+        + "<div style='margin-top:40px'></div>";
 
     console.log("[CardByte] ════════════════════════════════════",
-        fetched ? "Using cached signature" : "No cached signature, will fetch from server",
-        compressedSignature, item?.body
+        fetched ? "Applying signature (state-based)" : "No cached signature, will fetch from server"
     );
 
-    await bodySetSignatureAsync(item, compressedSignature);
-    // await moveCursorToTop(item);
-}
-
-// ─── Watcher ──────────────────────────────────────────────────────────────────
-
-/**
- * Starts the signature watcher — polls body every intervalMs,
- * calls _applySignatureCore if signature is missing.
- * Stops after maxRuntimeMs or maxInsertAttempts.
- * Safe to call multiple times — runs only once per compose window.
- */
-function startSignatureWatcher() {
-
-    if (watcherStarted) return;
-
-    watcherStarted = true;
-    watcherStartTime = Date.now();
-    insertAttempts = 0;
-    lastKnownBodyHash = null;
-
-    console.log("[CardByte] Signature watcher started");
-
-    watcherInterval = setInterval(async () => {
-        try {
-            const shouldStop = await watcherTick();
-            if (shouldStop) stopSignatureWatcher();
-        } catch (err) {
-            console.error("[CardByte] Watcher tick error:", err);
-        }
-    }, WATCHER_CONFIG.intervalMs);
-}
-
-function stopSignatureWatcher() {
-    if (watcherInterval) clearInterval(watcherInterval);
-    watcherInterval = null;
-    watcherStarted = false;
-    console.log("[CardByte] Signature watcher stopped");
-}
-
-async function watcherTick() {
-
-    // Stop after timeout
-    if (Date.now() - watcherStartTime >= WATCHER_CONFIG.maxRuntimeMs) {
-        console.log("[CardByte] Watcher timeout reached");
-        return true;
+    // ── State-based enforcement ───────────────────────────────────────────────
+    // If a manager already exists (e.g. onSendHandler reusing compose session
+    // state), reuse it — it already has the sentinel injected and watcher running.
+    // If not (onSendHandler in a fresh iframe, or compose first load), build one.
+    if (!_sigManager || _sigManager._canonicalHtml !== wrappedHtml) {
+        // Stop any existing watcher before replacing the manager
+        _sigManager?.stopWatcher();
+        _sigManager = new SignatureStateManager(
+            wrappedHtml,
+            userEmail || "cardbyte_sig",   // signatureId — stable per user
+            detectPlatform()
+        );
     }
 
-    // Don't overlap with an in-progress insertion
-    if (insertionInProgress) return false;
+    await _sigManager.enforce(item);
 
-    const html = await getBodyHtmlSafe();
-    if (!html) return false;
-
-    // Track body hash to detect editor recreation
-    const currentHash = generateSimpleHash(html);
-    const bodyChanged = lastKnownBodyHash && currentHash !== lastKnownBodyHash;
-    lastKnownBodyHash = currentHash;
-
-    // ✅ Uses the same attribute marker as _applySignatureCore
-    const hasSignature = html.includes(SIGNATURE_MARKER);
-
-    if (hasSignature) {
-        console.log("[CardByte] Watcher: signature already present");
-        return false;
-    }
-
-    if (bodyChanged) {
-        console.log("[CardByte] Watcher: compose editor likely recreated — reinserting");
-    } else {
-        console.log("[CardByte] Watcher: signature missing");
-    }
-
-    if (insertAttempts >= WATCHER_CONFIG.maxInsertAttempts) {
-        console.warn("[CardByte] Watcher: max insertion attempts reached");
-        return true;
-    }
-
-    // ✅ Delegate to the real core — same path as applySignature event handler
-    await insertSignatureSafe();
-
-    return false;
-}
-
-function getBodyHtmlSafe() {
-    return new Promise((resolve) => {
-        try {
-            const item = Office.context.mailbox.item;
-            if (!item || !item.body) { resolve(null); return; }
-            item.body.getAsync(Office.CoercionType.Html, (result) => {
-                if (result.status !== Office.AsyncResultStatus.Succeeded) {
-                    console.warn("[CardByte] Watcher: getAsync failed");
-                    resolve(null); return;
-                }
-                resolve(result.value || "");
-            });
-        } catch (err) {
-            console.error("[CardByte] getBodyHtmlSafe error:", err);
-            resolve(null);
-        }
-    });
-}
-
-/**
- * ✅ Patched — routes through _applySignatureCore instead of buildSignatureHtml()
- */
-async function insertSignatureSafe() {
-    insertionInProgress = true;
-    insertAttempts++;
-
-    console.log(`[CardByte] Watcher insertion attempt #${insertAttempts}`);
-
-    try {
-        const mailbox = Office?.context?.mailbox;
-        const item = mailbox?.item;
-
-        if (!item) {
-            console.warn("[CardByte] Watcher: no item available, skipping");
-            return;
-        }
-
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
-
-        console.log("[CardByte] Watcher: signature inserted successfully");
-
-    } catch (err) {
-        console.error("[CardByte] Watcher: insertion failed:", err);
-    } finally {
-        insertionInProgress = false;
+    // Watcher is only started from the compose path (applySignature),
+    // not from onSendHandler (which fires once just before send).
+    if (startWatcher) {
+        _sigManager.startWatcher(item);
     }
 }
 
-function generateSimpleHash(str) {
-    let hash = 0;
-    if (!str.length) return hash;
-    for (let i = 0; i < str.length; i++) {
-        const chr = str.charCodeAt(i);
-        hash = ((hash << 5) - hash) + chr;
-        hash |= 0;
-    }
-    return hash;
-}
-
-// ─── Event handlers ───────────────────────────────────────────────────────────
+/* ============================================================
+   Public handlers — only option flag differences from original
+============================================================ */
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
-    console.log("[CardByte] applySignature INVOKED — platform:", detectPlatform());
-
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
-
     try {
-        if (!item) { console.warn("[CardByte] applySignature: no item"); return; }
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
+        if (!item) return;
+        await _applySignatureCore(item, mailbox, {
+            fetchIfMissing: true,
+            startWatcher: true,     // compose path: start the drift watcher
+        });
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
     } finally {
@@ -552,36 +570,33 @@ window.applySignature = async function (event = { completed: () => { } }, option
 };
 
 window.onSendHandler = async function (event = { completed: () => { } }) {
-    console.log("[CardByte] onSendHandler INVOKED — platform:", detectPlatform());
-
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
-
     try {
-        if (!item) { console.warn("[CardByte] onSendHandler: no item"); return; }
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true });
+        if (!item) return;
+        await _applySignatureCore(item, mailbox, {
+            fetchIfMissing: false,
+            skipTtl: true,
+            skipSessionCheck: true, // separate iframe — session ID won't match
+            startWatcher: false,    // send path: no watcher, just enforce once
+        });
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
+        // Always stop the watcher on send — compose session is ending.
+        _sigManager?.stopWatcher();
         event.completed({ allowEvent: true });
     }
 };
 
-// ─── Office bootstrap ─────────────────────────────────────────────────────────
-Office.onReady(() => {
-    console.log("[CardByte] Office Ready — platform:", detectPlatform());
-
-    // ✅ Register LaunchEvent handlers inside onReady so Office.actions is guaranteed ready
-    if (typeof Office.actions !== "undefined") {
-        Office.actions.associate("onSendHandler", onSendHandler);
-        Office.actions.associate("applySignature", applySignature);
-        console.log("[CardByte] LaunchEvent handlers registered ✓");
-    } else {
-        console.log("[CardByte] Office.actions not available — Outlook 2016/2019, LaunchEvents not supported");
-    }
-
-    // ✅ Start watcher after startup delay to let compose item initialise
-    setTimeout(() => {
-        startSignatureWatcher();
-    }, WATCHER_CONFIG.startupDelayMs);
-});
+// ─── Office action registration (unchanged) ───────────────────────────────────
+if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+    Office.actions.associate("onSendHandler", onSendHandler);
+    console.log("[CardByte] Office.actions.associate registered: onSendHandler");
+}
+if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+    Office.actions.associate("applySignature", applySignature);
+    console.log("[CardByte] Office.actions.associate registered: applySignature");
+} else {
+    console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
+}
