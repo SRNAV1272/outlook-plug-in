@@ -809,15 +809,34 @@ async function onFromChangedHandler(event) {
 // Must use named function references (not window.*) — Classic Outlook has no window.
 // Associate is called unconditionally; on older clients Office.actions may not exist.
 // =============================================================================
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("applySignature", applySignature);
-    console.log("[CardByte] Registered: applySignature");
 
-    Office.actions.associate("onSendHandler", onSendHandler);
-    console.log("[CardByte] Registered: onSendHandler");
+// ── Bottom of event-handler.js ──────────────────────────────────────────────
+// Office.onReady ensures Office.js has fully initialized before we associate.
+// This is safe in both WebView (OWA/Mac/New Outlook) and JS-only (Classic) runtimes.
+Office.onReady(function () {
+    if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+        Office.actions.associate("applySignature", applySignature);
+        console.log("[CardByte] Registered: applySignature");
 
-    Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
-    console.log("[CardByte] Registered: onFromChangedHandler");
-} else {
-    console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on Outlook 2016/2019)");
-}
+        Office.actions.associate("onSendHandler", onSendHandler);
+        console.log("[CardByte] Registered: onSendHandler");
+
+        Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+        console.log("[CardByte] Registered: onFromChangedHandler");
+    } else {
+        console.warn("[CardByte] Office.actions not available — LaunchEvent path not active");
+    }
+});
+
+// if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+//     Office.actions.associate("applySignature", applySignature);
+//     console.log("[CardByte] Registered: applySignature");
+
+//     Office.actions.associate("onSendHandler", onSendHandler);
+//     console.log("[CardByte] Registered: onSendHandler");
+
+//     Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+//     console.log("[CardByte] Registered: onFromChangedHandler");
+// } else {
+//     console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on Outlook 2016/2019)");
+// }
