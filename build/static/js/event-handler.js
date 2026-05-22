@@ -805,38 +805,65 @@ async function onFromChangedHandler(event) {
 }
 
 // =============================================================================
-// Office.actions.associate
-// Must use named function references (not window.*) — Classic Outlook has no window.
-// Associate is called unconditionally; on older clients Office.actions may not exist.
+// Office.actions.associate — Dual-registration pattern
+//
+// WHY TWO REGISTRATIONS:
+//
+//   Classic Outlook on Windows uses a JS-only runtime (no DOM, no browser
+//   engine). In this runtime Office.onReady() is NEVER called — it waits
+//   for a browser ready-state event that does not exist in the JS engine.
+//   Therefore associate() MUST be called synchronously at the top level
+//   of the script the moment it is parsed. This is the ONLY way LaunchEvents
+//   work in Classic Outlook.
+//
+//   WebView runtimes (OWA, New Outlook, Mac, Mobile) DO fire Office.onReady().
+//   We call associate() inside onReady() as a safety net for these clients in
+//   case Office.js finishes its async init slightly after the script executes.
+//   Calling associate() twice is safe — the second call simply overwrites the
+//   first mapping with the same value.
+//
+// EXECUTION FLOW BY PLATFORM:
+//
+//   Classic Outlook  → Step 1 runs ✅  |  Step 2 never runs (onReady never fires)
+//   OWA / New / Mac  → Step 1 runs ✅  |  Step 2 also runs ✅ (double-registered, harmless)
+//   Mobile           → Step 1 runs ✅  |  Step 2 also runs ✅
+//
 // =============================================================================
 
-// ── Bottom of event-handler.js ──────────────────────────────────────────────
-// Office.onReady ensures Office.js has fully initialized before we associate.
-// This is safe in both WebView (OWA/Mac/New Outlook) and JS-only (Classic) runtimes.
-Office.onReady(function () {
-    if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-        Office.actions.associate("applySignature", applySignature);
-        console.log("[CardByte] Registered: applySignature");
-
-        Office.actions.associate("onSendHandler", onSendHandler);
-        console.log("[CardByte] Registered: onSendHandler");
-
-        Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
-        console.log("[CardByte] Registered: onFromChangedHandler");
-    } else {
-        console.warn("[CardByte] Office.actions not available — LaunchEvent path not active");
+/**
+ * Performs the actual Office.actions.associate calls.
+ * Safe to call multiple times — idempotent.
+ */
+function _registerHandlers() {
+    if (typeof Office === "undefined" || typeof Office.actions === "undefined") {
+        // This is expected on Outlook 2016 / 2019 which pre-date LaunchEvent support.
+        console.log("[CardByte] Office.actions not available — LaunchEvent path not active (Outlook 2016/2019)");
+        return;
     }
-});
+    Office.actions.associate("applySignature", applySignature);
+    console.log("[CardByte] Registered: applySignature");
 
-// if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-//     Office.actions.associate("applySignature", applySignature);
-//     console.log("[CardByte] Registered: applySignature");
+    Office.actions.associate("onSendHandler", onSendHandler);
+    console.log("[CardByte] Registered: onSendHandler");
 
-//     Office.actions.associate("onSendHandler", onSendHandler);
-//     console.log("[CardByte] Registered: onSendHandler");
+    Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+    console.log("[CardByte] Registered: onFromChangedHandler");
+}
 
-//     Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
-//     console.log("[CardByte] Registered: onFromChangedHandler");
-// } else {
-//     console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on Outlook 2016/2019)");
-// }
+// ── Step 1: Synchronous top-level call ───────────────────────────────────────
+// REQUIRED for Classic Outlook's JS-only runtime.
+// Office.js has already loaded synchronously before this script runs
+// (because event.html loads office.js first with no defer/async).
+// So Office.actions is available here even without onReady.
+_registerHandlers();
+
+// ── Step 2: onReady safety net for WebView runtimes ──────────────────────────
+// OWA / New Outlook / Mac / Mobile may complete Office.js async init
+// slightly after script parse time. The second registration ensures
+// associate() is called after the full Office context is available.
+// Has no effect in Classic Outlook (onReady never fires there).
+if (typeof Office !== "undefined" && typeof Office.onReady === "function") {
+    Office.onReady(function () {
+        _registerHandlers();
+    });
+}
