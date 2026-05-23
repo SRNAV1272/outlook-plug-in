@@ -614,6 +614,11 @@ function runWithSignature(item, userProfile, event, forceRefresh) {
     if (forceRefresh) clearCache();
 
     var cached = getCached();
+    if (cached) {
+        console.log("[CardByte] Classic: using cached signature");
+        applySignatureCore(item, userProfile, cached, event);
+        return;
+    }
 
     var email = userProfile ? userProfile.emailAddress : null;
 
