@@ -674,11 +674,11 @@ function runWithSignature(item, userProfile, event, forceRefresh) {
     if (forceRefresh) clearCache();
 
     var cached = getCached();
-    // if (cached) {
-    //     console.log("[CardByte] Classic: using cached signature");
-    //     applySignatureCore(item, userProfile, cached, event);
-    //     return;
-    // }
+    if (cached) {
+        console.log("[CardByte] Classic: using cached signature");
+        applySignatureCore(item, userProfile, cached, event);
+        return;
+    }
 
     var email = userProfile ? userProfile.emailAddress : null;
 
@@ -706,11 +706,41 @@ function runWithSignature(item, userProfile, event, forceRefresh) {
 function applySignature(event) {
     if (!event) event = { completed: function () { } };
     console.log("[CardByte] Classic: applySignature fired");
+
+    // Hard deadline — if anything hangs, complete the event anyway
+    // Classic Outlook's default timeout is ~5s; we complete at 8s to be safe
+    var completed = false;
+    var safeComplete = function (opts) {
+        if (completed) return;
+        completed = true;
+        if (opts) event.completed(opts);
+        else event.completed();
+    };
+
+    var deadline = setTimeout(function () {
+        console.warn("[CardByte] Classic: deadline hit — forcing event.completed()");
+        safeComplete();
+    }, 8000);
+
     var mailbox = (typeof Office !== "undefined" && Office.context && Office.context.mailbox)
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
-    if (!item) { console.warn("[CardByte] Classic: no item"); event.completed(); return; }
-    runWithSignature(item, (mailbox && mailbox.userProfile) ? mailbox.userProfile : {}, event, false);
+
+    if (!item) {
+        clearTimeout(deadline);
+        safeComplete();
+        return;
+    }
+
+    // Wrap event so all paths call safeComplete
+    var wrappedEvent = {
+        completed: function (opts) {
+            clearTimeout(deadline);
+            safeComplete(opts);
+        }
+    };
+
+    runWithSignature(item, (mailbox && mailbox.userProfile) ? mailbox.userProfile : {}, wrappedEvent, false);
 }
 
 function onSendHandler(event) {
