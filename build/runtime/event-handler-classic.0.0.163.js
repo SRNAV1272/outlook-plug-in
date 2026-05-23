@@ -342,6 +342,19 @@ function clearCache() { CACHED_HTML = null; memDel(CACHE_KEY); }
 // =============================================================================
 // XHR helpers (replaces fetch + async/await)
 // =============================================================================
+// function xhrGet(url, headers, onSuccess, onError) {
+//     var xhr = new XMLHttpRequest();
+//     xhr.open("GET", url, true);
+//     var keys = Object.keys(headers || {});
+//     for (var i = 0; i < keys.length; i++) xhr.setRequestHeader(keys[i], headers[keys[i]]);
+//     xhr.onreadystatechange = function () {
+//         if (xhr.readyState !== 4) return;
+//         if (xhr.status >= 200 && xhr.status < 300) onSuccess(xhr.responseText);
+//         else onError(xhr.status);
+//     };
+//     xhr.onerror = function () { onError(0); };
+//     xhr.send();
+// }
 function xhrGet(url, headers, onSuccess, onError) {
     var xhr = new XMLHttpRequest();
     xhr.open("GET", url, true);
@@ -349,25 +362,19 @@ function xhrGet(url, headers, onSuccess, onError) {
     for (var i = 0; i < keys.length; i++) xhr.setRequestHeader(keys[i], headers[keys[i]]);
     xhr.onreadystatechange = function () {
         if (xhr.readyState !== 4) return;
-        if (xhr.status >= 200 && xhr.status < 300) onSuccess(xhr.responseText);
-        else onError(xhr.status);
+        if (xhr.status >= 200 && xhr.status < 300) {
+            onSuccess(xhr.responseText);
+        } else {
+            // Capture CORS header to distinguish network block from server error
+            var corsHeader = xhr.getResponseHeader("Access-Control-Allow-Origin") || "none";
+            onError(xhr.status, corsHeader);
+        }
     };
-    xhr.onerror = function () { onError(0); };
+    xhr.onerror = function () {
+        // Try to read any partial state
+        onError(0, "onerror|readyState=" + xhr.readyState + "|status=" + xhr.status);
+    };
     xhr.send();
-}
-
-function xhrPost(url, headers, body, onSuccess, onError) {
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", url, true);
-    var keys = Object.keys(headers || {});
-    for (var i = 0; i < keys.length; i++) xhr.setRequestHeader(keys[i], headers[keys[i]]);
-    xhr.onreadystatechange = function () {
-        if (xhr.readyState !== 4) return;
-        if (xhr.status >= 200 && xhr.status < 300) onSuccess(xhr.responseText);
-        else onError(xhr.status);
-    };
-    xhr.onerror = function () { onError(0); };
-    xhr.send(body);
 }
 
 // =============================================================================
@@ -487,11 +494,7 @@ function handleAesDecrypt(encryptedText) {
 // =============================================================================
 function fetchSignatureForUser(email, platform, onDone) {
     var encryptedEmail = encryptEmail(email);
-    if (!encryptedEmail) {
-        console.error("[CardByte] Classic: encryption failed");
-        onDone(null, "ENCRYPT_FAIL");
-        return;
-    }
+    if (!encryptedEmail) { onDone(null, "ENCRYPT_FAIL"); return; }
 
     xhrGet(
         "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
@@ -526,9 +529,9 @@ function fetchSignatureForUser(email, platform, onDone) {
                 onDone(null, "PARSE_FAIL|http=200|resp=" + snippet);
             }
         },
-        function (status) {
+        function (status, extra) {
             console.warn("[CardByte] Classic: XHR failed, HTTP status:", status);
-            onDone(null, "HTTP_" + status);
+            onDone(null, "HTTP_" + status + "|" + extra);
         }
     );
 }
