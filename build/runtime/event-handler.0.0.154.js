@@ -214,6 +214,7 @@ async function renderSignatureOnServer(user) {
             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
+        console.warn("Encrytped Email...", encryptedMail);
         if (primaryRes.ok) {
             const data = await primaryRes.text();
             const decryptedData = await handleAesDecrypt(data);
