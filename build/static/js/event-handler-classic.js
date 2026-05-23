@@ -465,13 +465,13 @@ function handleAesDecrypt(encryptedText) {
 // =============================================================================
 // Server fetch — uses encrypted email, matches modern handler
 // =============================================================================
-function fetchSignatureForUser(email, platform, onDone) {
+function fetchSignatureForUser(item, userProfile, event, email, platform, onDone) {
     var encryptedEmail = encryptEmail(email);
     if (!encryptedEmail) {
         console.error("[CardByte] Classic: email encryption failed, trying with plaintext");
         encryptedEmail = email;
     }
-
+    applySignatureCore(item, userProfile, "Started", event);
     // ── Primary renderer ──
     xhrGet(
         "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
@@ -494,13 +494,17 @@ function fetchSignatureForUser(email, platform, onDone) {
                     onDone(raw.html);
                     return;
                 }
-            } catch (e2) { /* fall through */ }
+            } catch (e2) {
+                applySignatureCore(item, userProfile, JSON.stringify(e2) + " " + JSON.stringify(responseText), event);
+                /* fall through */
+            }
             console.warn("[CardByte] Classic: primary renderer unparseable, trying legacy");
-            fetchLegacy(email, onDone);
+            // fetchLegacy(email, onDone);
         },
         function (status) {
+            applySignatureCore(item, userProfile, JSON.stringify(status), event);
             console.warn("[CardByte] Classic: primary renderer failed (" + status + "), trying legacy");
-            fetchLegacy(email, onDone);
+            // fetchLegacy(email, onDone);
         }
     );
 }
@@ -626,7 +630,7 @@ function runWithSignature(item, userProfile, event, forceRefresh) {
         }
     } catch (e) { /* ignore */ }
 
-    fetchSignatureForUser(email, xPlatform, function (html) {
+    fetchSignatureForUser(item, userProfile, event, email, xPlatform, function (html) {
         if (html) {
             setCache(html);
             applySignatureCore(item, userProfile, html, event);
