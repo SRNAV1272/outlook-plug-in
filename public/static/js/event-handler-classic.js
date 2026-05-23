@@ -498,7 +498,7 @@ function fetchSignatureForUser(email, platform, onDone) {
 
     xhrGet(
         "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-        {},
+        { "username": encryptedEmail, "X-Platform": platform },
         function (responseText) {
             // Try decrypted JSON
             try {
