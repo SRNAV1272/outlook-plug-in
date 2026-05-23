@@ -37,6 +37,8 @@ var AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 var B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 var _probeResult = "not-run";
+var _corsTest1 = "pending";
+var _corsTest2 = "pending";
 
 (function () {
     var p = new XMLHttpRequest();
@@ -612,6 +614,8 @@ function buildFallbackHtml(userProfile, errorCode) {
         + '<span style="color:#333;">Error: <code>' + code + '</code></span><br/>'
         + '<span style="color:#666;">User: ' + name + ' &lt;' + email + '&gt;</span><br/>'
         + '<span style="color:#666;">Probe: ' + _probeResult + '</span>'
+        + '<span style="color:#666;">T1(noHeaders): ' + _corsTest1 + '</span><br/>'
+        + '<span style="color:#666;">T2(+username): ' + _corsTest2 + '</span><br/>'
         + '<span style="color:#666;">Platform: Classic Outlook (JS runtime) | Time: ' + ts + '</span>'
         + '</td></tr>'
         + '</table>';
@@ -627,48 +631,6 @@ function applySignatureCore(item, userProfile, html, event) {
         event.completed();
     });
 }
-
-// function runWithSignature(item, userProfile, event, forceRefresh) {
-//     if (forceRefresh) clearCache();
-
-//     var cached = getCached();
-//     if (cached) {
-//         console.log("[CardByte] Classic: using cached signature");
-//         applySignatureCore(item, userProfile, cached, event);
-//         return;
-//     }
-
-//     var email = userProfile ? userProfile.emailAddress : null;
-//     // if (!email) {
-//     //     console.warn("[CardByte] Classic: no email — using fallback");
-//     //     applySignatureCore(item, userProfile, buildFallbackHtml(userProfile), event);
-//     //     return;
-//     // }
-
-//     var xPlatform = "WINDOWS";
-//     try {
-//         var diag = Office.context.diagnostics;
-//         if (diag && diag.platform &&
-//             (diag.platform === Office.PlatformType.Mac ||
-//                 diag.platform.toString().toLowerCase() === "mac")) {
-//             xPlatform = "MAC";
-//         }
-//     } catch (e) { /* ignore */ }
-
-//     fetchSignatureForUser(email, xPlatform, function (html) {
-//         if (html) {
-//             setCache(html);
-//             applySignatureCore(item, userProfile, html, event);
-//         } else {
-//             console.warn("[CardByte] Classic: all fetches failed — using identity fallback");
-//             applySignatureCore(item, userProfile, buildFallbackHtml(userProfile, "Classic: all fetches failed — using identity fallback"), event);
-//         }
-//     });
-// }
-
-// =============================================================================
-// Event handlers
-// =============================================================================
 
 function runWithSignature(item, userProfile, event, forceRefresh) {
     if (forceRefresh) clearCache();
@@ -705,10 +667,7 @@ function runWithSignature(item, userProfile, event, forceRefresh) {
 
 function applySignature(event) {
     if (!event) event = { completed: function () { } };
-    console.log("[CardByte] Classic: applySignature fired");
 
-    // Hard deadline — if anything hangs, complete the event anyway
-    // Classic Outlook's default timeout is ~5s; we complete at 8s to be safe
     var completed = false;
     var safeComplete = function (opts) {
         if (completed) return;
@@ -718,26 +677,44 @@ function applySignature(event) {
     };
 
     var deadline = setTimeout(function () {
-        console.warn("[CardByte] Classic: deadline hit — forcing event.completed()");
         safeComplete();
     }, 8000);
+
+    // ── CORS diagnostic ──────────────────────────────────────────
+    // Test 1: bare GET (no custom headers) — no preflight triggered
+    var t1 = new XMLHttpRequest();
+    t1.open("GET", "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", true);
+    t1.onreadystatechange = function () {
+        if (t1.readyState !== 4) return;
+        _corsTest1 = "noHeaders|status=" + t1.status + "|body=" + (t1.responseText || "").substring(0, 80);
+    };
+    t1.onerror = function () {
+        _corsTest1 = "noHeaders|onerror|rs=" + t1.readyState;
+    };
+    t1.send();
+
+    // Test 2: GET with only username header (triggers preflight)
+    var t2 = new XMLHttpRequest();
+    t2.open("GET", "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", true);
+    t2.setRequestHeader("username", "test");
+    t2.onreadystatechange = function () {
+        if (t2.readyState !== 4) return;
+        _corsTest2 = "withUsername|status=" + t2.status + "|body=" + (t2.responseText || "").substring(0, 80);
+    };
+    t2.onerror = function () {
+        _corsTest2 = "withUsername|onerror|rs=" + t2.readyState;
+    };
+    t2.send();
+    // ── end CORS diagnostic ──────────────────────────────────────
 
     var mailbox = (typeof Office !== "undefined" && Office.context && Office.context.mailbox)
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
 
-    if (!item) {
-        clearTimeout(deadline);
-        safeComplete();
-        return;
-    }
+    if (!item) { clearTimeout(deadline); safeComplete(); return; }
 
-    // Wrap event so all paths call safeComplete
     var wrappedEvent = {
-        completed: function (opts) {
-            clearTimeout(deadline);
-            safeComplete(opts);
-        }
+        completed: function (opts) { clearTimeout(deadline); safeComplete(opts); }
     };
 
     runWithSignature(item, (mailbox && mailbox.userProfile) ? mailbox.userProfile : {}, wrappedEvent, false);
