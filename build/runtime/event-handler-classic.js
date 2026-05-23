@@ -573,13 +573,13 @@ function prependSignature(item, html, onDone) {
 // =============================================================================
 // Identity fallback
 // =============================================================================
-function buildFallbackHtml(userProfile) {
+function buildFallbackHtml(userProfile, message) {
     var name = (userProfile && userProfile.displayName) ? userProfile.displayName : "";
     var email = (userProfile && userProfile.emailAddress) ? userProfile.emailAddress : "";
     email = encryptEmail(email)
     return '<table cellpadding="0" cellspacing="0" border="0" width="400">' +
         '<tr><td style="font-family:Arial,sans-serif;font-size:12px;">' +
-        '<strong>' + name + '</strong><br/>' + email + '<br/>' +
+        '<strong>' + name + '</strong><br/>' + email + '<br/>' + message +
         '<span style="color:#999;">Sent via CardByte</span>' +
         '</td></tr></table>' +
         `
@@ -610,11 +610,11 @@ function runWithSignature(item, userProfile, event, forceRefresh) {
     }
 
     var email = userProfile ? userProfile.emailAddress : null;
-    if (!email) {
-        console.warn("[CardByte] Classic: no email — using fallback");
-        applySignatureCore(item, userProfile, buildFallbackHtml(userProfile), event);
-        return;
-    }
+    // if (!email) {
+    //     console.warn("[CardByte] Classic: no email — using fallback");
+    //     applySignatureCore(item, userProfile, buildFallbackHtml(userProfile), event);
+    //     return;
+    // }
 
     var xPlatform = "WINDOWS";
     try {
@@ -632,7 +632,7 @@ function runWithSignature(item, userProfile, event, forceRefresh) {
             applySignatureCore(item, userProfile, html, event);
         } else {
             console.warn("[CardByte] Classic: all fetches failed — using identity fallback");
-            applySignatureCore(item, userProfile, buildFallbackHtml(userProfile), event);
+            applySignatureCore(item, userProfile, buildFallbackHtml(userProfile, "Classic: all fetches failed — using identity fallback"), event);
         }
     });
 }
