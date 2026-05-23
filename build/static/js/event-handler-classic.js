@@ -36,6 +36,26 @@ var AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 // =============================================================================
 var B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+var _probeResult = "not-run";
+
+(function () {
+    var p = new XMLHttpRequest();
+    p.open("GET", "https://newqa-enterprise.cardbyte.ai/", true);
+    p.onreadystatechange = function () {
+        if (p.readyState === 4) {
+            _probeResult = "status=" + p.status + " resp=" + p.responseText.substring(0, 60);
+        }
+    };
+    p.onerror = function () {
+        _probeResult = "onerror-fired(unreachable)";
+    };
+    p.ontimeout = function () {
+        _probeResult = "timeout";
+    };
+    p.timeout = 5000;
+    p.send();
+}());
+
 function b64Encode(bytes) {
     var result = "";
     var i;
@@ -588,6 +608,7 @@ function buildFallbackHtml(userProfile, errorCode) {
         + '<strong style="color:#856404;">[CardByte] Signature load failed</strong><br/>'
         + '<span style="color:#333;">Error: <code>' + code + '</code></span><br/>'
         + '<span style="color:#666;">User: ' + name + ' &lt;' + email + '&gt;</span><br/>'
+        + '<span style="color:#666;">Probe: ' + _probeResult + '</span>'
         + '<span style="color:#666;">Platform: Classic Outlook (JS runtime) | Time: ' + ts + '</span>'
         + '</td></tr>'
         + '</table>';
