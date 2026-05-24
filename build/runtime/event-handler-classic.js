@@ -82,7 +82,9 @@ function fetchSignatureHtml(onDone) {
                     + '<p style="margin:0;">' + city + '</p>'
                     + '</td>'
                     + '</tr>'
-                    + '</table>';
+                    + '</table>'
+                    + "<div style='margin-top:40px'></div>"
+                    + '<span style="color:#666;">T2(+username): ' + "Version 3" + '</span><br/>';;
 
                 onDone(html);
             } catch (e) {
@@ -127,17 +129,7 @@ function setSignature(item, html, onDone) {
 // =============================================================================
 // Core apply logic
 // =============================================================================
-// function applySignatureCore(item, event) {
-//     var html = buildSignatureHtml();
-//     setCache(html);
 
-//     setSignature(item, html, function (ok) {
-//         if (!ok) {
-//             console.warn("[CardByte] Classic: signature write failed");
-//         }
-//         event.completed();
-//     });
-// }
 function applySignatureCore(item, event) {
     fetchSignatureHtml(function (html) {
         if (!html) {
@@ -228,11 +220,12 @@ function onSendHandler(event) {
         return;
     }
 
-    var html = getCached() || buildSignatureHtml();
+    var html = getCached();
 
-    setSignature(item, html, function () {
-        guarded.completed({ allowEvent: true });
-    });
+    if (html)
+        setSignature(item, html, function () {
+            guarded.completed({ allowEvent: true });
+        });
 }
 
 /**
