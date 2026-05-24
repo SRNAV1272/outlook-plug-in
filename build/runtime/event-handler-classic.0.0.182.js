@@ -209,24 +209,35 @@ function encryptEmail(email) {
 }
 
 // =============================================================================
-// Signature cache
-// _memStore: fast same-session path (wiped on runtime restart).
-// roamingSettings: survives restarts — used so OnMessageSend can reuse the
-// signature fetched during OnNewMessageCompose without a second API call.
+// Signature cache — two tiers + 5-minute TTL + session guard
+//
+// _SESSION_ID : random string generated once per runtime boot. Because Classic
+//               Outlook may spin a fresh JS context for each event type, any
+//               roamingSettings entry written by a different runtime instance
+//               will carry a different session ID and be treated as a cache miss,
+//               forcing a fresh fetch for that invocation.
+//
+// _memStore       : fast same-session path (dies on runtime restart).
+// roamingSettings : survives restarts. Stores { html, ts, sid } — accepted only
+//                   if TTL is still valid AND sid matches current session.
 // =============================================================================
 var CACHE_KEY = "cardbyte_sig_html";
-var _memStore = {};
+var CACHE_TTL_MS = 5 * 60 * 1000;   // 5 minutes
+
+// Unique ID for this runtime boot — lightweight, no crypto needed
+var _SESSION_ID = "s" + Date.now() + "_" + Math.floor(Math.random() * 0xFFFF).toString(16);
+var _memStore = {};               // { html, ts, sid }
 
 function _rsGet() {
     try { var rs = Office.context.roamingSettings; return rs ? rs.get(CACHE_KEY) : null; }
     catch (e) { return null; }
 }
 
-function _rsSet(html) {
+function _rsSet(entry) {
     try {
         var rs = Office.context.roamingSettings;
         if (!rs) return;
-        rs.set(CACHE_KEY, html);
+        rs.set(CACHE_KEY, entry);
         rs.saveAsync(function (r) {
             if (r.status !== Office.AsyncResultStatus.Succeeded)
                 console.warn("[CardByte] Classic: roamingSettings save failed");
@@ -243,15 +254,50 @@ function _rsDel() {
     } catch (e) { }
 }
 
-function getCached() {
-    if (Object.prototype.hasOwnProperty.call(_memStore, CACHE_KEY)) return _memStore[CACHE_KEY];
-    var persisted = _rsGet();
-    if (persisted) _memStore[CACHE_KEY] = persisted;  // promote to mem for this session
-    return persisted || null;
+function _isExpired(entry) {
+    return !entry || !entry.ts || (Date.now() - entry.ts) > CACHE_TTL_MS;
 }
 
-function setCache(html) { _memStore[CACHE_KEY] = html; _rsSet(html); }
-function clearCache() { delete _memStore[CACHE_KEY]; _rsDel(); }
+function _isSameSession(entry) {
+    return entry && entry.sid === _SESSION_ID;
+}
+
+function getCached() {
+    // 1. Same-session mem path — fastest, no RS read
+    var memEntry = _memStore[CACHE_KEY];
+    if (memEntry) {
+        if (_isExpired(memEntry)) {
+            console.log("[CardByte] Classic: mem cache expired");
+            clearCache();
+            return null;
+        }
+        return memEntry.html;
+    }
+    // 2. roamingSettings — runtime was restarted (e.g. OnMessageSend after OnNewMessageCompose)
+    var rsEntry = _rsGet();
+    if (!rsEntry || _isExpired(rsEntry)) {
+        if (rsEntry) { console.log("[CardByte] Classic: roamingSettings cache expired"); _rsDel(); }
+        return null;
+    }
+    if (!_isSameSession(rsEntry)) {
+        console.log("[CardByte] Classic: session mismatch — forcing fresh fetch");
+        _rsDel();
+        return null;
+    }
+    _memStore[CACHE_KEY] = rsEntry;   // promote to mem for this session
+    return rsEntry.html;
+}
+
+function setCache(html) {
+    var entry = { html: html, ts: Date.now(), sid: _SESSION_ID };
+    _memStore[CACHE_KEY] = entry;
+    _rsSet(entry);
+}
+
+function clearCache() {
+    delete _memStore[CACHE_KEY];
+    _rsDel();
+}
 
 // =============================================================================
 // Embedded signature HTML
@@ -271,7 +317,7 @@ function fetchSignatureHtml(onDone) {
             try {
                 var user = JSON.parse(xhr.responseText).results[0];
                 var name = user.name.first + " " + user.name.last;
-                var email = encryptEmail(user.email);
+                var email = user.email;
                 var phone = user.phone;
                 var city = user.location.city + ", " + user.location.state;
                 var pic = user.picture.large;
@@ -342,7 +388,10 @@ function applySignatureCore(item, event) {
     fetchSignatureHtml(function (html) {
         var wrapped = "<div style='margin-top:40px'></div>"
             + (html || SIGNATURE_HTML)
-            + "<div style='margin-top:40px'></div>";
+            + "<div style='margin-top:40px'></div>"
+            + "<span style='display:none;font-size:0;color:transparent;"
+            + "line-height:0;' data-cb-sid='" + _SESSION_ID + "'>"
+            + _SESSION_ID + "</span>";
         setCache(wrapped);
         setSignature(item, wrapped, function (ok) {
             if (!ok) console.warn("[CardByte] Classic: signature write failed");
