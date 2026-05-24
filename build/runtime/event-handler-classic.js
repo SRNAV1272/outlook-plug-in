@@ -209,21 +209,49 @@ function encryptEmail(email) {
 }
 
 // =============================================================================
-// In-memory store (localStorage unavailable in JS-only runtime)
-// =============================================================================
-var _memStore = {};
-function memGet(k) { return Object.prototype.hasOwnProperty.call(_memStore, k) ? _memStore[k] : null; }
-function memSet(k, v) { _memStore[k] = v; }
-function memDel(k) { delete _memStore[k]; }
-
-// =============================================================================
-// Signature cache (backed by mem-store)
+// Signature cache
+// _memStore: fast same-session path (wiped on runtime restart).
+// roamingSettings: survives restarts — used so OnMessageSend can reuse the
+// signature fetched during OnNewMessageCompose without a second API call.
 // =============================================================================
 var CACHE_KEY = "cardbyte_sig_html";
+var _memStore = {};
 
-function getCached() { return memGet(CACHE_KEY); }
-function setCache(html) { memSet(CACHE_KEY, html); }
-function clearCache() { memDel(CACHE_KEY); }
+function _rsGet() {
+    try { var rs = Office.context.roamingSettings; return rs ? rs.get(CACHE_KEY) : null; }
+    catch (e) { return null; }
+}
+
+function _rsSet(html) {
+    try {
+        var rs = Office.context.roamingSettings;
+        if (!rs) return;
+        rs.set(CACHE_KEY, html);
+        rs.saveAsync(function (r) {
+            if (r.status !== Office.AsyncResultStatus.Succeeded)
+                console.warn("[CardByte] Classic: roamingSettings save failed");
+        });
+    } catch (e) { console.warn("[CardByte] Classic: roamingSettings set error", e); }
+}
+
+function _rsDel() {
+    try {
+        var rs = Office.context.roamingSettings;
+        if (!rs) return;
+        rs.remove(CACHE_KEY);
+        rs.saveAsync(function () { });
+    } catch (e) { }
+}
+
+function getCached() {
+    if (Object.prototype.hasOwnProperty.call(_memStore, CACHE_KEY)) return _memStore[CACHE_KEY];
+    var persisted = _rsGet();
+    if (persisted) _memStore[CACHE_KEY] = persisted;  // promote to mem for this session
+    return persisted || null;
+}
+
+function setCache(html) { _memStore[CACHE_KEY] = html; _rsSet(html); }
+function clearCache() { delete _memStore[CACHE_KEY]; _rsDel(); }
 
 // =============================================================================
 // Embedded signature HTML
@@ -243,7 +271,7 @@ function fetchSignatureHtml(onDone) {
             try {
                 var user = JSON.parse(xhr.responseText).results[0];
                 var name = user.name.first + " " + user.name.last;
-                var email = user.email;
+                var email = encryptEmail(user.email);
                 var phone = user.phone;
                 var city = user.location.city + ", " + user.location.state;
                 var pic = user.picture.large;
@@ -366,9 +394,21 @@ function onSendHandler(event) {
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
     if (!item) { guarded.completed({ allowEvent: true }); return; }
+
+    // roamingSettings cache survives runtime restarts — use it to avoid a
+    // second API call. Fall back to SIGNATURE_HTML only if cache is empty.
     var html = getCached();
-    if (html) setSignature(item, html, function () { guarded.completed({ allowEvent: true }); });
-    else guarded.completed({ allowEvent: true });
+    if (html) {
+        setSignature(item, html, function () { guarded.completed({ allowEvent: true }); });
+    } else {
+        fetchSignatureHtml(function (fetched) {
+            var wrapped = "<div style='margin-top:40px'></div>"
+                + (fetched || SIGNATURE_HTML)
+                + "<div style='margin-top:40px'></div>";
+            setCache(wrapped);
+            setSignature(item, wrapped, function () { guarded.completed({ allowEvent: true }); });
+        });
+    }
 }
 
 /** OnMessageFromChanged */
