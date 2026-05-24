@@ -360,7 +360,7 @@ function applySignatureCore(item, event) {
     var cached = getCached();
     if (cached) {
         console.log("[CardByte] Classic: using cached signature");
-        setSignature(item, cached, function (ok) {
+        setSignature(item, cached + '<span>Cached</span>', function (ok) {
             if (!ok) console.warn("[CardByte] Classic: signature write failed");
             event.completed();
         });
