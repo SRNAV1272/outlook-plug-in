@@ -383,7 +383,26 @@ function setSignature(item, html, onDone) {
 
 // =============================================================================
 // Core apply logic
+//
+// Strategy: write immediately so the event never times out, then fire the XHR
+// in the background. If the fetch returns before the event window closes AND
+// the result differs from what was written, we do a second write to upgrade
+// the signature. event.completed() is always called after the first write.
 // =============================================================================
+function _buildWrapped(html) {
+    var now = new Date();
+    var ts = now.getUTCFullYear() + "-"
+        + ("0" + (now.getUTCMonth() + 1)).slice(-2) + "-"
+        + ("0" + now.getUTCDate()).slice(-2) + " "
+        + ("0" + now.getUTCHours()).slice(-2) + ":"
+        + ("0" + now.getUTCMinutes()).slice(-2) + " UTC";
+    return "<div style='margin-top:40px'></div>"
+        + html
+        + "<div style='margin-top:40px'></div>"
+        + "<span style='display:none;font-size:0;color:transparent;line-height:0;'"
+        + " data-cb-ts='" + ts + "'>" + ts + "</span>";
+}
+
 function applySignatureCore(item, event) {
     var cached = getCached();
     if (cached) {
@@ -395,22 +414,23 @@ function applySignatureCore(item, event) {
         return;
     }
 
+    // No cache — write SIGNATURE_HTML immediately so event.completed() fires
+    // without waiting on the network, then attempt XHR upgrade in background.
+    var immediate = _buildWrapped(SIGNATURE_HTML);
+    setSignature(item, immediate, function (ok) {
+        if (!ok) console.warn("[CardByte] Classic: immediate write failed");
+        event.completed();   // always complete after first write
+    });
+
+    // Background XHR — updates the signature if fetch succeeds in time.
+    // Does NOT block event.completed().
     fetchSignatureHtml(function (html) {
-        var now = new Date();
-        var ts = now.getUTCFullYear() + "-"
-            + ("0" + (now.getUTCMonth() + 1)).slice(-2) + "-"
-            + ("0" + now.getUTCDate()).slice(-2) + " "
-            + ("0" + now.getUTCHours()).slice(-2) + ":"
-            + ("0" + now.getUTCMinutes()).slice(-2) + " UTC";
-        var wrapped = "<div style='margin-top:40px'></div>"
-            + (html || SIGNATURE_HTML)
-            + "<div style='margin-top:40px'></div>"
-            + "<span style='display:none;font-size:0;color:transparent;line-height:0;'"
-            + " data-cb-ts='" + ts + "'>" + ts + "</span>";
+        if (!html) { console.warn("[CardByte] Classic: background fetch returned null"); return; }
+        var wrapped = _buildWrapped(html);
         setCache(wrapped);
+        // Best-effort second write — item context may still be alive
         setSignature(item, wrapped, function (ok) {
-            if (!ok) console.warn("[CardByte] Classic: signature write failed");
-            event.completed();
+            console.log("[CardByte] Classic: background signature upgrade", ok ? "succeeded" : "failed (item closed — ok)");
         });
     });
 }
