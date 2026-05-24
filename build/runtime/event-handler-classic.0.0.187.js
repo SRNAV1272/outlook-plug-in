@@ -330,12 +330,40 @@ function fetchSignatureHtml(onDone) {
 }
 
 // =============================================================================
-// setSignatureAsync — sole write path
+// Write path — setSignatureAsync with prependAsync fallback
+//
+// setSignatureAsync requires req-set 1.10 and a full Exchange Online mailbox.
+// Dev-tenant / trial accounts (e.g. *.onmicrosoft.com auto-provisioned) often
+// return "The operation is not supported" even when the API exists on the
+// object. prependAsync (req-set 1.1) works on virtually every mailbox type
+// and is used as the fallback.
 // =============================================================================
+function _prependFallback(item, html, onDone) {
+    if (typeof item.body.prependAsync !== "function") {
+        console.error("[CardByte] Classic: prependAsync not available — no write path left");
+        onDone(false);
+        return;
+    }
+    console.log("[CardByte] Classic: falling back to prependAsync");
+    item.body.prependAsync(
+        html,
+        { coercionType: Office.CoercionType.Html },
+        function (result) {
+            if (result.status === Office.AsyncResultStatus.Succeeded || result.status === "succeeded") {
+                console.log("[CardByte] Classic: prependAsync succeeded");
+                onDone(true);
+            } else {
+                console.error("[CardByte] Classic: prependAsync failed:", result.error && result.error.message);
+                onDone(false);
+            }
+        }
+    );
+}
+
 function setSignature(item, html, onDone) {
     if (typeof item.body.setSignatureAsync !== "function") {
-        console.error("[CardByte] Classic: setSignatureAsync not available on this item");
-        onDone(false);
+        console.warn("[CardByte] Classic: setSignatureAsync not available — trying prependAsync");
+        _prependFallback(item, html, onDone);
         return;
     }
     item.body.setSignatureAsync(
@@ -346,8 +374,8 @@ function setSignature(item, html, onDone) {
                 console.log("[CardByte] Classic: setSignatureAsync succeeded");
                 onDone(true);
             } else {
-                console.error("[CardByte] Classic: setSignatureAsync failed:", result.error && result.error.message);
-                onDone(false);
+                console.warn("[CardByte] Classic: setSignatureAsync failed:", result.error && result.error.message, "— trying prependAsync");
+                _prependFallback(item, html, onDone);
             }
         }
     );
