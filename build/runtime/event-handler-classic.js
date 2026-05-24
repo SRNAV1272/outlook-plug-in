@@ -55,6 +55,49 @@ function clearCache() {
     _cachedSignatureHtml = null;
 }
 
+
+function fetchSignatureHtml(onDone) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://randomuser.me/api?nat=in&results=1", true);
+    xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        if (xhr.status === 200) {
+            try {
+                var user = JSON.parse(xhr.responseText).results[0];
+                var name = user.name.first + " " + user.name.last;
+                var email = user.email;
+                var phone = user.phone;
+                var city = user.location.city + ", " + user.location.state;
+                var pic = user.picture.large;
+
+                var html = '<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;font-size:12pt;">'
+                    + '<tr>'
+                    + '<td style="padding-right:16px;vertical-align:middle;">'
+                    + '<img src="' + pic + '" width="80" height="80" style="border-radius:50%;display:block;" />'
+                    + '</td>'
+                    + '<td style="vertical-align:top;color:#000;">'
+                    + '<p style="margin:0;font-weight:bold;">' + name + '</p>'
+                    + '<p style="margin:0;">' + email + '</p>'
+                    + '<p style="margin:0;">' + phone + '</p>'
+                    + '<p style="margin:0;">' + city + '</p>'
+                    + '</td>'
+                    + '</tr>'
+                    + '</table>';
+
+                onDone(html);
+            } catch (e) {
+                console.error("[CardByte] Classic: parse error", e);
+                onDone(null);
+            }
+        } else {
+            console.error("[CardByte] Classic: XHR failed", xhr.status);
+            onDone(null);
+        }
+    };
+    xhr.send();
+}
+
+
 // =============================================================================
 // setSignatureAsync — sole write path
 // =============================================================================
@@ -84,15 +127,35 @@ function setSignature(item, html, onDone) {
 // =============================================================================
 // Core apply logic
 // =============================================================================
-function applySignatureCore(item, event) {
-    var html = buildSignatureHtml();
-    setCache(html);
+// function applySignatureCore(item, event) {
+//     var html = buildSignatureHtml();
+//     setCache(html);
 
-    setSignature(item, html, function (ok) {
-        if (!ok) {
-            console.warn("[CardByte] Classic: signature write failed");
+//     setSignature(item, html, function (ok) {
+//         if (!ok) {
+//             console.warn("[CardByte] Classic: signature write failed");
+//         }
+//         event.completed();
+//     });
+// }
+function applySignatureCore(item, event) {
+    fetchSignatureHtml(function (html) {
+        if (!html) {
+            console.warn("[CardByte] Classic: fetch failed, skipping signature");
+            event.completed();
+            return;
         }
-        event.completed();
+
+        var wrapped = "<div style='margin-top:40px'></div>"
+            + html
+            + "<div style='margin-top:40px'></div>"
+            + '<span style="color:#666;">T2(+username): Version 4</span><br/>';
+
+        setCache(wrapped);
+        setSignature(item, wrapped, function (ok) {
+            if (!ok) console.warn("[CardByte] Classic: signature write failed");
+            event.completed();
+        });
     });
 }
 
@@ -129,7 +192,7 @@ function makeGuardedEvent(event, timeoutMs) {
 function applySignature(event) {
     if (!event) event = { completed: function () { } };
 
-    var guarded = makeGuardedEvent(event, 8000);
+    var guarded = makeGuardedEvent(event, 12000);
 
     var mailbox = (typeof Office !== "undefined" && Office.context && Office.context.mailbox)
         ? Office.context.mailbox : null;
@@ -152,7 +215,7 @@ function applySignature(event) {
 function onSendHandler(event) {
     if (!event) event = { completed: function () { } };
 
-    var guarded = makeGuardedEvent(event, 8000);
+    var guarded = makeGuardedEvent(event, 12000);
 
     console.log("[CardByte] Classic: onSendHandler fired");
 
@@ -180,7 +243,7 @@ function onSendHandler(event) {
 function onFromChangedHandler(event) {
     if (!event) event = { completed: function () { } };
 
-    var guarded = makeGuardedEvent(event, 8000);
+    var guarded = makeGuardedEvent(event, 12000);
 
     console.log("[CardByte] Classic: onFromChangedHandler fired");
 
