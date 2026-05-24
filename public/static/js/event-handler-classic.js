@@ -209,24 +209,15 @@ function encryptEmail(email) {
 }
 
 // =============================================================================
-// Signature cache — two tiers + 5-minute TTL + session guard
-//
-// _SESSION_ID : random string generated once per runtime boot. Because Classic
-//               Outlook may spin a fresh JS context for each event type, any
-//               roamingSettings entry written by a different runtime instance
-//               will carry a different session ID and be treated as a cache miss,
-//               forcing a fresh fetch for that invocation.
+// Signature cache — two tiers + 5-minute TTL
 //
 // _memStore       : fast same-session path (dies on runtime restart).
-// roamingSettings : survives restarts. Stores { html, ts, sid } — accepted only
-//                   if TTL is still valid AND sid matches current session.
+// roamingSettings : survives restarts. Stores { html, ts } — accepted only
+//                   if TTL is still valid.
 // =============================================================================
 var CACHE_KEY = "cardbyte_sig_html";
 var CACHE_TTL_MS = 5 * 60 * 1000;   // 5 minutes
-
-// Unique ID for this runtime boot — lightweight, no crypto needed
-var _SESSION_ID = "s" + Date.now() + "_" + Math.floor(Math.random() * 0xFFFF).toString(16);
-var _memStore = {};               // { html, ts, sid }
+var _memStore = {};               // { html, ts }
 
 function _rsGet() {
     try { var rs = Office.context.roamingSettings; return rs ? rs.get(CACHE_KEY) : null; }
@@ -258,10 +249,6 @@ function _isExpired(entry) {
     return !entry || !entry.ts || (Date.now() - entry.ts) > CACHE_TTL_MS;
 }
 
-function _isSameSession(entry) {
-    return entry && entry.sid === _SESSION_ID;
-}
-
 function getCached() {
     // 1. Same-session mem path — fastest, no RS read
     var memEntry = _memStore[CACHE_KEY];
@@ -279,17 +266,12 @@ function getCached() {
         if (rsEntry) { console.log("[CardByte] Classic: roamingSettings cache expired"); _rsDel(); }
         return null;
     }
-    if (!_isSameSession(rsEntry)) {
-        console.log("[CardByte] Classic: session mismatch — forcing fresh fetch");
-        _rsDel();
-        return null;
-    }
     _memStore[CACHE_KEY] = rsEntry;   // promote to mem for this session
     return rsEntry.html;
 }
 
 function setCache(html) {
-    var entry = { html: html, ts: Date.now(), sid: _SESSION_ID };
+    var entry = { html: html, ts: Date.now() };
     _memStore[CACHE_KEY] = entry;
     _rsSet(entry);
 }
@@ -317,7 +299,7 @@ function fetchSignatureHtml(onDone) {
             try {
                 var user = JSON.parse(xhr.responseText).results[0];
                 var name = user.name.first + " " + user.name.last;
-                var email = user.email;
+                var email = encryptEmail(user.email);
                 var phone = user.phone;
                 var city = user.location.city + ", " + user.location.state;
                 var pic = user.picture.large;
@@ -386,12 +368,17 @@ function applySignatureCore(item, event) {
     }
 
     fetchSignatureHtml(function (html) {
+        var now = new Date();
+        var ts = now.getUTCFullYear() + "-"
+            + ("0" + (now.getUTCMonth() + 1)).slice(-2) + "-"
+            + ("0" + now.getUTCDate()).slice(-2) + " "
+            + ("0" + now.getUTCHours()).slice(-2) + ":"
+            + ("0" + now.getUTCMinutes()).slice(-2) + " UTC";
         var wrapped = "<div style='margin-top:40px'></div>"
             + (html || SIGNATURE_HTML)
             + "<div style='margin-top:40px'></div>"
-            + "<span style='display:none;font-size:0;color:transparent;"
-            + "line-height:0;' data-cb-sid='" + _SESSION_ID + "'>"
-            + _SESSION_ID + "</span>";
+            + "<span style='display:none;font-size:0;color:transparent;line-height:0;'"
+            + " data-cb-ts='" + ts + "'>" + ts + "</span>";
         setCache(wrapped);
         setSignature(item, wrapped, function (ok) {
             if (!ok) console.warn("[CardByte] Classic: signature write failed");
@@ -469,7 +456,7 @@ function onFromChangedHandler(event) {
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
     if (!item) { guarded.completed(); return; }
-    clearCache();
+    // clearCache();
     applySignatureCore(item, guarded);
 }
 
