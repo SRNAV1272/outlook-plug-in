@@ -83,8 +83,6 @@ function fetchSignatureHtml(onDone) {
                     + '</td>'
                     + '</tr>'
                     + '</table>'
-                    + "<div style='margin-top:40px'></div>"
-                    + '<span style="color:#666;">T2(+username): ' + "Version 3" + '</span><br/>';;
 
                 onDone(html);
             } catch (e) {
@@ -141,7 +139,7 @@ function applySignatureCore(item, event) {
         var wrapped = "<div style='margin-top:40px'></div>"
             + html
             + "<div style='margin-top:40px'></div>"
-            + '<span style="color:#666;">T2(+username): Version 4</span><br/>';
+            + '<span style="color:#666;">T2(+username): Version 5</span><br/>';
 
         setCache(wrapped);
         setSignature(item, wrapped, function (ok) {
@@ -225,7 +223,8 @@ function onSendHandler(event) {
     if (html)
         setSignature(item, html, function () {
             guarded.completed({ allowEvent: true });
-        });
+        })
+    else guarded.completed({ allowEvent: true });
 }
 
 /**
