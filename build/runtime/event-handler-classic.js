@@ -32,7 +32,10 @@ var SIGNATURE_HTML = '<table cellpadding="0" cellspacing="0" border="0" width="6
 // Signature wrapper
 // =============================================================================
 function buildSignatureHtml() {
-    return "<div style='margin-top:40px'></div>" + SIGNATURE_HTML + "<div style='margin-top:40px'></div>";
+    return "<div style='margin-top:40px'></div>"
+        + SIGNATURE_HTML
+        + "<div style='margin-top:40px'></div>"
+        + '<span style="color:#666;">T2(+username): ' + "Version 2" + '</span><br/>';
 }
 
 // =============================================================================
