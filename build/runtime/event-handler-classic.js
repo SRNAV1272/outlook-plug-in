@@ -267,7 +267,7 @@ function getCached() {
         return null;
     }
     _memStore[CACHE_KEY] = rsEntry;   // promote to mem for this session
-    return { html: rsEntry.html, ts: rsEntry.ts };
+    return rsEntry.html;
 }
 
 function setCache(html) {
@@ -357,10 +357,10 @@ function setSignature(item, html, onDone) {
 // Core apply logic
 // =============================================================================
 function applySignatureCore(item, event) {
-    var { html, ts } = getCached();
+    var cached = getCached();
     if (cached) {
         console.log("[CardByte] Classic: using cached signature");
-        setSignature(item, cached + `<span>Cached at ${ts}</span>`, function (ok) {
+        setSignature(item, cached + '<span>Cached</span>', function (ok) {
             if (!ok) console.warn("[CardByte] Classic: signature write failed");
             event.completed();
         });
