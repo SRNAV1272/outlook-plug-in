@@ -254,52 +254,73 @@ function compressBase64Image(dataUrl, maxWidth, quality) {
     });
 }
 
+// async function compressImagesInHtml(html) {
+//     // FIX: Guard against null/undefined html to prevent "null" being stringified
+//     if (!html) return html;
+
+//     const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
+//     const matches = [];
+//     let match;
+//     while ((match = regex.exec(html)) !== null) {
+//         matches.push({ fullMatch: match[0], dataUrl: match[1] });
+//     }
+//     if (matches.length === 0) return html;
+
+//     const mobile = isMobile();
+//     console.log(`[CardByte] Compressing ${matches.length} base64 image(s) (mobile: ${mobile})`);
+
+//     let result = html;
+
+//     for (const m of matches) {
+//         if (!result.includes(m.dataUrl)) continue;
+//         const isGif = m.dataUrl.startsWith("data:image/gif");
+//         if (isGif && mobile) {
+//             console.log(`[CardByte] Mobile: converting GIF to static PNG (${(m.dataUrl.length / 1024).toFixed(0)}KB)`);
+//             const staticPng = await convertGifToStaticPng(m.dataUrl);
+//             if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
+//             continue;
+//         }
+//         if (isGif) {
+//             console.log(`[CardByte] Skipping GIF (${(m.dataUrl.length / 1024).toFixed(0)}KB) to preserve animation`);
+//             continue;
+//         }
+//         const compressed = await compressBase64Image(m.dataUrl);
+//         if (compressed !== m.dataUrl) result = result.replace(m.dataUrl, compressed);
+//     }
+
+//     const maxSize = getMaxHtmlSize();
+//     if (result.length > maxSize) {
+//         console.log(`[CardByte] Still too large (${(result.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB), converting remaining GIFs to static PNG`);
+//         for (const m of matches) {
+//             if (!m.dataUrl.startsWith("data:image/gif")) continue;
+//             if (!result.includes(m.dataUrl)) continue;
+//             const staticPng = await convertGifToStaticPng(m.dataUrl);
+//             if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
+//         }
+//     }
+
+//     return result;
+// }
 async function compressImagesInHtml(html) {
-    // FIX: Guard against null/undefined html to prevent "null" being stringified
     if (!html) return html;
 
-    const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
-    const matches = [];
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-        matches.push({ fullMatch: match[0], dataUrl: match[1] });
-    }
-    if (matches.length === 0) return html;
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const profileImg = doc.querySelector('img[alt="Profile Photo"]');
 
-    const mobile = isMobile();
-    console.log(`[CardByte] Compressing ${matches.length} base64 image(s) (mobile: ${mobile})`);
+    if (!profileImg) return html;
 
-    let result = html;
+    const src = profileImg.getAttribute('src');
+    if (!src || !src.startsWith('data:image/')) return html;
 
-    for (const m of matches) {
-        if (!result.includes(m.dataUrl)) continue;
-        const isGif = m.dataUrl.startsWith("data:image/gif");
-        if (isGif && mobile) {
-            console.log(`[CardByte] Mobile: converting GIF to static PNG (${(m.dataUrl.length / 1024).toFixed(0)}KB)`);
-            const staticPng = await convertGifToStaticPng(m.dataUrl);
-            if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
-            continue;
-        }
-        if (isGif) {
-            console.log(`[CardByte] Skipping GIF (${(m.dataUrl.length / 1024).toFixed(0)}KB) to preserve animation`);
-            continue;
-        }
-        const compressed = await compressBase64Image(m.dataUrl);
-        if (compressed !== m.dataUrl) result = result.replace(m.dataUrl, compressed);
-    }
+    console.log(`[CardByte] Compressing profile picture (${(src.length / 1024).toFixed(0)}KB)`);
 
-    const maxSize = getMaxHtmlSize();
-    if (result.length > maxSize) {
-        console.log(`[CardByte] Still too large (${(result.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB), converting remaining GIFs to static PNG`);
-        for (const m of matches) {
-            if (!m.dataUrl.startsWith("data:image/gif")) continue;
-            if (!result.includes(m.dataUrl)) continue;
-            const staticPng = await convertGifToStaticPng(m.dataUrl);
-            if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
-        }
-    }
+    const compressed = await compressBase64Image(src);
+    if (compressed === src) return html;
 
-    return result;
+    console.log(`[CardByte] Profile picture compressed: ${(src.length / 1024).toFixed(0)}KB -> ${(compressed.length / 1024).toFixed(0)}KB`);
+
+    return html.replace(src, compressed);
 }
 
 function extractBase64Images(html) {
