@@ -21,7 +21,31 @@ function getOrCreateSessionId() {
 // FIX: Added skipSessionCheck option so onSendHandler (which runs in a separate
 // iframe/JS context with a fresh sessionStorage) can still read the cached
 // signature that was stored by applySignature in the compose iframe.
+// function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
+//     const currentSid = getOrCreateSessionId();
+//     const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
 
+//     if (!skipSessionCheck && cachedSid !== currentSid) {
+//         console.log("[CardByte] New session detected — clearing cached signature");
+//         localStorage.removeItem(CACHE_KEY);
+//         localStorage.removeItem(CACHE_SESSION_KEY);
+//         localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+//         return null;
+//     }
+
+//     if (!skipTtl) {
+//         const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
+//         if (Date.now() - ts > CACHE_TTL_MS) {
+//             console.log("[CardByte] Cache TTL expired — clearing cached signature");
+//             localStorage.removeItem(CACHE_KEY);
+//             localStorage.removeItem(CACHE_SESSION_KEY);
+//             localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+//             return null;
+//         }
+//     }
+
+//     return localStorage.getItem(CACHE_KEY);
+// }
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
     // If skipping session check, just return whatever is in cache directly
     if (skipSessionCheck) {
@@ -187,7 +211,7 @@ async function renderSignatureOnServer(user) {
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
-            "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
         if (primaryRes.ok) {
@@ -203,7 +227,7 @@ async function renderSignatureOnServer(user) {
 
     try {
         const legacyRes = await fetch(
-            "https://ns-renderer.cardbyte.ai/render-signature",
+            "https://renderer.cardbyte.ai/render-signature",
             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
@@ -302,6 +326,24 @@ async function compressImagesInHtml(html) {
     return result;
 }
 
+async function compressProfileImageInHtml(html) {
+    if (!html) return html;
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const profileImg = doc.querySelector('img[alt="Profile Photo"]');
+
+    if (!profileImg) return html;
+
+    const src = profileImg.getAttribute('src');
+    if (!src || !src.startsWith('data:image/')) return html;
+
+    const compressed = await compressBase64Image(src);
+    if (compressed === src) return html;
+
+    return html.replace(src, compressed);
+}
+
 function extractBase64Images(html) {
     const images = [];
     let index = 0;
@@ -365,63 +407,32 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
 
     if (fetchIfMissing && userEmail && fetched == null) {
-        const MAX_RETRIES = 2;
-        let attempt = 0;
-        let lastError = null;
-
-        while (attempt <= MAX_RETRIES) {
-            try {
-                if (attempt > 0) {
-                    console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, then 2s
-                }
-                const result = await renderSignatureOnServer(userEmail);
-                if (result != null) {
-                    fetched = result;
-                    CACHED_SIGNATURE_HTML = fetched;
-                    setCachedSignature(fetched);
-                    break;
-                }
-                lastError = new Error("Server returned null");
-            } catch (err) {
-                lastError = err;
-                console.warn(`[CardByte] Fetch attempt ${attempt + 1} failed:`, err);
-            }
-            attempt++;
-        }
-
-        if (fetched == null) {
-            console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
+        fetched = await renderSignatureOnServer(userEmail);
+        if (fetched != null) {
+            CACHED_SIGNATURE_HTML = fetched;
+            setCachedSignature(fetched);
         }
     }
 
     // FIX: If signature is still null (server down, cache miss, no email, etc.)
     // fall back to a minimal identity signature instead of inserting "null".
-    // Fallback only if everything above — fresh fetch, retries — all came up empty
     if (!fetched) {
-        // Last-ditch: try reading stale cache, bypassing both session and TTL checks
-        const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-        if (staleCache) {
-            console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
-            fetched = staleCache;
-        } else {
-            console.warn("[CardByte] No signature available — using fallback identity signature.");
-            fetched = `
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                  <tr>
-                    <td style="font-family:Arial,sans-serif;font-size:12px;">
-                      <strong>${userProfile.displayName || ""}</strong><br/>
-                      ${userProfile.emailAddress || ""}<br/>
-                      <span style="color:#999;">Sent via CardByte</span>
-                    </td>
-                  </tr>
-                </table>
-            `;
-        }
+        console.warn("[CardByte] No signature available — using fallback identity signature.");
+        fetched = `
+            <table cellpadding="0" cellspacing="0" border="0" width="400">
+              <tr>
+                <td style="font-family:Arial,sans-serif;font-size:12px;">
+                  <strong>${userProfile.displayName || ""}</strong><br/>
+                  ${userProfile.emailAddress || ""}<br/>
+                  <span style="color:#999;">Sent via CardByte</span>
+                </td>
+              </tr>
+            </table>
+        `;
     }
 
-    // let compressedSignature = await compressImagesInHtml(fetched);
-    compressedSignature = "<div style='margin-top:40px'></div>" + fetched + "<div style='margin-top:40px'></div>";
+    let compressedSignature = await compressProfileImageInHtml(fetched);
+    compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
