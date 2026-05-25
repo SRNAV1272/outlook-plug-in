@@ -290,89 +290,114 @@ var SIGNATURE_HTML = '<table cellpadding="0" cellspacing="0" border="0" width="6
 // =============================================================================
 // API fetch — builds signature HTML from server response
 // =============================================================================
-// function fetchSignatureHtml(onDone) {
-//     var xhr = new XMLHttpRequest();
-//     xhr.open("GET", "https://randomuser.me/api?nat=in&results=1", true);
-//     xhr.onreadystatechange = function () {
-//         if (xhr.readyState !== 4) return;
-//         if (xhr.status === 200) {
-//             try {
-//                 var user = JSON.parse(xhr.responseText).results[0];
-//                 var name = user.name.first + " " + user.name.last;
-//                 var email = encryptEmail(user.email);
-//                 var phone = user.phone;
-//                 var city = user.location.city + ", " + user.location.state;
-//                 var pic = user.picture.large;
-//                 var html = '<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;font-size:12pt;">'
-//                     + '<tr>'
-//                     + '<td style="padding-right:16px;vertical-align:middle;">'
-//                     + '<img src="' + pic + '" width="80" height="80" style="border-radius:50%;display:block;" />'
-//                     + '</td>'
-//                     + '<td style="vertical-align:top;color:#000;">'
-//                     + '<p style="margin:0;font-weight:bold;">' + name + '</p>'
-//                     + '<p style="margin:0;">' + email + '</p>'
-//                     + '<p style="margin:0;">' + phone + '</p>'
-//                     + '<p style="margin:0;">' + city + '</p>'
-//                     + '</td>'
-//                     + '</tr>'
-//                     + '</table>';
-//                 onDone(html);
-//             } catch (e) {
-//                 console.error("[CardByte] Classic: parse error", e);
-//                 onDone(null);
-//             }
-//         } else {
-//             console.error("[CardByte] Classic: XHR failed", xhr.status);
-//             onDone(null);
-//         }
-//     };
-//     xhr.send();
-// }
 
+// function fetchSignatureHtml(user, onDone) {
+//     var platform = Office.context.diagnostics.platform;
+//     var xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+
+//     Promise.resolve(encryptEmail(user))
+//         .then(function (encryptedMail) {
+//             console.warn("[CardByte] Classic: Encrypted Email...", encryptedMail);
+
+//             var xhr = new XMLHttpRequest();
+//             xhr.open("GET", "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", true);
+//             xhr.setRequestHeader("username", encryptedMail);
+//             xhr.setRequestHeader("X-Platform", xPlatform);
+
+//             xhr.onreadystatechange = function () {
+//                 if (xhr.readyState !== 4) return;
+//                 if (xhr.status === 200) {
+//                     Promise.resolve(handleAesDecrypt(xhr.responseText))
+//                         .then(function (decryptedData) {
+//                             var html = JSON.parse(decryptedData)?.html || null;
+//                             console.log("[CardByte] Classic: Using NEW renderer");
+//                             onDone(null, html);
+//                         })
+//                         .catch(function (e) {
+//                             console.error("[CardByte] Classic: decrypt error", e);
+//                             onDone("Decrypt error: " + JSON.stringify(e), null);
+//                         });
+//                 } else if (xhr.status === 0) {
+//                     var corsMsg = "Network error (status 0) — possible CORS block or no connectivity."
+//                         + " URL: https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active";
+//                     console.error("[CardByte] Classic: " + corsMsg);
+//                     onDone(corsMsg, null);
+//                 } else {
+//                     var errMsg = "XHR failed — HTTP " + xhr.status + " " + xhr.statusText
+//                         + (xhr.responseText ? " | Response: " + xhr.responseText.slice(0, 300) : "");
+//                     console.error("[CardByte] Classic:", errMsg);
+//                     onDone(errMsg, null);
+//                 }
+//             };
+
+//             xhr.onerror = function () {
+//                 var netMsg = "XHR onerror — network-level failure (CORS, DNS, or connectivity)."
+//                     + " URL: https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active";
+//                 console.error("[CardByte] Classic:", netMsg);
+//                 onDone(netMsg, null);
+//             };
+
+//             xhr.send();
+//         })
+//         .catch(function (err) {
+//             console.error("[CardByte] Classic: encryptEmail error", err);
+//             onDone("encryptEmail error: " + JSON.stringify(err), null);
+//         });
+// }
+// Replace your fetchSignatureHtml function with this
 function fetchSignatureHtml(user, onDone) {
     var platform = Office.context.diagnostics.platform;
     var xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
     Promise.resolve(encryptEmail(user))
         .then(function (encryptedMail) {
-            console.warn("[CardByte] Classic: Encrypted Email...", encryptedMail);
+            console.log("[CardByte] Classic: Encrypted Email...", encryptedMail);
+
+            // Use randomuser.me API's CORS support by sending your request through it
+            // Create a unique cache-busting parameter
+            var callbackName = "jsonp_callback_" + Date.now() + "_" + Math.random().toString(36).substr(2, 8);
+
+            // Method 1: Try XHR with CORS proxy (if you have one)
+            // Method 2: Use randomuser.me as a JSONP proxy (not ideal but works)
+
+            // Better approach: Use a CORS proxy service (temporary for testing)
+            var corsProxy = "https://api.allorigins.win/raw?url=";
+            var targetUrl = "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active";
 
             var xhr = new XMLHttpRequest();
-            xhr.open("GET", "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", true);
+            xhr.open("GET", corsProxy + encodeURIComponent(targetUrl), true);
             xhr.setRequestHeader("username", encryptedMail);
             xhr.setRequestHeader("X-Platform", xPlatform);
 
             xhr.onreadystatechange = function () {
                 if (xhr.readyState !== 4) return;
                 if (xhr.status === 200) {
-                    Promise.resolve(handleAesDecrypt(xhr.responseText))
-                        .then(function (decryptedData) {
-                            var html = JSON.parse(decryptedData)?.html || null;
-                            console.log("[CardByte] Classic: Using NEW renderer");
-                            onDone(null, html);
-                        })
-                        .catch(function (e) {
-                            console.error("[CardByte] Classic: decrypt error", e);
-                            onDone("Decrypt error: " + JSON.stringify(e), null);
-                        });
-                } else if (xhr.status === 0) {
-                    var corsMsg = "Network error (status 0) — possible CORS block or no connectivity."
-                        + " URL: https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active";
-                    console.error("[CardByte] Classic: " + corsMsg);
-                    onDone(corsMsg, null);
+                    try {
+                        // The proxy returns the response directly
+                        var response = JSON.parse(xhr.responseText);
+                        Promise.resolve(handleAesDecrypt(response))
+                            .then(function (decryptedData) {
+                                var html = JSON.parse(decryptedData)?.html || null;
+                                console.log("[CardByte] Classic: Using NEW renderer via proxy");
+                                onDone(null, html);
+                            })
+                            .catch(function (e) {
+                                console.error("[CardByte] Classic: decrypt error", e);
+                                onDone("Decrypt error: " + JSON.stringify(e), null);
+                            });
+                    } catch (e) {
+                        console.error("[CardByte] Classic: parse error", e);
+                        onDone("Parse error: " + e.message, null);
+                    }
                 } else {
-                    var errMsg = "XHR failed — HTTP " + xhr.status + " " + xhr.statusText
-                        + (xhr.responseText ? " | Response: " + xhr.responseText.slice(0, 300) : "");
-                    console.error("[CardByte] Classic:", errMsg);
-                    onDone(errMsg, null);
+                    console.error("[CardByte] Classic: XHR failed", xhr.status);
+                    onDone("HTTP " + xhr.status, null);
                 }
             };
 
             xhr.onerror = function () {
-                var netMsg = "XHR onerror — network-level failure (CORS, DNS, or connectivity)."
-                    + " URL: https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active";
-                console.error("[CardByte] Classic:", netMsg);
-                onDone(netMsg, null);
+                console.error("[CardByte] Classic: XHR onerror");
+                onDone("Network error", null);
             };
 
             xhr.send();
