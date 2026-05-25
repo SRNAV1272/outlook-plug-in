@@ -413,8 +413,8 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         `;
     }
 
-    // let compressedSignature = await compressImagesInHtml(fetched);
-    compressedSignature = "<div style='margin-top:40px'></div>" + fetched + "<div style='margin-top:40px'></div>";
+    let compressedSignature = await compressImagesInHtml(fetched);
+    compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
