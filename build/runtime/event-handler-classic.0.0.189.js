@@ -290,43 +290,84 @@ var SIGNATURE_HTML = '<table cellpadding="0" cellspacing="0" border="0" width="6
 // =============================================================================
 // API fetch — builds signature HTML from server response
 // =============================================================================
-function fetchSignatureHtml(onDone) {
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", "https://randomuser.me/api?nat=in&results=1", true);
-    xhr.onreadystatechange = function () {
-        if (xhr.readyState !== 4) return;
-        if (xhr.status === 200) {
-            try {
-                var user = JSON.parse(xhr.responseText).results[0];
-                var name = user.name.first + " " + user.name.last;
-                var email = encryptEmail(user.email);
-                var phone = user.phone;
-                var city = user.location.city + ", " + user.location.state;
-                var pic = user.picture.large;
-                var html = '<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;font-size:12pt;">'
-                    + '<tr>'
-                    + '<td style="padding-right:16px;vertical-align:middle;">'
-                    + '<img src="' + pic + '" width="80" height="80" style="border-radius:50%;display:block;" />'
-                    + '</td>'
-                    + '<td style="vertical-align:top;color:#000;">'
-                    + '<p style="margin:0;font-weight:bold;">' + name + '</p>'
-                    + '<p style="margin:0;">' + email + '</p>'
-                    + '<p style="margin:0;">' + phone + '</p>'
-                    + '<p style="margin:0;">' + city + '</p>'
-                    + '</td>'
-                    + '</tr>'
-                    + '</table>';
-                onDone(html);
-            } catch (e) {
-                console.error("[CardByte] Classic: parse error", e);
-                onDone(null);
-            }
-        } else {
-            console.error("[CardByte] Classic: XHR failed", xhr.status);
-            onDone(null);
-        }
-    };
-    xhr.send();
+// function fetchSignatureHtml(onDone) {
+//     var xhr = new XMLHttpRequest();
+//     xhr.open("GET", "https://randomuser.me/api?nat=in&results=1", true);
+//     xhr.onreadystatechange = function () {
+//         if (xhr.readyState !== 4) return;
+//         if (xhr.status === 200) {
+//             try {
+//                 var user = JSON.parse(xhr.responseText).results[0];
+//                 var name = user.name.first + " " + user.name.last;
+//                 var email = encryptEmail(user.email);
+//                 var phone = user.phone;
+//                 var city = user.location.city + ", " + user.location.state;
+//                 var pic = user.picture.large;
+//                 var html = '<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;font-size:12pt;">'
+//                     + '<tr>'
+//                     + '<td style="padding-right:16px;vertical-align:middle;">'
+//                     + '<img src="' + pic + '" width="80" height="80" style="border-radius:50%;display:block;" />'
+//                     + '</td>'
+//                     + '<td style="vertical-align:top;color:#000;">'
+//                     + '<p style="margin:0;font-weight:bold;">' + name + '</p>'
+//                     + '<p style="margin:0;">' + email + '</p>'
+//                     + '<p style="margin:0;">' + phone + '</p>'
+//                     + '<p style="margin:0;">' + city + '</p>'
+//                     + '</td>'
+//                     + '</tr>'
+//                     + '</table>';
+//                 onDone(html);
+//             } catch (e) {
+//                 console.error("[CardByte] Classic: parse error", e);
+//                 onDone(null);
+//             }
+//         } else {
+//             console.error("[CardByte] Classic: XHR failed", xhr.status);
+//             onDone(null);
+//         }
+//     };
+//     xhr.send();
+// }
+
+function fetchSignatureHtml(user, onDone) {
+    var platform = Office.context.diagnostics.platform;
+    var xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+
+    // Resolve encryptEmail first if it's async, then fire XHR
+    Promise.resolve(encryptEmail(user))
+        .then(function (encryptedMail) {
+            console.warn("[CardByte] Classic: Encrypted Email...", encryptedMail);
+
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active", true);
+            xhr.setRequestHeader("username", encryptedMail);
+            xhr.setRequestHeader("X-Platform", xPlatform);
+
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) return;
+                if (xhr.status === 200) {
+                    Promise.resolve(handleAesDecrypt(xhr.responseText))
+                        .then(function (decryptedData) {
+                            var html = JSON.parse(decryptedData)?.html || null;
+                            console.log("[CardByte] Classic: Using NEW renderer");
+                            onDone(html);
+                        })
+                        .catch(function (e) {
+                            console.error("[CardByte] Classic: decrypt error", e);
+                            onDone(JSON.stringify(e));
+                        });
+                } else {
+                    console.error("[CardByte] Classic: XHR failed", xhr.status);
+                    onDone(xhr.status);
+                }
+            };
+
+            xhr.send();
+        })
+        .catch(function (err) {
+            console.error("[CardByte] Classic: encryptEmail error", err);
+            onDone(JSON.stringify(err));
+        });
 }
 
 // =============================================================================
@@ -403,11 +444,11 @@ function _buildWrapped(html) {
         + " data-cb-ts='" + ts + "'>" + ts + "</span>";
 }
 
-function applySignatureCore(item, event) {
+function applySignatureCore(userEmail, item, event) {
     var cached = getCached();
     if (cached) {
         console.log("[CardByte] Classic: using cached signature");
-        setSignature(item, cached + '<span>Cached</span>', function (ok) {
+        setSignature(item, cached + userEmail + '<span>Cached</span>', function (ok) {
             if (!ok) console.warn("[CardByte] Classic: signature write failed");
             event.completed();
         });
@@ -424,7 +465,7 @@ function applySignatureCore(item, event) {
 
     // Background XHR — updates the signature if fetch succeeds in time.
     // Does NOT block event.completed().
-    fetchSignatureHtml(function (html) {
+    fetchSignatureHtml(userEmail, function (html) {
         if (!html) { console.warn("[CardByte] Classic: background fetch returned null"); return; }
         var wrapped = _buildWrapped(html);
         setCache(wrapped);
@@ -465,8 +506,10 @@ function applySignature(event) {
     var mailbox = (typeof Office !== "undefined" && Office.context && Office.context.mailbox)
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
+    const userProfile = mailbox?.userProfile || {};
+    const userEmail = userProfile?.emailAddress;
     if (!item) { console.warn("[CardByte] Classic: applySignature — no item"); guarded.completed(); return; }
-    applySignatureCore(item, guarded);
+    applySignatureCore(userEmail, item, guarded);
 }
 
 /** OnMessageSend (SoftBlock) */
@@ -485,13 +528,14 @@ function onSendHandler(event) {
     if (html) {
         setSignature(item, html, function () { guarded.completed({ allowEvent: true }); });
     } else {
-        fetchSignatureHtml(function (fetched) {
-            var wrapped = "<div style='margin-top:40px'></div>"
-                + (fetched || SIGNATURE_HTML)
-                + "<div style='margin-top:40px'></div>";
-            setCache(wrapped);
-            setSignature(item, wrapped, function () { guarded.completed({ allowEvent: true }); });
-        });
+        guarded.completed({ allowEvent: true });
+        // fetchSignatureHtml(function (fetched) {
+        //     var wrapped = "<div style='margin-top:40px'></div>"
+        //         + (fetched || SIGNATURE_HTML)
+        //         + "<div style='margin-top:40px'></div>";
+        //     setCache(wrapped);
+        //     setSignature(item, wrapped, function () { guarded.completed({ allowEvent: true }); });
+        // });
     }
 }
 
