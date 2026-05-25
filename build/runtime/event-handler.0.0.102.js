@@ -339,6 +339,8 @@ async function compressProfileImageInHtml(html) {
     if (!src || !src.startsWith('data:image/')) return html;
 
     const compressed = await compressBase64Image(src);
+
+    console.log(`[CardByte] Mobile: converting GIF to static PNG (${(compressed.length / 1024).toFixed(0)}KB)`);
     if (compressed === src) return html;
 
     return html.replace(src, compressed);
