@@ -333,7 +333,6 @@ function fetchSignatureHtml(user, onDone) {
     var platform = Office.context.diagnostics.platform;
     var xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
-    // Resolve encryptEmail first if it's async, then fire XHR
     Promise.resolve(encryptEmail(user))
         .then(function (encryptedMail) {
             console.warn("[CardByte] Classic: Encrypted Email...", encryptedMail);
@@ -350,23 +349,37 @@ function fetchSignatureHtml(user, onDone) {
                         .then(function (decryptedData) {
                             var html = JSON.parse(decryptedData)?.html || null;
                             console.log("[CardByte] Classic: Using NEW renderer");
-                            onDone(html);
+                            onDone(null, html);
                         })
                         .catch(function (e) {
                             console.error("[CardByte] Classic: decrypt error", e);
-                            onDone(JSON.stringify(e));
+                            onDone("Decrypt error: " + JSON.stringify(e), null);
                         });
+                } else if (xhr.status === 0) {
+                    var corsMsg = "Network error (status 0) — possible CORS block or no connectivity."
+                        + " URL: https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active";
+                    console.error("[CardByte] Classic: " + corsMsg);
+                    onDone(corsMsg, null);
                 } else {
-                    console.error("[CardByte] Classic: XHR failed", xhr.status);
-                    onDone(xhr.status);
+                    var errMsg = "XHR failed — HTTP " + xhr.status + " " + xhr.statusText
+                        + (xhr.responseText ? " | Response: " + xhr.responseText.slice(0, 300) : "");
+                    console.error("[CardByte] Classic:", errMsg);
+                    onDone(errMsg, null);
                 }
+            };
+
+            xhr.onerror = function () {
+                var netMsg = "XHR onerror — network-level failure (CORS, DNS, or connectivity)."
+                    + " URL: https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active";
+                console.error("[CardByte] Classic:", netMsg);
+                onDone(netMsg, null);
             };
 
             xhr.send();
         })
         .catch(function (err) {
             console.error("[CardByte] Classic: encryptEmail error", err);
-            onDone(JSON.stringify(err));
+            onDone("encryptEmail error: " + JSON.stringify(err), null);
         });
 }
 
@@ -465,11 +478,22 @@ function applySignatureCore(userEmail, item, event) {
 
     // Background XHR — updates the signature if fetch succeeds in time.
     // Does NOT block event.completed().
-    fetchSignatureHtml(userEmail, function (html) {
-        if (!html) { console.warn("[CardByte] Classic: background fetch returned null"); return; }
+    fetchSignatureHtml(userEmail, function (err, html) {
+        if (err || !html) {
+            var errorBlock = "<div style='margin-top:16px;padding:10px;border:1px solid #c00;"
+                + "background:#fff0f0;font-family:monospace;font-size:11px;color:#c00;"
+                + "max-width:600px;word-break:break-all;'>"
+                + "<strong>[CardByte] Signature fetch error:</strong><br>"
+                + (err ? err.replace(/</g, "&lt;").replace(/>/g, "&gt;") : "html was null/empty")
+                + "</div>";
+            // Best-effort: inject error block after the fallback signature already written
+            setSignature(item, _buildWrapped(SIGNATURE_HTML + errorBlock), function (ok) {
+                console.log("[CardByte] Classic: error-injected signature write", ok ? "succeeded" : "failed");
+            });
+            return;
+        }
         var wrapped = _buildWrapped(html);
         setCache(wrapped);
-        // Best-effort second write — item context may still be alive
         setSignature(item, wrapped, function (ok) {
             console.log("[CardByte] Classic: background signature upgrade", ok ? "succeeded" : "failed (item closed — ok)");
         });
