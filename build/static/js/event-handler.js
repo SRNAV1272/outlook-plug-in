@@ -326,6 +326,24 @@ async function compressImagesInHtml(html) {
     return result;
 }
 
+async function compressProfileImageInHtml(html) {
+    if (!html) return html;
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const profileImg = doc.querySelector('img[alt="Profile Photo"]');
+
+    if (!profileImg) return html;
+
+    const src = profileImg.getAttribute('src');
+    if (!src || !src.startsWith('data:image/')) return html;
+
+    const compressed = await compressBase64Image(src);
+    if (compressed === src) return html;
+
+    return html.replace(src, compressed);
+}
+
 function extractBase64Images(html) {
     const images = [];
     let index = 0;
@@ -413,7 +431,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         `;
     }
 
-    let compressedSignature = await compressImagesInHtml(fetched);
+    let compressedSignature = await compressProfileImageInHtml(fetched);
     compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
 
     console.log("[CardByte] ════════════════════════════════════",
