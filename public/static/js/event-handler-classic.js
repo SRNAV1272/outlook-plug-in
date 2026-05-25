@@ -488,7 +488,7 @@ function fetchSignatureHtml(user, onDone) {
                     console.log("[CardByte] Classic: Response Content-Type:", response.headers.get("Content-Type"));
 
                     if (!response.ok) {
-                        return response.text().then(function (errorText) {
+                        return response.json().then(function (errorText) {
                             var errMsg = "Fetch failed — HTTP " + response.status + " " + response.statusText
                                 + (errorText ? " | Response: " + errorText.slice(0, 300) : "");
                             console.error("[CardByte] Classic:", errMsg);
@@ -497,7 +497,7 @@ function fetchSignatureHtml(user, onDone) {
                         });
                     }
 
-                    return response.text();
+                    return response.json();
                 })
                 .then(function (responseText) {
                     return Promise.resolve(handleAesDecrypt(responseText));
