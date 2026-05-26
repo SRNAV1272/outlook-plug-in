@@ -10,46 +10,28 @@
  *   ✗ localStorage / sessionStorage
  *   ✗ DOM / Canvas API
  *
- * Signature strategy (two tiers — NO XHR in this file):
+ * Signature strategy (single tier — NO fallback, NO XHR in this file):
  *   1. roamingSettings cache — populated AND actively refreshed by SharedRuntime
  *      (taskpane.js interval loop, every REFRESH_INTERVAL_MS).
- *      Cache hit  → write immediately. No TTL check here — SharedRuntime owns
- *      freshness; if the entry exists it is considered valid.
- *   2. Embedded SIGNATURE_HTML fallback — used only when SharedRuntime has not
- *      yet written its first entry (true cold launch, < ~2 s after Outlook start).
- *      The next compose will get the live signature automatically.
- *
- *   All network calls live exclusively in taskpane.js (SharedRuntime context),
- *   where fetch() works without WinINet / CORS concerns.
+ *      Cache hit  → write immediately.
+ *      Cache miss → inject a visible error message into the compose body
+ *                   so the user knows the signature failed to load.
  *
  * Cache freshness contract:
- *   - SharedRuntime calls prefetchSignature() on Office.onReady (initial load).
- *   - SharedRuntime then calls prefetchSignature() every REFRESH_INTERVAL_MS
- *     (e.g. 4 min) for the lifetime of the Outlook session.
+ *   - SharedRuntime calls startPrefetchLoop() on Office.onReady (initial load).
+ *   - SharedRuntime then calls _prefetchSignatureForClassic() every 4 min
+ *     for the lifetime of the Outlook session.
  *   - This file never expires or deletes a valid cache entry on its own.
  *     It only clears on OnMessageFromChanged (account switch → stale identity).
- *
- * Events handled:
- *   OnNewMessageCompose   → applySignature       (req set 1.10)
- *   OnMessageSend         → onSendHandler        (req set 1.12, SoftBlock)
- *   OnMessageFromChanged  → onFromChangedHandler (req set 1.13)
  */
 
 "use strict";
 
 // =============================================================================
 // Signature cache — roamingSettings + in-session mem
-//
-// NO TTL enforcement here. Freshness is guaranteed by the SharedRuntime
-// refresh interval in taskpane.js. This handler trusts whatever is in the
-// cache as the most recently fetched value.
-//
-// _memStore       : fast same-session path (dies on runtime restart).
-// roamingSettings : survives restarts. Written by SharedRuntime.
-//                   Shape: { html: string, ts: number }
 // =============================================================================
 var CACHE_KEY = "cardbyte_sig_html";
-var _memStore = {};               // { html, ts }
+var _memStore = {};   // { html, ts }
 
 function _rsGet() {
     try {
@@ -69,20 +51,15 @@ function _rsDel() {
 
 /**
  * Returns the cached signature HTML string, or null if no entry exists.
- * Does NOT check TTL — SharedRuntime is responsible for keeping the entry fresh.
  */
 function getCached() {
-    // 1. In-session mem — fastest, no RS read needed
     var memEntry = _memStore[CACHE_KEY];
-    if (memEntry) {
-        return memEntry.html;
-    }
-    // 2. roamingSettings — populated by SharedRuntime, survives runtime restarts
+    if (memEntry) return memEntry.html;
+
     var rsEntry = _rsGet();
-    if (!rsEntry || !rsEntry.html) {
-        return null;
-    }
-    _memStore[CACHE_KEY] = rsEntry;   // promote to mem for this session
+    if (!rsEntry || !rsEntry.html) return null;
+
+    _memStore[CACHE_KEY] = rsEntry;
     return rsEntry.html;
 }
 
@@ -96,12 +73,25 @@ function clearCache() {
 }
 
 // =============================================================================
-// Embedded fallback signature HTML
-// Used only on true cold launch (SharedRuntime first prefetch not yet complete).
-// SharedRuntime will overwrite roamingSettings within a few seconds of startup;
-// the next OnNewMessageCompose will get the live signature.
+// Error HTML — injected when cache is absent
 // =============================================================================
-var SIGNATURE_HTML = '<table cellpadding="0" cellspacing="0" border="0" width="610" xmlns:v="urn:schemas-microsoft-com:vml" style="border-collapse:collapse;border-spacing:0;margin:0;padding:0;width:610px;table-layout:fixed;font-family:Arial,Helvetica,sans-serif;vertical-align:top;mso-table-lspace:0;mso-table-rspace:0;-ms-text-size-adjust:100%;-webkit-text-size-adjust:100%;background-color:#ffffff;"><colgroup><col width="190" style="width:190px;"><col width="420" style="width:420px;"></colgroup><tr><td rowspan="8" width="190" align="center" valign="middle" style="width:190px;padding:0;text-align:center;vertical-align:middle;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin:0;padding:0;table-layout:fixed;"><tr><td align="center" valign="middle" style="padding:0 40px 0 0;"><table cellpadding="0" cellspacing="0" border="0" align="center" style="border-collapse:collapse;margin:0;padding:0;table-layout:fixed;margin-left:auto;margin-right:auto;"><tr><td align="center" valign="middle" style="padding:0;"><img src="https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg" width="150" height="120" alt="Company Logo" style="display:block;border:0;width:150px;height:120px;" vspace="0" hspace="0" border="0"></td></tr></table></td></tr></table></td><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;line-height:1;margin:0;padding:0;">Sai Rajesh Korla</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;line-height:1;margin:0;padding:0;">Software Engineer ( MERN Stack )</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;font-weight:normal;font-style:normal;text-decoration:none;margin:0;padding:0;">Telephone: 0124434887</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;font-weight:normal;font-style:normal;text-decoration:none;margin:0;padding:0;">Mobile: +917024899020</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;font-weight:normal;font-style:normal;text-decoration:none;margin:0;padding:0;line-height:1.4;">Ayyappa Society, Hyderabad, Telangana, India, 500001</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;line-height:1;margin:0;padding:0;">CIN No. : L74899DL1991PLC044843</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;font-weight:normal;font-style:normal;text-decoration:none;margin:0;padding:0;">Website: www.navajna.com</p></td></tr></table>';
+var ERROR_HTML = [
+    "<div style='",
+    "margin:16px 0;",
+    "padding:12px 16px;",
+    "border:1px solid #f5c6cb;",
+    "border-radius:4px;",
+    "background-color:#fff3cd;",
+    "font-family:Arial,Helvetica,sans-serif;",
+    "font-size:13px;",
+    "color:#856404;",
+    "'>",
+    "<strong>[CardByte]</strong> ",
+    "Signature could not be loaded — the SharedRuntime cache is empty. ",
+    "Please wait a few seconds and reopen this compose window, ",
+    "or open the CardByte taskpane to trigger a refresh.",
+    "</div>"
+].join("");
 
 // =============================================================================
 // Write path — setSignatureAsync with prependAsync fallback
@@ -168,14 +158,9 @@ function _buildWrapped(html) {
 // =============================================================================
 // Core apply logic
 //
-// Tier 1: roamingSettings cache present (written + refreshed by SharedRuntime)
-//         → write immediately. No network call at all.
-//
-// Tier 2: cache absent (SharedRuntime not yet written its first entry,
-//         i.e. true cold launch within the first ~2 s of Outlook start)
-//         → write embedded SIGNATURE_HTML and complete.
-//           SharedRuntime will populate the cache moments later;
-//           the next compose will get the live signature.
+// Cache hit  → write signature immediately (SharedRuntime owns freshness).
+// Cache miss → inject visible error into compose body so user is informed.
+//              No silent fallback. No embedded default HTML.
 // =============================================================================
 function applySignatureCore(item, event) {
     var cached = getCached();
@@ -189,9 +174,20 @@ function applySignatureCore(item, event) {
         return;
     }
 
-    console.warn("[CardByte] Classic: cache absent — writing embedded fallback (cold launch)");
-    setSignature(item, _buildWrapped(SIGNATURE_HTML), function (ok) {
-        if (!ok) console.warn("[CardByte] Classic: fallback write failed");
+    // Cache miss — SharedRuntime has not yet written its first entry.
+    // Diagnose roamingSettings state for debugging.
+    var rsRaw = null;
+    try { rsRaw = Office.context.roamingSettings.get(CACHE_KEY); } catch (e) { }
+    console.error(
+        "[CardByte] Classic: cache MISS — roamingSettings entry:",
+        rsRaw,
+        "| _memStore entry:", _memStore[CACHE_KEY]
+    );
+
+    // Inject error message so user is not silently left without a signature.
+    console.warn("[CardByte] Classic: injecting error message into compose body");
+    _prependFallback(item, ERROR_HTML, function (ok) {
+        if (!ok) console.error("[CardByte] Classic: error injection also failed");
         event.completed();
     });
 }
@@ -246,17 +242,15 @@ function onSendHandler(event) {
     var item = mailbox ? mailbox.item : null;
     if (!item) { guarded.completed({ allowEvent: true }); return; }
 
-    // roamingSettings cache is always fresh (SharedRuntime refreshes it on interval).
-    // Re-apply the latest signature at send time to catch any updates made since compose.
     var html = getCached();
     if (html) {
+        // Re-apply latest cached signature at send time to catch any updates.
         setSignature(item, _buildWrapped(html), function () {
             guarded.completed({ allowEvent: true });
         });
     } else {
-        // Genuinely cold (Outlook just started and prefetch hasn't finished yet).
-        // Allow the send — the embedded fallback was already written at compose time.
-        console.warn("[CardByte] Classic: onSendHandler — cache absent, sending as-is");
+        // Cache still absent at send time — allow send but log clearly.
+        console.error("[CardByte] Classic: onSendHandler — cache absent at send time, sending without signature");
         guarded.completed({ allowEvent: true });
     }
 }
@@ -270,8 +264,7 @@ function onFromChangedHandler(event) {
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
     if (!item) { guarded.completed(); return; }
-    // Clear stale identity cache. SharedRuntime must re-prefetch for the new From address.
-    // This handler writes the embedded fallback for this compose; next compose gets live sig.
+    // Clear stale identity cache — SharedRuntime must re-prefetch for the new From address.
     clearCache();
     applySignatureCore(item, guarded);
 }
