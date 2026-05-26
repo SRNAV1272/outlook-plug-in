@@ -1,7 +1,6 @@
 /* global Office */
 import React, { useCallback, useEffect, useState } from "react";
 import { getOfficeToken, login, setToken, getToken } from "./services/authService";
-// import { encryptEmail, handleAesDecrypt } from "./services/cryptoService";
 import LoginForm from "./components/LoginForm";
 import SignatureView from "./components/SignatureView";
 
@@ -57,49 +56,26 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
 }
 
 // =============================================================================
-// Classic Outlook SharedRuntime — background prefetch + refresh loop
-//
-// Responsibilities:
-//   1. Encrypt the user's email via shared encryptEmail().
-//   2. Fetch the live signature from the production endpoint.
-//   3. Decrypt the AES-encrypted response via shared handleAesDecrypt().
-//   4. Write { html, ts } to roamingSettings so event-handler-classic.js
-//      can read it with NO XHR of its own.
-//   5. Re-run every REFRESH_INTERVAL_MS for the entire Outlook session so
-//      the cache never goes stale regardless of how long Outlook stays open.
-//
-// Contract with event-handler-classic.js:
-//   • The classic handler trusts any roamingSettings entry unconditionally —
-//     it performs no TTL check of its own.
-//   • This loop is the sole authority on cache freshness.
-//   • On account switch (OnMessageFromChanged) the classic handler clears the
-//     cache; the next interval tick (≤ REFRESH_INTERVAL_MS) repopulates it
-//     for the new address.
+// PREFETCH — owned here, but STARTED from index.js inside Office.onReady.
+// No Office.onReady call in this file — that caused the race condition.
 // =============================================================================
 const CACHE_KEY = "cardbyte_sig_html";
-const REFRESH_INTERVAL_MS = 4 * 60 * 1000;   // 4 min — keeps cache always fresh
+const REFRESH_INTERVAL_MS = 4 * 60 * 1000; // 4 min
 
 // Module-level handle — persists across React re-renders.
-// Only one loop ever runs at a time.
 let _prefetchIntervalId = null;
 
-/**
- * Fetch the current user's signature HTML and write it to roamingSettings.
- *
- * Mirrors the exact API call in SignatureView.renderSignatureOnServer():
- *   GET /email-signature/html/outlook/get-active
- *   headers: { username: <AES-encrypted email>, X-Platform: "WINDOWS"|"MAC" }
- *   response: AES-encrypted text → decrypt → JSON.parse → .html
- *
- * No-op on non-Classic-Windows platforms (OWA / New Outlook / Mac fetch
- * directly in event.html via their own browser fetch context).
- */
 async function _prefetchSignatureForClassic() {
   try {
     const diagnosticsPlatform = Office?.context?.diagnostics?.platform;
 
+    console.log("[CardByte] Prefetch: platform =", diagnosticsPlatform);
+
     // Guard: only Classic Outlook on Windows needs the roamingSettings cache.
-    if (diagnosticsPlatform !== Office.PlatformType.PC) return;
+    if (diagnosticsPlatform !== Office.PlatformType.PC) {
+      console.log("[CardByte] Prefetch: skipping — not Classic Windows");
+      return;
+    }
 
     const email = Office?.context?.mailbox?.userProfile?.emailAddress;
     if (!email) {
@@ -107,10 +83,7 @@ async function _prefetchSignatureForClassic() {
       return;
     }
 
-    // Determine X-Platform header — same logic used in SignatureView
     const xPlatform = diagnosticsPlatform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
-
-    // Encrypt with the same helper used everywhere else in the app
     const encryptedMail = await encryptEmail(email);
     if (!encryptedMail) {
       console.warn("[CardByte] Prefetch: encryptEmail returned empty — skipping");
@@ -136,7 +109,6 @@ async function _prefetchSignatureForClassic() {
       return;
     }
 
-    // Response is AES-encrypted text — decrypt it exactly as SignatureView does
     const encryptedText = await res.text();
     const decryptedText = await handleAesDecrypt(encryptedText);
     const html = JSON.parse(decryptedText)?.html || null;
@@ -146,8 +118,6 @@ async function _prefetchSignatureForClassic() {
       return;
     }
 
-    // Write to roamingSettings — classic handler reads this on next compose.
-    // Shape: { html: string, ts: number }
     const rs = Office.context.roamingSettings;
     rs.set(CACHE_KEY, { html, ts: Date.now() });
     rs.saveAsync(result => {
@@ -159,55 +129,40 @@ async function _prefetchSignatureForClassic() {
     });
 
   } catch (err) {
-    // Non-fatal — classic handler falls back to embedded SIGNATURE_HTML
     console.warn("[CardByte] Prefetch: unexpected error:", err);
   }
 }
 
 /**
- * Start (or restart) the background refresh loop.
- * Called once from Office.onReady — before React renders.
- *
- * Timeline:
- *   T+0:00  Outlook opens → Office.onReady → immediate prefetch → cache written
- *   T+4:00  setInterval → silent re-fetch → cache refreshed
- *   T+8:00  setInterval → ...and so on for the entire session
+ * Exported — called once from index.js INSIDE Office.onReady,
+ * so Office.context is guaranteed to be fully available.
  */
-function _startPrefetchLoop() {
-  // Cancel any previous loop (handles hot-reload in dev)
+export function startPrefetchLoop() {
   if (_prefetchIntervalId) {
     clearInterval(_prefetchIntervalId);
     _prefetchIntervalId = null;
   }
 
-  // Immediate fetch — ensures cache is warm before the very first compose fires
+  // Immediate fetch — cache warm before first compose
   _prefetchSignatureForClassic();
 
-  // Periodic refresh — keeps cache current for long Outlook sessions
+  // Periodic refresh — keeps cache current for long sessions
   _prefetchIntervalId = setInterval(() => {
     console.log("[CardByte] Prefetch: interval refresh");
     _prefetchSignatureForClassic();
   }, REFRESH_INTERVAL_MS);
 }
 
-// Kick off the loop as early as possible — before React mounts.
-// In the SharedRuntime, Office.onReady fires as soon as the hidden
-// taskpane.html context is ready, long before the user opens the pane.
-Office.onReady(() => {
-  _startPrefetchLoop();
-});
-
 // =============================================================================
 // SIZE LIMITS
 // =============================================================================
-const MAX_SAFE_HTML_SIZE = 500_000;   // ~500 KB — desktop / OWA
-const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;   // ~200 KB — iOS / Android
-const MOBILE_MAX_IMAGE_WIDTH = 200;       // px
-const MOBILE_IMAGE_QUALITY = 0.5;       // JPEG quality on mobile
+const MAX_SAFE_HTML_SIZE = 500_000;
+const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
+const MOBILE_MAX_IMAGE_WIDTH = 200;
+const MOBILE_IMAGE_QUALITY = 0.5;
 
 // =============================================================================
 // PLATFORM DETECTION
-// Returns: 'mobile-ios' | 'mobile-android' | 'owa' | 'desktop'
 // =============================================================================
 export function detectPlatform() {
   try {
@@ -285,9 +240,7 @@ export default function App({ user }) {
     }
   }, []);
 
-  // Auth init only — prefetch loop is owned by Office.onReady above.
-  // Calling _prefetchSignatureForClassic() here would create a duplicate
-  // fetch on every manual taskpane open.
+  // Auth init only — prefetch loop is owned by startPrefetchLoop() in index.js.
   useEffect(() => {
     init();
   }, [init]);
@@ -381,7 +334,6 @@ export default function App({ user }) {
       if (compressed !== item.dataUrl) result = result.replace(item.dataUrl, compressed);
     }
 
-    // Second pass — if still over limit, convert remaining desktop GIFs too
     if (result.length > getMaxHtmlSize()) {
       for (const item of matches) {
         if (item.dataUrl.startsWith("data:image/gif") && result.includes(item.dataUrl)) {
