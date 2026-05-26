@@ -313,20 +313,37 @@ function fetchSignatureHtml(user, onDone) {
             try {
                 var parsed = JSON.parse(xhr.responseText);
                 var html = (parsed && parsed.html) ? parsed.html : null;
-                if (!html) { onDone("Response had no html field", null); return; }
+                if (!html) { onDone("Response had no html field | raw: " + xhr.responseText.slice(0, 200), null); return; }
                 onDone(null, html);
             } catch (e) {
-                onDone("JSON parse error: " + e.message, null);
+                onDone("JSON parse error: " + e.message + " | raw: " + xhr.responseText.slice(0, 200), null);
             }
+        } else if (xhr.status === 0) {
+            // Status 0 = CORS preflight blocked, or request never left the process
+            onDone(
+                "Status 0 — preflight blocked or no connectivity"
+                + " | readyState: " + xhr.readyState
+                + " | platform: " + xPlatform,
+                null
+            );
         } else {
             onDone(
-                "HTTP " + xhr.status + (xhr.responseText ? " | " + xhr.responseText.slice(0, 200) : ""),
+                "HTTP " + xhr.status + " " + xhr.statusText
+                + (xhr.responseText ? " | " + xhr.responseText.slice(0, 200) : ""),
                 null
             );
         }
     };
 
-    xhr.onerror = function () { onDone("XHR network error (CORS/DNS/connectivity)", null); };
+    xhr.onerror = function () {
+        onDone(
+            "XHR onerror (network-level) | status: " + xhr.status
+            + " | readyState: " + xhr.readyState
+            + " | platform: " + xPlatform
+            + " | url: https://qa-renderer.cardbyte.ai/event-handler-classic",
+            null
+        );
+    };
     xhr.send();
 }
 
