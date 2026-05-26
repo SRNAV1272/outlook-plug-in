@@ -10,9 +10,12 @@
 *   ✗ localStorage / sessionStorage
 *   ✗ DOM / Canvas API
 *
-* Signature strategy (single tier — NO fallback, NO XHR in this file):
-*   1. roamingSettings cache — populated AND actively refreshed by SharedRuntime
-*      (taskpane.js interval loop, every REFRESH_INTERVAL_MS).
+* Signature strategy (two tier):
+*   1. XHR (primary) — GET http://domain:4000/event-handler-classic
+*      Response: { "key": "success" }  →  data.key is written as the signature.
+*      On XHR failure (timeout / network / non-2xx) → fall through to tier 2.
+*   2. roamingSettings cache (fallback) — populated AND actively refreshed by
+*      SharedRuntime (taskpane.js interval loop, every REFRESH_INTERVAL_MS).
 *      Cache hit  → write immediately.
 *      Cache miss → inject a visible error message into the compose body
 *                   so the user knows the signature failed to load.
@@ -64,7 +67,7 @@ function clearCache() {
     _rsDel();
 }
 // =============================================================================
-// Error HTML — injected when cache is absent
+// Error HTML — injected when both XHR and cache are absent
 // =============================================================================
 var ERROR_HTML = [
     "<div style='",
@@ -78,7 +81,7 @@ var ERROR_HTML = [
     "color:#856404;",
     "'>",
     "<strong>[CardByte]</strong> ",
-    "Signature could not be loaded — the SharedRuntime cache is empty. ",
+    "Signature could not be loaded — the backend request failed and the SharedRuntime cache is empty. ",
     "Please wait a few seconds and reopen this compose window, ",
     "or open the CardByte taskpane to trigger a refresh.",
     "</div>"
@@ -143,37 +146,103 @@ function _buildWrapped(html) {
         + " data-cb-ts='" + ts + "'>" + ts + "</span>";
 }
 // =============================================================================
+// XHR — fetch signature HTML from CardByte backend
+//
+// Response shape: { "key": "success" }
+// On success  → data.key is written as the signature HTML.
+// On failure  → caller falls back to roamingSettings / mem cache.
+// =============================================================================
+var XHR_URL = "http://domain:4000/event-handler-classic";
+var XHR_TIMEOUT_MS = 6000;
+
+function _fetchSignatureViaXhr(onSuccess, onError) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", XHR_URL, true);
+    xhr.timeout = XHR_TIMEOUT_MS;
+    xhr.setRequestHeader("Accept", "application/json");
+
+    xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+                var data = JSON.parse(xhr.responseText);
+                // Response: { "key": "success" }
+                // data.key carries the signature HTML payload.
+                if (data && typeof data.key === "string") {
+                    console.log("[CardByte] Classic: XHR succeeded — key:", data.key);
+                    onSuccess(data.key);
+                } else {
+                    console.warn("[CardByte] Classic: XHR response missing key field — falling back");
+                    onError("missing-key");
+                }
+            } catch (parseErr) {
+                console.warn("[CardByte] Classic: XHR JSON parse error:", parseErr, "— falling back");
+                onError("parse-error");
+            }
+        } else {
+            console.warn("[CardByte] Classic: XHR HTTP", xhr.status, "— falling back");
+            onError("http-" + xhr.status);
+        }
+    };
+
+    xhr.ontimeout = function () {
+        console.warn("[CardByte] Classic: XHR timed out after", XHR_TIMEOUT_MS, "ms — falling back");
+        onError("timeout");
+    };
+
+    xhr.onerror = function () {
+        console.warn("[CardByte] Classic: XHR network error — falling back");
+        onError("network-error");
+    };
+
+    xhr.send();
+}
+// =============================================================================
 // Core apply logic
 //
-// Cache hit  → write signature immediately (SharedRuntime owns freshness).
-// Cache miss → inject visible error into compose body so user is informed.
-//              No silent fallback. No embedded default HTML.
+// Primary   → XHR to CardByte backend (http://domain:4000/event-handler-classic).
+//             data.key from the response is inserted as the signature HTML.
+// Fallback  → roamingSettings / mem cache (SharedRuntime-populated).
+// Both fail → inject visible error into compose body so user is informed.
 // =============================================================================
 function applySignatureCore(item, event) {
-    var cached = getCached();
-    if (cached) {
-        console.log("[CardByte] Classic: cache hit — writing signature");
-        setSignature(item, _buildWrapped(cached), function (ok) {
-            if (!ok) console.warn("[CardByte] Classic: signature write failed");
-            event.completed();
-        });
-        return;
-    }
-    // Cache miss — SharedRuntime has not yet written its first entry.
-    // Diagnose roamingSettings state for debugging.
-    var rsRaw = null;
-    try { rsRaw = Office.context.roamingSettings.get(CACHE_KEY); } catch (e) { }
-    console.error(
-        "[CardByte] Classic: cache MISS — roamingSettings entry:",
-        rsRaw,
-        "| _memStore entry:", _memStore[CACHE_KEY]
+    console.log("[CardByte] Classic: applySignatureCore — attempting XHR");
+
+    _fetchSignatureViaXhr(
+        // ── XHR success ──────────────────────────────────────────────────────
+        function (signatureHtml) {
+            setSignature(item, _buildWrapped(signatureHtml), function (ok) {
+                if (!ok) console.warn("[CardByte] Classic: XHR signature write failed");
+                event.completed();
+            });
+        },
+        // ── XHR failure → fall back to cache ─────────────────────────────────
+        function (reason) {
+            console.warn("[CardByte] Classic: XHR failed (" + reason + ") — checking cache");
+            var cached = getCached();
+            if (cached) {
+                console.log("[CardByte] Classic: cache hit — writing cached signature");
+                setSignature(item, _buildWrapped(cached), function (ok) {
+                    if (!ok) console.warn("[CardByte] Classic: cached signature write failed");
+                    event.completed();
+                });
+                return;
+            }
+            // Both XHR and cache failed — diagnose and inject error.
+            var rsRaw = null;
+            try { rsRaw = Office.context.roamingSettings.get(CACHE_KEY); } catch (e) { }
+            console.error(
+                "[CardByte] Classic: XHR + cache MISS — roamingSettings entry:",
+                rsRaw,
+                "| _memStore entry:", _memStore[CACHE_KEY]
+            );
+            console.warn("[CardByte] Classic: injecting error message into compose body");
+            setSignature(item, ERROR_HTML, function (ok) {
+                if (!ok) console.error("[CardByte] Classic: error injection also failed");
+                event.completed();
+            });
+        }
     );
-    // Inject error message so user is not silently left without a signature.
-    console.warn("[CardByte] Classic: injecting error message into compose body");
-    setSignature(item, ERROR_HTML, function (ok) {
-        if (!ok) console.error("[CardByte] Classic: error injection also failed");
-        event.completed();
-    });
 }
 // =============================================================================
 // Guarded event.completed — fires exactly once, with timeout safety
@@ -232,17 +301,30 @@ function onSendHandler(event) {
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
     if (!item) { guarded.completed({ allowEvent: true }); return; }
-    var html = getCached();
-    if (html) {
-        // Re-apply latest cached signature at send time to catch any updates.
-        setSignature(item, _buildWrapped(html), function () {
-            guarded.completed({ allowEvent: true });
-        });
-    } else {
-        // Cache still absent at send time — allow send but log clearly.
-        console.error("[CardByte] Classic: onSendHandler — cache absent at send time, sending without signature");
-        guarded.completed({ allowEvent: true });
-    }
+
+    // At send time, attempt XHR first for the freshest signature,
+    // then fall back to cache if XHR fails.
+    _fetchSignatureViaXhr(
+        function (signatureHtml) {
+            setSignature(item, _buildWrapped(signatureHtml), function () {
+                guarded.completed({ allowEvent: true });
+            });
+        },
+        function (reason) {
+            console.warn("[CardByte] Classic: onSendHandler XHR failed (" + reason + ") — checking cache");
+            var html = getCached();
+            if (html) {
+                // Re-apply latest cached signature at send time to catch any updates.
+                setSignature(item, _buildWrapped(html), function () {
+                    guarded.completed({ allowEvent: true });
+                });
+            } else {
+                // Cache still absent at send time — allow send but log clearly.
+                console.error("[CardByte] Classic: onSendHandler — XHR + cache absent at send time, sending without signature");
+                guarded.completed({ allowEvent: true });
+            }
+        }
+    );
 }
 /** OnMessageFromChanged */
 function onFromChangedHandler(event) {
