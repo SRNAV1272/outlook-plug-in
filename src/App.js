@@ -1,22 +1,214 @@
 /* global Office */
 import React, { useCallback, useEffect, useState } from "react";
 import { getOfficeToken, login, setToken, getToken } from "./services/authService";
+// import { encryptEmail, handleAesDecrypt } from "./services/cryptoService";
 import LoginForm from "./components/LoginForm";
 import SignatureView from "./components/SignatureView";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SIZE LIMITS
-// Mobile Outlook has a much tighter HTML body limit than desktop / OWA.
-// ─────────────────────────────────────────────────────────────────────────────
-const MAX_SAFE_HTML_SIZE = 500_000;  // ~500 KB  — desktop / OWA
-const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;  // ~200 KB  — iOS / Android
-const MOBILE_MAX_IMAGE_WIDTH = 200;      // px  — shrink images on mobile
-const MOBILE_IMAGE_QUALITY = 0.5;      // JPEG quality on mobile
+/* ── AES / Encryption helpers ────────────────────────────── */
+const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
+const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
-// ─────────────────────────────────────────────────────────────────────────────
+function base64ToArrayBuffer(base64) {
+  let b = base64.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = b.length % 4; if (pad) b += "=".repeat(4 - pad);
+  const bin = atob(b), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function encryptEmail(email = "") {
+  try {
+    if (!email?.trim()) return "";
+    const keyBuffer = base64ToArrayBuffer(AES_KEY);
+    const ivBuffer = base64ToArrayBuffer(AES_IV);
+    const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
+    const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, new TextEncoder().encode(email));
+    const bytes = new Uint8Array(encrypted);
+    let bin = ""; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  } catch { return ""; }
+}
+
+async function handleAesDecrypt(encryptedText, generatedKey) {
+  try {
+    if (!encryptedText) return "";
+    const keyToUse = generatedKey || AES_KEY;
+    let keyBuffer;
+    try { keyBuffer = base64ToArrayBuffer(keyToUse); } catch { return encryptedText; }
+    if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
+      if (generatedKey && generatedKey !== AES_KEY) return handleAesDecrypt(encryptedText, AES_KEY);
+      return encryptedText;
+    }
+    const ivBuffer = base64ToArrayBuffer(AES_IV);
+    if (ivBuffer.byteLength !== 16) return encryptedText;
+    const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
+    let encryptedBuffer;
+    try { encryptedBuffer = base64ToArrayBuffer(encryptedText); } catch { return encryptedText; }
+    if (encryptedBuffer.byteLength % 16 !== 0) return encryptedText;
+    const decryptedBuffer = await crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBuffer }, key, encryptedBuffer);
+    return new TextDecoder().decode(decryptedBuffer);
+  } catch (err) {
+    if (generatedKey && generatedKey !== AES_KEY && err.message?.includes("key data")) {
+      try { return await handleAesDecrypt(encryptedText, AES_KEY); } catch { }
+    }
+    return encryptedText;
+  }
+}
+
+// =============================================================================
+// Classic Outlook SharedRuntime — background prefetch + refresh loop
+//
+// Responsibilities:
+//   1. Encrypt the user's email via shared encryptEmail().
+//   2. Fetch the live signature from the production endpoint.
+//   3. Decrypt the AES-encrypted response via shared handleAesDecrypt().
+//   4. Write { html, ts } to roamingSettings so event-handler-classic.js
+//      can read it with NO XHR of its own.
+//   5. Re-run every REFRESH_INTERVAL_MS for the entire Outlook session so
+//      the cache never goes stale regardless of how long Outlook stays open.
+//
+// Contract with event-handler-classic.js:
+//   • The classic handler trusts any roamingSettings entry unconditionally —
+//     it performs no TTL check of its own.
+//   • This loop is the sole authority on cache freshness.
+//   • On account switch (OnMessageFromChanged) the classic handler clears the
+//     cache; the next interval tick (≤ REFRESH_INTERVAL_MS) repopulates it
+//     for the new address.
+// =============================================================================
+const CACHE_KEY = "cardbyte_sig_html";
+const REFRESH_INTERVAL_MS = 4 * 60 * 1000;   // 4 min — keeps cache always fresh
+
+// Module-level handle — persists across React re-renders.
+// Only one loop ever runs at a time.
+let _prefetchIntervalId = null;
+
+/**
+ * Fetch the current user's signature HTML and write it to roamingSettings.
+ *
+ * Mirrors the exact API call in SignatureView.renderSignatureOnServer():
+ *   GET /email-signature/html/outlook/get-active
+ *   headers: { username: <AES-encrypted email>, X-Platform: "WINDOWS"|"MAC" }
+ *   response: AES-encrypted text → decrypt → JSON.parse → .html
+ *
+ * No-op on non-Classic-Windows platforms (OWA / New Outlook / Mac fetch
+ * directly in event.html via their own browser fetch context).
+ */
+async function _prefetchSignatureForClassic() {
+  try {
+    const diagnosticsPlatform = Office?.context?.diagnostics?.platform;
+
+    // Guard: only Classic Outlook on Windows needs the roamingSettings cache.
+    if (diagnosticsPlatform !== Office.PlatformType.PC) return;
+
+    const email = Office?.context?.mailbox?.userProfile?.emailAddress;
+    if (!email) {
+      console.warn("[CardByte] Prefetch: no emailAddress — skipping");
+      return;
+    }
+
+    // Determine X-Platform header — same logic used in SignatureView
+    const xPlatform = diagnosticsPlatform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+
+    // Encrypt with the same helper used everywhere else in the app
+    const encryptedMail = await encryptEmail(email);
+    if (!encryptedMail) {
+      console.warn("[CardByte] Prefetch: encryptEmail returned empty — skipping");
+      return;
+    }
+
+    console.log("[CardByte] Prefetch: fetching signature…");
+
+    const res = await fetch(
+      "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "username": encryptedMail,
+          "X-Platform": xPlatform
+        }
+      }
+    );
+
+    if (!res.ok) {
+      console.warn("[CardByte] Prefetch: HTTP", res.status, res.statusText);
+      return;
+    }
+
+    // Response is AES-encrypted text — decrypt it exactly as SignatureView does
+    const encryptedText = await res.text();
+    const decryptedText = await handleAesDecrypt(encryptedText);
+    const html = JSON.parse(decryptedText)?.html || null;
+
+    if (!html) {
+      console.warn("[CardByte] Prefetch: no html field after decrypt — skipping write");
+      return;
+    }
+
+    // Write to roamingSettings — classic handler reads this on next compose.
+    // Shape: { html: string, ts: number }
+    const rs = Office.context.roamingSettings;
+    rs.set(CACHE_KEY, { html, ts: Date.now() });
+    rs.saveAsync(result => {
+      if (result.status === Office.AsyncResultStatus.Succeeded) {
+        console.log("[CardByte] Prefetch: roamingSettings updated ✅", new Date().toISOString());
+      } else {
+        console.warn("[CardByte] Prefetch: roamingSettings save failed —", result.error?.message);
+      }
+    });
+
+  } catch (err) {
+    // Non-fatal — classic handler falls back to embedded SIGNATURE_HTML
+    console.warn("[CardByte] Prefetch: unexpected error:", err);
+  }
+}
+
+/**
+ * Start (or restart) the background refresh loop.
+ * Called once from Office.onReady — before React renders.
+ *
+ * Timeline:
+ *   T+0:00  Outlook opens → Office.onReady → immediate prefetch → cache written
+ *   T+4:00  setInterval → silent re-fetch → cache refreshed
+ *   T+8:00  setInterval → ...and so on for the entire session
+ */
+function _startPrefetchLoop() {
+  // Cancel any previous loop (handles hot-reload in dev)
+  if (_prefetchIntervalId) {
+    clearInterval(_prefetchIntervalId);
+    _prefetchIntervalId = null;
+  }
+
+  // Immediate fetch — ensures cache is warm before the very first compose fires
+  _prefetchSignatureForClassic();
+
+  // Periodic refresh — keeps cache current for long Outlook sessions
+  _prefetchIntervalId = setInterval(() => {
+    console.log("[CardByte] Prefetch: interval refresh");
+    _prefetchSignatureForClassic();
+  }, REFRESH_INTERVAL_MS);
+}
+
+// Kick off the loop as early as possible — before React mounts.
+// In the SharedRuntime, Office.onReady fires as soon as the hidden
+// taskpane.html context is ready, long before the user opens the pane.
+Office.onReady(() => {
+  _startPrefetchLoop();
+});
+
+// =============================================================================
+// SIZE LIMITS
+// =============================================================================
+const MAX_SAFE_HTML_SIZE = 500_000;   // ~500 KB — desktop / OWA
+const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;   // ~200 KB — iOS / Android
+const MOBILE_MAX_IMAGE_WIDTH = 200;       // px
+const MOBILE_IMAGE_QUALITY = 0.5;       // JPEG quality on mobile
+
+// =============================================================================
 // PLATFORM DETECTION
 // Returns: 'mobile-ios' | 'mobile-android' | 'owa' | 'desktop'
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
 export function detectPlatform() {
   try {
     const platform = (Office?.context?.platform || "").toLowerCase();
@@ -25,11 +217,9 @@ export function detectPlatform() {
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
 
-    // Outlook Mobile UA fallback
     if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android"))
       return ua.includes("android") ? "mobile-android" : "mobile-ios";
 
-    // Some mobile builds report platform as "officeonline"/"" but have mobile UA
     if (
       (platform === "officeonline" || platform === "web" || platform === "") &&
       (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
@@ -40,11 +230,7 @@ export function detectPlatform() {
   } catch { return "desktop"; }
 }
 
-function isMobile() {
-  const p = detectPlatform();
-  return p === "mobile-ios" || p === "mobile-android";
-}
-
+function isMobile() { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; }
 function isOWA() { return detectPlatform() === "owa"; }
 function isMac() { return detectPlatform() === "mac"; }
 
@@ -61,20 +247,18 @@ function getMaxHtmlSize() {
   return isMobilePlatform() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
 // AUTO-APPLY CONTEXT
-// ?autoApply=1  →  taskpane was opened automatically via ItemEdit form load
-// (Outlook 2016 / 2019 / mobile — these don't support LaunchEvent)
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
 function isAutoApplyContext() {
   try {
     return new URLSearchParams(window.location.search).get("autoApply") === "1";
   } catch { return false; }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
 // APP
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
 export default function App({ user }) {
   const [mode, setMode] = useState("init");
   const [loading, setLoading] = useState(false);
@@ -101,26 +285,36 @@ export default function App({ user }) {
     }
   }, []);
 
-  useEffect(() => { init(); }, [init]);
+  // Auth init only — prefetch loop is owned by Office.onReady above.
+  // Calling _prefetchSignatureForClassic() here would create a duplicate
+  // fetch on every manual taskpane open.
+  useEffect(() => {
+    init();
+  }, [init]);
 
-  /* ── Outlook body helpers ────────────────────────────────── */
+  /* ── Outlook body helpers ──────────────────────────────────────────── */
 
   function bodySetSignatureAsync(item, html) {
     return new Promise((res, rej) => {
-      if (typeof item.body.setSignatureAsync !== "function") { rej(new Error("setSignatureAsync not available")); return; }
-      item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html },
-        (r) => r.status === "succeeded" ? res() : rej(r.error));
+      if (typeof item.body.setSignatureAsync !== "function") {
+        rej(new Error("setSignatureAsync not available"));
+        return;
+      }
+      item.body.setSignatureAsync(
+        html,
+        { coercionType: Office.CoercionType.Html },
+        (r) => r.status === "succeeded" ? res() : rej(r.error)
+      );
     });
   }
 
-  /* ── Image processing — mobile-aware ────────────────────── */
+  /* ── Image processing — mobile-aware ──────────────────────────────── */
 
   function compressBase64Image(dataUrl, maxWidth, quality) {
     if (maxWidth === undefined) maxWidth = mobile ? MOBILE_MAX_IMAGE_WIDTH : 300;
     if (quality === undefined) quality = mobile ? MOBILE_IMAGE_QUALITY : 0.7;
 
     return new Promise((resolve) => {
-      // Desktop: preserve GIF animation in first pass
       if (dataUrl.startsWith("data:image/gif") && !mobile) { resolve(dataUrl); return; }
       const img = new Image();
       img.onload = () => {
@@ -178,17 +372,16 @@ export default function App({ user }) {
     for (const item of matches) {
       const isGif = item.dataUrl.startsWith("data:image/gif");
       if (isGif && mobile) {
-        // Mobile: convert GIFs to static PNG immediately
         const png = await convertGifToStaticPng(item.dataUrl);
         if (png !== item.dataUrl) result = result.replace(item.dataUrl, png);
         continue;
       }
-      if (isGif) continue; // desktop: skip in first pass to preserve animation
+      if (isGif) continue;
       const compressed = await compressBase64Image(item.dataUrl);
       if (compressed !== item.dataUrl) result = result.replace(item.dataUrl, compressed);
     }
 
-    // Second pass: if still over limit, convert remaining desktop GIFs too
+    // Second pass — if still over limit, convert remaining desktop GIFs too
     if (result.length > getMaxHtmlSize()) {
       for (const item of matches) {
         if (item.dataUrl.startsWith("data:image/gif") && result.includes(item.dataUrl)) {
@@ -200,17 +393,10 @@ export default function App({ user }) {
     return result;
   }
 
-  /**
-   * Full-body replacement (last resort / mobile default).
-   *
-   * MOBILE:  setAsync most reliable; setSignatureAsync is NOT available.
-   * DESKTOP: setSignatureAsync → setAsync → prependAsync → setSelectedDataAsync.
-   */
   function moveCursorToTop(item) {
     return new Promise((resolve) => {
       try {
         if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-        // prependAsync with empty text moves the insertion point to before all content
         item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
           if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
           item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
@@ -219,7 +405,7 @@ export default function App({ user }) {
     });
   }
 
-  /* ── Main applySignature — all platforms ─────────────────── */
+  /* ── Main applySignature — all platforms ──────────────────────────── */
 
   async function applySignature(signature) {
     if (!signature) return;
@@ -228,36 +414,32 @@ export default function App({ user }) {
     const item = mailbox?.item;
 
     try {
-      if (!item) {
-        console.warn("[CardByte] No mail item found");
-        return;
-      }
+      if (!item) { console.warn("[CardByte] No mail item found"); return; }
 
       const platform = detectPlatform();
       const mobile = isMobile();
       const mac = isMac();
+
       let compressedSignature = await compressImagesInHtml(signature);
       compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature;
+
       console.log("[CardByte] ════════════════════════════════════",
         signature ? "Using provided signature" : "No signature provided",
         compressedSignature, item?.body
       );
 
-      await bodySetSignatureAsync(item, compressedSignature)
+      await bodySetSignatureAsync(item, compressedSignature);
 
       console.log("[CardByte] User:", user?.emailAddress);
       console.log("[CardByte] Platform:", platform);
       console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
 
-
     } catch (err) {
       console.error("[CardByte] Error in applySignature:", err);
-    } finally {
-      // event.completed();
     }
   }
 
-  /* ── Auth / load ─────────────────────────────────────────── */
+  /* ── Auth / load ──────────────────────────────────────────────────── */
 
   async function loadSignature() {
     try { setLoading(true); setMode("ready"); }
@@ -266,12 +448,19 @@ export default function App({ user }) {
   }
 
   async function handleLogin(form) {
-    try { setLoading(true); await login(form.username, form.password); await loadSignature(); }
-    catch { setError("Invalid username or password"); setMode("ready"); }
-    finally { setLoading(false); }
+    try {
+      setLoading(true);
+      await login(form.username, form.password);
+      await loadSignature();
+    } catch {
+      setError("Invalid username or password");
+      setMode("ready");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  /* ── Render ──────────────────────────────────────────────── */
+  /* ── Render ───────────────────────────────────────────────────────── */
 
   if (mode === "login") return <LoginForm onLogin={handleLogin} loading={loading} error={error} />;
 
