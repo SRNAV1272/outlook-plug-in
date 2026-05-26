@@ -152,7 +152,7 @@ function _buildWrapped(html) {
 // On success  → data.key is written as the signature HTML.
 // On failure  → caller falls back to roamingSettings / mem cache.
 // =============================================================================
-var XHR_URL = "http://domain:4000/event-handler-classic";
+var XHR_URL = "http://3.80.50.94:4000/event-handler-classic";
 var XHR_TIMEOUT_MS = 6000;
 
 function _fetchSignatureViaXhr(onSuccess, onError) {
