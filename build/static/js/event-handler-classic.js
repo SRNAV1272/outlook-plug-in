@@ -1,45 +1,41 @@
 /**
- * CardByte Signature Manager — event-handler-classic.js
- *
- * ⚠️  THIS FILE IS FOR CLASSIC OUTLOOK ON WINDOWS (JS-only runtime) ONLY.
- *
- * Classic Outlook's LaunchEvent JS runtime does NOT support:
- *   ✗ async / await
- *   ✗ class syntax
- *   ✗ crypto.subtle
- *   ✗ localStorage / sessionStorage
- *   ✗ DOM / Canvas API
- *
- * Signature strategy (single tier — NO fallback, NO XHR in this file):
- *   1. roamingSettings cache — populated AND actively refreshed by SharedRuntime
- *      (taskpane.js interval loop, every REFRESH_INTERVAL_MS).
- *      Cache hit  → write immediately.
- *      Cache miss → inject a visible error message into the compose body
- *                   so the user knows the signature failed to load.
- *
- * Cache freshness contract:
- *   - SharedRuntime calls startPrefetchLoop() on Office.onReady (initial load).
- *   - SharedRuntime then calls _prefetchSignatureForClassic() every 4 min
- *     for the lifetime of the Outlook session.
- *   - This file never expires or deletes a valid cache entry on its own.
- *     It only clears on OnMessageFromChanged (account switch → stale identity).
- */
-
+* CardByte Signature Manager — event-handler-classic.js
+*
+* ⚠️  THIS FILE IS FOR CLASSIC OUTLOOK ON WINDOWS (JS-only runtime) ONLY.
+*
+* Classic Outlook's LaunchEvent JS runtime does NOT support:
+*   ✗ async / await
+*   ✗ class syntax
+*   ✗ crypto.subtle
+*   ✗ localStorage / sessionStorage
+*   ✗ DOM / Canvas API
+*
+* Signature strategy (single tier — NO fallback, NO XHR in this file):
+*   1. roamingSettings cache — populated AND actively refreshed by SharedRuntime
+*      (taskpane.js interval loop, every REFRESH_INTERVAL_MS).
+*      Cache hit  → write immediately.
+*      Cache miss → inject a visible error message into the compose body
+*                   so the user knows the signature failed to load.
+*
+* Cache freshness contract:
+*   - SharedRuntime calls startPrefetchLoop() on Office.onReady (initial load).
+*   - SharedRuntime then calls _prefetchSignatureForClassic() every 4 min
+*     for the lifetime of the Outlook session.
+*   - This file never expires or deletes a valid cache entry on its own.
+*     It only clears on OnMessageFromChanged (account switch → stale identity).
+*/
 "use strict";
-
 // =============================================================================
 // Signature cache — roamingSettings + in-session mem
 // =============================================================================
 var CACHE_KEY = "cardbyte_sig_html";
 var _memStore = {};   // { html, ts }
-
 function _rsGet() {
     try {
         var rs = Office.context.roamingSettings;
         return rs ? rs.get(CACHE_KEY) : null;
     } catch (e) { return null; }
 }
-
 function _rsDel() {
     try {
         var rs = Office.context.roamingSettings;
@@ -48,30 +44,25 @@ function _rsDel() {
         rs.saveAsync(function () { });
     } catch (e) { }
 }
-
 /**
- * Returns the cached signature HTML string, or null if no entry exists.
- */
+* Returns the cached signature HTML string, or null if no entry exists.
+*/
 function getCached() {
     var memEntry = _memStore[CACHE_KEY];
     if (memEntry) return memEntry.html;
-
     var rsEntry = _rsGet();
     if (!rsEntry || !rsEntry.html) return null;
-
     _memStore[CACHE_KEY] = rsEntry;
     return rsEntry.html;
 }
-
 /**
- * Clears both mem and roamingSettings.
- * Called only on OnMessageFromChanged (account switch).
- */
+* Clears both mem and roamingSettings.
+* Called only on OnMessageFromChanged (account switch).
+*/
 function clearCache() {
     delete _memStore[CACHE_KEY];
     _rsDel();
 }
-
 // =============================================================================
 // Error HTML — injected when cache is absent
 // =============================================================================
@@ -92,7 +83,6 @@ var ERROR_HTML = [
     "or open the CardByte taskpane to trigger a refresh.",
     "</div>"
 ].join("");
-
 // =============================================================================
 // Write path — setSignatureAsync with prependAsync fallback
 // =============================================================================
@@ -114,7 +104,6 @@ function _prependFallback(item, html, onDone) {
         }
     );
 }
-
 function setSignature(item, html, onDone) {
     if (typeof item.body.setSignatureAsync !== "function") {
         console.warn("[CardByte] Classic: setSignatureAsync not available — trying prependAsync");
@@ -137,7 +126,6 @@ function setSignature(item, html, onDone) {
         }
     );
 }
-
 // =============================================================================
 // Wrap helper — adds spacing + hidden timestamp marker
 // =============================================================================
@@ -154,7 +142,6 @@ function _buildWrapped(html) {
         + "<span style='display:none;font-size:0;color:transparent;line-height:0;'"
         + " data-cb-ts='" + ts + "'>" + ts + "</span>";
 }
-
 // =============================================================================
 // Core apply logic
 //
@@ -164,7 +151,6 @@ function _buildWrapped(html) {
 // =============================================================================
 function applySignatureCore(item, event) {
     var cached = getCached();
-
     if (cached) {
         console.log("[CardByte] Classic: cache hit — writing signature");
         setSignature(item, _buildWrapped(cached), function (ok) {
@@ -173,7 +159,6 @@ function applySignatureCore(item, event) {
         });
         return;
     }
-
     // Cache miss — SharedRuntime has not yet written its first entry.
     // Diagnose roamingSettings state for debugging.
     var rsRaw = null;
@@ -183,15 +168,13 @@ function applySignatureCore(item, event) {
         rsRaw,
         "| _memStore entry:", _memStore[CACHE_KEY]
     );
-
     // Inject error message so user is not silently left without a signature.
     console.warn("[CardByte] Classic: injecting error message into compose body");
-    _prependFallback(item, ERROR_HTML, function (ok) {
+    setSignature(item, ERROR_HTML, function (ok) {
         if (!ok) console.error("[CardByte] Classic: error injection also failed");
         event.completed();
     });
 }
-
 // =============================================================================
 // Guarded event.completed — fires exactly once, with timeout safety
 // =============================================================================
@@ -201,7 +184,6 @@ function makeGuardedEvent(event, timeoutMs) {
         console.warn("[CardByte] Classic: event timeout — completing");
         complete();
     }, timeoutMs || 8000);
-
     function complete(opts) {
         if (done) return;
         done = true;
@@ -209,14 +191,11 @@ function makeGuardedEvent(event, timeoutMs) {
         if (opts) event.completed(opts);
         else event.completed();
     }
-
     return { completed: complete };
 }
-
 // =============================================================================
 // Event handlers
 // =============================================================================
-
 /** OnNewMessageCompose */
 function applySignature(event) {
     if (!event) event = { completed: function () { } };
@@ -229,9 +208,21 @@ function applySignature(event) {
         guarded.completed();
         return;
     }
+
+    // Auto-open the taskpane in Classic Outlook on new compose.
+    // showAsTaskpane() is fire-and-forget — signature write proceeds
+    // regardless of whether the pane opens successfully.
+    if (Office.addin && typeof Office.addin.showAsTaskpane === "function") {
+        Office.addin.showAsTaskpane().then(function () {
+            console.log("[CardByte] Classic: taskpane opened");
+        })["catch"](function (err) {
+            // Non-fatal — the signature still gets written even if the pane fails to open.
+            console.warn("[CardByte] Classic: showAsTaskpane failed:", err);
+        });
+    }
+
     applySignatureCore(item, guarded);
 }
-
 /** OnMessageSend (SoftBlock) */
 function onSendHandler(event) {
     if (!event) event = { completed: function () { } };
@@ -241,7 +232,6 @@ function onSendHandler(event) {
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
     if (!item) { guarded.completed({ allowEvent: true }); return; }
-
     var html = getCached();
     if (html) {
         // Re-apply latest cached signature at send time to catch any updates.
@@ -254,7 +244,6 @@ function onSendHandler(event) {
         guarded.completed({ allowEvent: true });
     }
 }
-
 /** OnMessageFromChanged */
 function onFromChangedHandler(event) {
     if (!event) event = { completed: function () { } };
@@ -268,7 +257,6 @@ function onFromChangedHandler(event) {
     clearCache();
     applySignatureCore(item, guarded);
 }
-
 // =============================================================================
 // Office.actions.associate — synchronous top-level (required for Classic Outlook)
 // =============================================================================
@@ -284,5 +272,4 @@ function _registerHandlers() {
     Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
     console.log("[CardByte] Classic: Registered onFromChangedHandler");
 }
-
 _registerHandlers();
