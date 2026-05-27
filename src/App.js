@@ -1,4 +1,4 @@
-/* global Office */
+/* global Office, OfficeRuntime */
 import React, { useCallback, useEffect, useState } from "react";
 import { getOfficeToken, login, setToken, getToken } from "./services/authService";
 import LoginForm from "./components/LoginForm";
@@ -53,6 +53,55 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
     }
     return encryptedText;
   }
+}
+
+// =============================================================================
+// GLOBALTHIS SIGNATURE CACHE
+// Scoped to the taskpane JS context only — NOT shared with commands.js.
+// roamingSettings remains the bridge to the event-handler context.
+// =============================================================================
+const MEM_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Returns the cached signature html if it exists and is within TTL.
+ * @returns {string|null}
+ */
+function getMemCache() {
+  try {
+    const entry = window.MEMORY_SIGNATURE;
+    if (!entry?.html || !entry?.ts) return null;
+    const age = Date.now() - entry.ts;
+    if (age > MEM_CACHE_TTL_MS) {
+      console.log("[CardByte] MemCache: expired (age=%dms) — busting", age);
+      window.MEMORY_SIGNATURE = null;
+      return null;
+    }
+    console.log("[CardByte] MemCache: hit (age=%dms)", age);
+    return entry.html;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Writes a signature html string into the in-memory cache with current timestamp.
+ * @param {string} html
+ */
+function setMemCache(html) {
+  try {
+    window.MEMORY_SIGNATURE = { html, ts: Date.now() };
+    console.log("[CardByte] MemCache: written ✅", new Date().toISOString());
+  } catch (e) {
+    console.warn("[CardByte] MemCache: write failed —", e);
+  }
+}
+
+/**
+ * Force-invalidates the in-memory cache (e.g. on explicit refresh).
+ */
+function bustMemCache() {
+  window.MEMORY_SIGNATURE = null;
+  console.log("[CardByte] MemCache: manually busted");
 }
 
 // =============================================================================
@@ -118,6 +167,23 @@ async function _prefetchSignatureForClassic() {
       return;
     }
 
+    // ── Write to all three caches ─────────────────────────────────────────────
+    // 1. In-memory: fast path for taskpane re-use
+    setMemCache(html);
+
+    // 2. OfficeRuntime.storage: PRIMARY cache for event-handler-classic.js
+    try {
+      if (typeof OfficeRuntime !== "undefined" && OfficeRuntime.storage) {
+        await OfficeRuntime.storage.setItem(CACHE_KEY, JSON.stringify({ html, ts: Date.now() }));
+        console.log("[CardByte] Prefetch: OfficeRuntime.storage updated ✅", new Date().toISOString());
+      } else {
+        console.warn("[CardByte] Prefetch: OfficeRuntime.storage not available — skipping");
+      }
+    } catch (ortErr) {
+      console.warn("[CardByte] Prefetch: OfficeRuntime.storage write failed —", ortErr);
+    }
+
+    // 3. roamingSettings: fallback bridge for event-handler-classic.js
     const rs = Office.context.roamingSettings;
     rs.set(CACHE_KEY, { html, ts: Date.now() });
     rs.saveAsync(result => {
@@ -143,10 +209,31 @@ export function startPrefetchLoop() {
     _prefetchIntervalId = null;
   }
 
+  // Warm caches from roamingSettings immediately (before first network call).
+  try {
+    const cached = Office.context.roamingSettings.get(CACHE_KEY);
+    if (cached?.html) {
+      // 1. MemCache
+      setMemCache(cached.html);
+      console.log("[CardByte] startPrefetchLoop: warmed MemCache from roamingSettings");
+
+      // 2. OfficeRuntime.storage — seed it so event-handler-classic.js has a hit
+      //    even before the first network prefetch completes.
+      if (typeof OfficeRuntime !== "undefined" && OfficeRuntime.storage) {
+        OfficeRuntime.storage
+          .setItem(CACHE_KEY, JSON.stringify({ html: cached.html, ts: Date.now() }))
+          .then(() => console.log("[CardByte] startPrefetchLoop: warmed OfficeRuntime.storage from roamingSettings ✅"))
+          .catch(e => console.warn("[CardByte] startPrefetchLoop: OfficeRuntime.storage warm failed —", e));
+      }
+    }
+  } catch (e) {
+    console.warn("[CardByte] startPrefetchLoop: roamingSettings warm failed —", e);
+  }
+
   // Immediate fetch — cache warm before first compose
   _prefetchSignatureForClassic();
 
-  // Periodic refresh — keeps cache current for long sessions
+  // Periodic refresh — keeps all caches current for long sessions
   _prefetchIntervalId = setInterval(() => {
     console.log("[CardByte] Prefetch: interval refresh");
     _prefetchSignatureForClassic();
@@ -360,7 +447,6 @@ export default function App({ user }) {
   /* ── Main applySignature — all platforms ──────────────────────────── */
 
   async function applySignature(signature) {
-    if (!signature) return;
     if (typeof Office === "undefined") { console.error("Office.js not available"); return; }
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
@@ -372,11 +458,25 @@ export default function App({ user }) {
       const mobile = isMobile();
       const mac = isMac();
 
-      let compressedSignature = await compressImagesInHtml(signature);
+      // ── Resolve signature HTML ──────────────────────────────────────────
+      // Priority: caller-provided → MemCache (if fresh) → no-op
+      // The prefetch loop keeps MemCache warm; we never re-fetch here.
+      let resolvedHtml = signature || getMemCache();
+
+      if (!resolvedHtml) {
+        console.warn("[CardByte] applySignature: no signature available (cache empty, none provided)");
+        return;
+      }
+
+      if (!signature && resolvedHtml) {
+        console.log("[CardByte] applySignature: using MemCache hit");
+      }
+
+      let compressedSignature = await compressImagesInHtml(resolvedHtml);
       compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature;
 
       console.log("[CardByte] ════════════════════════════════════",
-        signature ? "Using provided signature" : "No signature provided",
+        "Applying signature",
         compressedSignature, item?.body
       );
 
@@ -397,6 +497,17 @@ export default function App({ user }) {
     try { setLoading(true); setMode("ready"); }
     catch (e) { setError("Unable to load signature"); setMode("ready"); }
     finally { setLoading(false); }
+  }
+
+  /**
+   * Called when SignatureView requests an explicit refresh.
+   * Busts MemCache so the next applySignature call won't use stale data,
+   * then delegates to the prefetch loop to re-fetch and re-populate.
+   */
+  async function handleRefresh() {
+    bustMemCache();
+    await _prefetchSignatureForClassic();
+    await loadSignature();
   }
 
   async function handleLogin(form) {
@@ -421,12 +532,13 @@ export default function App({ user }) {
       Office={Office}
       user={user}
       apply={applySignature}
-      refresh={loadSignature}
+      refresh={handleRefresh}
       loading={loading}
       error={error}
       autoApply={autoApply}
       isMobile={mobile}
       platform={platform}
+      cachedSignature={getMemCache()}
     />
   );
 

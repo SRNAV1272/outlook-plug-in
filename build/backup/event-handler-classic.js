@@ -1,363 +1,190 @@
 /**
  * CardByte Signature Manager — event-handler-classic.js
+ * Diagnostic build — roamingSettings canaries added to trace execution.
  *
- * ⚠️  THIS FILE IS FOR CLASSIC OUTLOOK ON WINDOWS (JS-only runtime) ONLY.
+ * CACHE STRATEGY (in priority order):
+ *   1. OfficeRuntime.storage  ← PRIMARY  (shared across JS runtime ↔ taskpane WebView)
+ *   2. roamingSettings        ← FALLBACK (written by prefetch loop in App.js)
+ *   3. Error banner           ← taskpane has never run / all caches cold
  *
- * Classic Outlook's LaunchEvent JS runtime does NOT support:
- *   ✗ async / await
- *   ✗ class syntax
- *   ✗ crypto.subtle
- *   ✗ localStorage / sessionStorage
- *   ✗ DOM / Canvas API
- *
- * Signature HTML is embedded directly — no server XHR is performed.
- * Only setSignatureAsync is used to write the signature.
- *
- * Events handled:
- *   OnNewMessageCompose   → applySignature       (req set 1.10)
- *   OnMessageSend         → onSendHandler        (req set 1.12, SoftBlock)
- *   OnMessageFromChanged  → onFromChangedHandler (req set 1.13)
+ * HOW TO READ THE CANARIES (run in taskpane console after compose):
+ *   Office.context.roamingSettings.get("cb_file_loaded")   → timestamp if file was fetched+executed
+ *   Office.context.roamingSettings.get("cb_handler_fired") → timestamp if applySignature was called
+ *   Office.context.roamingSettings.get("cb_cache_source")  → "OfficeRuntime" | "roamingSettings" | "EMPTY"
+ *   Office.context.roamingSettings.get("cb_ls_value")      → size of html retrieved (or EMPTY)
+ *   Office.context.roamingSettings.get("cb_last_error")    → any caught error message
  */
-
 "use strict";
 
 // =============================================================================
-// AES / Crypto constants  (must match modern event-handler.js exactly)
+// CANARY 1 — Did the file load at all?
 // =============================================================================
-var AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
-var AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-
-// =============================================================================
-// Base64 helpers
-// =============================================================================
-var B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-function b64Encode(bytes) {
-    var result = "", i;
-    for (i = 0; i < bytes.length - 2; i += 3) {
-        result += B64_CHARS[(bytes[i] >> 2) & 0x3F];
-        result += B64_CHARS[((bytes[i] & 0x03) << 4) | ((bytes[i + 1] >> 4) & 0x0F)];
-        result += B64_CHARS[((bytes[i + 1] & 0x0F) << 2) | ((bytes[i + 2] >> 6) & 0x03)];
-        result += B64_CHARS[bytes[i + 2] & 0x3F];
-    }
-    var rem = bytes.length % 3;
-    if (rem === 1) {
-        result += B64_CHARS[(bytes[i] >> 2) & 0x3F];
-        result += B64_CHARS[(bytes[i] & 0x03) << 4];
-        result += "==";
-    } else if (rem === 2) {
-        result += B64_CHARS[(bytes[i] >> 2) & 0x3F];
-        result += B64_CHARS[((bytes[i] & 0x03) << 4) | ((bytes[i + 1] >> 4) & 0x0F)];
-        result += B64_CHARS[(bytes[i + 1] & 0x0F) << 2];
-        result += "=";
-    }
-    return result;
-}
-
-function b64Decode(str) {
-    str = str.replace(/-/g, "+").replace(/_/g, "/");
-    var pad = str.length % 4;
-    if (pad === 2) str += "==";
-    else if (pad === 3) str += "=";
-    var lookup = new Array(256), c;
-    for (c = 0; c < B64_CHARS.length; c++) lookup[B64_CHARS.charCodeAt(c)] = c;
-    lookup["=".charCodeAt(0)] = 0;
-    var out = [], i;
-    for (i = 0; i < str.length; i += 4) {
-        var a = lookup[str.charCodeAt(i)],
-            b = lookup[str.charCodeAt(i + 1)],
-            cv = lookup[str.charCodeAt(i + 2)],
-            d = lookup[str.charCodeAt(i + 3)];
-        out.push((a << 2) | (b >> 4));
-        if (str[i + 2] !== "=") out.push(((b & 0x0F) << 4) | (cv >> 2));
-        if (str[i + 3] !== "=") out.push(((cv & 0x03) << 6) | d);
-    }
-    return out;
-}
-
-// =============================================================================
-// Pure-JS AES-CBC encryption (ES5, no Web Crypto)
-// =============================================================================
-var SBOX = [
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
-    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
-    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
-    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
-    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
-    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
-    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
-    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
-    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
-    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
-    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
-    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
-    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
-    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
-    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
-];
-
-var RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
-
-function gmul(a, b) {
-    var p = 0, i, hiBit;
-    for (i = 0; i < 8; i++) {
-        if (b & 1) p ^= a;
-        hiBit = a & 0x80;
-        a = (a << 1) & 0xff;
-        if (hiBit) a ^= 0x1b;
-        b >>= 1;
-    }
-    return p;
-}
-
-function aesKeyExpansion(keyBytes) {
-    var nk = keyBytes.length / 4, nr = nk + 6, w = [], i, temp;
-    for (i = 0; i < nk; i++)
-        w[i] = [keyBytes[4 * i], keyBytes[4 * i + 1], keyBytes[4 * i + 2], keyBytes[4 * i + 3]];
-    for (i = nk; i < 4 * (nr + 1); i++) {
-        temp = w[i - 1].slice();
-        if (i % nk === 0) {
-            temp = [SBOX[temp[1]], SBOX[temp[2]], SBOX[temp[3]], SBOX[temp[0]]];
-            temp[0] ^= RCON[(i / nk) - 1];
-        } else if (nk > 6 && i % nk === 4) {
-            temp = [SBOX[temp[0]], SBOX[temp[1]], SBOX[temp[2]], SBOX[temp[3]]];
-        }
-        w[i] = [w[i - nk][0] ^ temp[0], w[i - nk][1] ^ temp[1], w[i - nk][2] ^ temp[2], w[i - nk][3] ^ temp[3]];
-    }
-    return { w: w, nr: nr };
-}
-
-function addRoundKey(state, w, round) {
-    for (var c = 0; c < 4; c++)
-        for (var r = 0; r < 4; r++)
-            state[r][c] ^= w[round * 4 + c][r];
-}
-
-function subBytes(state) {
-    for (var r = 0; r < 4; r++)
-        for (var c = 0; c < 4; c++)
-            state[r][c] = SBOX[state[r][c]];
-}
-
-function shiftRows(state) {
-    var tmp;
-    tmp = state[1][0]; state[1][0] = state[1][1]; state[1][1] = state[1][2]; state[1][2] = state[1][3]; state[1][3] = tmp;
-    tmp = state[2][0]; state[2][0] = state[2][2]; state[2][2] = tmp;
-    tmp = state[2][1]; state[2][1] = state[2][3]; state[2][3] = tmp;
-    tmp = state[3][3]; state[3][3] = state[3][2]; state[3][2] = state[3][1]; state[3][1] = state[3][0]; state[3][0] = tmp;
-}
-
-function mixColumns(state) {
-    for (var c = 0; c < 4; c++) {
-        var s0 = state[0][c], s1 = state[1][c], s2 = state[2][c], s3 = state[3][c];
-        state[0][c] = gmul(0x02, s0) ^ gmul(0x03, s1) ^ s2 ^ s3;
-        state[1][c] = s0 ^ gmul(0x02, s1) ^ gmul(0x03, s2) ^ s3;
-        state[2][c] = s0 ^ s1 ^ gmul(0x02, s2) ^ gmul(0x03, s3);
-        state[3][c] = gmul(0x03, s0) ^ s1 ^ s2 ^ gmul(0x02, s3);
-    }
-}
-
-function aesEncryptBlock(blockBytes, keySchedule) {
-    var nr = keySchedule.nr, w = keySchedule.w, state = [[], [], [], []], i, r, c;
-    for (c = 0; c < 4; c++) for (r = 0; r < 4; r++) state[r][c] = blockBytes[c * 4 + r];
-    addRoundKey(state, w, 0);
-    for (i = 1; i < nr; i++) { subBytes(state); shiftRows(state); mixColumns(state); addRoundKey(state, w, i); }
-    subBytes(state); shiftRows(state); addRoundKey(state, w, nr);
-    var out = new Array(16);
-    for (c = 0; c < 4; c++) for (r = 0; r < 4; r++) out[c * 4 + r] = state[r][c];
-    return out;
-}
-
-function pkcs7Pad(bytes, blockSize) {
-    var pad = blockSize - (bytes.length % blockSize), result = bytes.slice(), i;
-    for (i = 0; i < pad; i++) result.push(pad);
-    return result;
-}
-
-function aesEncryptCBC(plaintext, keyBase64, ivBase64) {
-    var keyBytes = b64Decode(keyBase64), ivBytes = b64Decode(ivBase64), msgBytes = [], i, code;
-    for (i = 0; i < plaintext.length; i++) {
-        code = plaintext.charCodeAt(i);
-        if (code < 0x80) { msgBytes.push(code); }
-        else if (code < 0x800) { msgBytes.push(0xC0 | (code >> 6)); msgBytes.push(0x80 | (code & 0x3F)); }
-        else { msgBytes.push(0xE0 | (code >> 12)); msgBytes.push(0x80 | ((code >> 6) & 0x3F)); msgBytes.push(0x80 | (code & 0x3F)); }
-    }
-    msgBytes = pkcs7Pad(msgBytes, 16);
-    var keySchedule = aesKeyExpansion(keyBytes), prev = ivBytes, cipherBytes = [], b, j, block, encrypted;
-    for (b = 0; b < msgBytes.length; b += 16) {
-        block = msgBytes.slice(b, b + 16);
-        for (j = 0; j < 16; j++) block[j] ^= prev[j];
-        encrypted = aesEncryptBlock(block, keySchedule);
-        cipherBytes = cipherBytes.concat(encrypted);
-        prev = encrypted;
-    }
-    return b64Encode(cipherBytes);
-}
-
-function encryptEmail(email) {
-    if (!email || email.trim() === "") {
-        console.warn("[CardByte] Classic: empty email for encryption");
-        return "";
-    }
+(function () {
     try {
-        return aesEncryptCBC(email, AES_KEY, AES_IV);
-    } catch (e) {
-        console.error("[CardByte] Classic: encryption error:", e);
-        return "";
-    }
+        var ts = new Date().toISOString();
+        var rs = Office && Office.context && Office.context.roamingSettings;
+        if (rs) {
+            rs.set("cb_file_loaded", ts);
+            rs.set("cb_handler_fired", null);
+            rs.set("cb_ls_value", null);
+            rs.set("cb_cache_source", null);
+            rs.set("cb_last_error", null);
+            rs.saveAsync(function () { });
+        }
+        console.log("[CardByte] Classic: file loaded at", ts);
+    } catch (e) { }
+}());
+
+// =============================================================================
+// Cache keys — must match App.js / _prefetchSignatureForClassic
+// =============================================================================
+var ORT_SIG_KEY = "cardbyte_sig_html";   // OfficeRuntime.storage key  (SAME as App.js CACHE_KEY)
+var RS_SIG_KEY = "cardbyte_sig_html";   // roamingSettings key        (SAME as App.js CACHE_KEY)
+
+// =============================================================================
+// OfficeRuntime.storage helpers  ← PRIMARY CACHE
+// Classic JS engine and taskpane WebView BOTH have access to this store.
+// =============================================================================
+
+/**
+ * Reads the signature html from OfficeRuntime.storage.
+ * Returns a Promise that resolves to { html: string } or null.
+ */
+function _ortGet() {
+    return new Promise(function (resolve) {
+        try {
+            if (typeof OfficeRuntime === "undefined" || !OfficeRuntime.storage) {
+                console.warn("[CardByte] Classic: OfficeRuntime.storage not available");
+                resolve(null);
+                return;
+            }
+            OfficeRuntime.storage.getItem(ORT_SIG_KEY).then(function (value) {
+                if (!value) { resolve(null); return; }
+                try {
+                    var parsed = JSON.parse(value);
+                    if (parsed && parsed.html) {
+                        console.log("[CardByte] Classic: OfficeRuntime.storage hit — size:", parsed.html.length);
+                        resolve(parsed);
+                    } else {
+                        resolve(null);
+                    }
+                } catch (e) {
+                    // Stored as raw html string (legacy)
+                    if (typeof value === "string" && value.length > 0) {
+                        console.log("[CardByte] Classic: OfficeRuntime.storage raw string hit — size:", value.length);
+                        resolve({ html: value });
+                    } else {
+                        resolve(null);
+                    }
+                }
+            })["catch"](function (e) {
+                console.warn("[CardByte] Classic: OfficeRuntime.storage read error:", e);
+                resolve(null);
+            });
+        } catch (e) {
+            console.warn("[CardByte] Classic: OfficeRuntime.storage exception:", e);
+            resolve(null);
+        }
+    });
 }
 
 // =============================================================================
-// Signature cache — two tiers + 5-minute TTL
-//
-// _memStore       : fast same-session path (dies on runtime restart).
-// roamingSettings : survives restarts. Stores { html, ts } — accepted only
-//                   if TTL is still valid.
+// roamingSettings helpers  ← FALLBACK CACHE
+// Written by _prefetchSignatureForClassic() in App.js as { html, ts }.
 // =============================================================================
-var CACHE_KEY = "cardbyte_sig_html";
-var CACHE_TTL_MS = 5 * 60 * 1000;   // 5 minutes
-var _memStore = {};               // { html, ts }
-
 function _rsGet() {
-    try { var rs = Office.context.roamingSettings; return rs ? rs.get(CACHE_KEY) : null; }
-    catch (e) { return null; }
-}
-
-function _rsSet(entry) {
     try {
         var rs = Office.context.roamingSettings;
-        if (!rs) return;
-        rs.set(CACHE_KEY, entry);
-        rs.saveAsync(function (r) {
-            if (r.status !== Office.AsyncResultStatus.Succeeded)
-                console.warn("[CardByte] Classic: roamingSettings save failed");
-        });
-    } catch (e) { console.warn("[CardByte] Classic: roamingSettings set error", e); }
+        return rs ? rs.get(RS_SIG_KEY) : null;
+    } catch (e) { return null; }
 }
 
 function _rsDel() {
     try {
         var rs = Office.context.roamingSettings;
         if (!rs) return;
-        rs.remove(CACHE_KEY);
+        rs.remove(RS_SIG_KEY);
         rs.saveAsync(function () { });
     } catch (e) { }
 }
 
-function _isExpired(entry) {
-    return !entry || !entry.ts || (Date.now() - entry.ts) > CACHE_TTL_MS;
-}
-
-function getCached() {
-    // 1. Same-session mem path — fastest, no RS read
-    var memEntry = _memStore[CACHE_KEY];
-    if (memEntry) {
-        if (_isExpired(memEntry)) {
-            console.log("[CardByte] Classic: mem cache expired");
-            clearCache();
-            return null;
+function getRoamingSignature() {
+    try {
+        var entry = _rsGet();
+        if (entry && entry.html) {
+            console.log("[CardByte] Classic: roamingSettings hit — size:", entry.html.length);
+            return entry.html;
         }
-        return memEntry.html;
-    }
-    // 2. roamingSettings — runtime was restarted (e.g. OnMessageSend after OnNewMessageCompose)
-    var rsEntry = _rsGet();
-    if (!rsEntry || _isExpired(rsEntry)) {
-        if (rsEntry) { console.log("[CardByte] Classic: roamingSettings cache expired"); _rsDel(); }
+        return null;
+    } catch (e) {
+        console.warn("[CardByte] Classic: roamingSettings read failed:", e);
         return null;
     }
-    _memStore[CACHE_KEY] = rsEntry;   // promote to mem for this session
-    return rsEntry.html;
 }
 
-function setCache(html) {
-    var entry = { html: html, ts: Date.now() };
-    _memStore[CACHE_KEY] = entry;
-    _rsSet(entry);
-}
-
-function clearCache() {
-    delete _memStore[CACHE_KEY];
+function clearRoamingCache() {
     _rsDel();
 }
 
 // =============================================================================
-// Embedded signature HTML
-// Replace SIGNATURE_HTML with your actual signature markup.
+// getCachedSignatureAsync — unified async waterfall
+//
+// Priority:
+//   1. OfficeRuntime.storage  (JS engine ↔ WebView shared store)
+//   2. roamingSettings        (written by App.js prefetch loop)
+//
+// Calls callback(html: string | null, source: string).
 // =============================================================================
-var SIGNATURE_HTML = '<table cellpadding="0" cellspacing="0" border="0" width="610" xmlns:v="urn:schemas-microsoft-com:vml" style="border-collapse:collapse;border-spacing:0;margin:0;padding:0;width:610px;table-layout:fixed;font-family:Arial,Helvetica,sans-serif;vertical-align:top;mso-table-lspace:0;mso-table-rspace:0;-ms-text-size-adjust:100%;-webkit-text-size-adjust:100%;background-color:#ffffff;"><colgroup><col width="190" style="width:190px;"><col width="420" style="width:420px;"></colgroup><tr><td rowspan="8" width="190" align="center" valign="middle" style="width:190px;padding:0;text-align:center;vertical-align:middle;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin:0;padding:0;table-layout:fixed;"><tr><td align="center" valign="middle" style="padding:0 40px 0 0;"><table cellpadding="0" cellspacing="0" border="0" align="center" style="border-collapse:collapse;margin:0;padding:0;table-layout:fixed;margin-left:auto;margin-right:auto;"><tr><td align="center" valign="middle" style="padding:0;"><img src="https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg" width="150" height="120" alt="Company Logo" style="display:block;border:0;width:150px;height:120px;" vspace="0" hspace="0" border="0"></td></tr></table></td></tr></table></td><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;line-height:1;margin:0;padding:0;">Sai Rajesh Korla</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;line-height:1;margin:0;padding:0;">Software Engineer ( MERN Stack )</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;font-weight:normal;font-style:normal;text-decoration:none;margin:0;padding:0;">Telephone: 0124434887</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;font-weight:normal;font-style:normal;text-decoration:none;margin:0;padding:0;">Mobile: +917024899020</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;font-weight:normal;font-style:normal;text-decoration:none;margin:0;padding:0;line-height:1.4;">Ayyappa Society, Hyderabad, Telangana, India, 500001</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;line-height:1;margin:0;padding:0;">CIN No. : L74899DL1991PLC044843</p></td></tr><tr><td width="420" align="left" valign="top" style="width:420px;padding:0;text-align:left;vertical-align:top;border:none;margin:0;line-height:normal;mso-line-height-rule:exactly;"><p style="font-family:Arial,Helvetica,sans-serif;font-size:12pt;color:#000000;font-weight:normal;font-style:normal;text-decoration:none;margin:0;padding:0;">Website: www.navajna.com</p></td></tr></table>';
-
-// =============================================================================
-// API fetch — builds signature HTML from server response
-// =============================================================================
-function fetchSignatureHtml(onDone) {
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", "https://randomuser.me/api?nat=in&results=1", true);
-    xhr.onreadystatechange = function () {
-        if (xhr.readyState !== 4) return;
-        if (xhr.status === 200) {
-            try {
-                var user = JSON.parse(xhr.responseText).results[0];
-                var name = user.name.first + " " + user.name.last;
-                var email = encryptEmail(user.email);
-                var phone = user.phone;
-                var city = user.location.city + ", " + user.location.state;
-                var pic = user.picture.large;
-                var html = '<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;font-size:12pt;">'
-                    + '<tr>'
-                    + '<td style="padding-right:16px;vertical-align:middle;">'
-                    + '<img src="' + pic + '" width="80" height="80" style="border-radius:50%;display:block;" />'
-                    + '</td>'
-                    + '<td style="vertical-align:top;color:#000;">'
-                    + '<p style="margin:0;font-weight:bold;">' + name + '</p>'
-                    + '<p style="margin:0;">' + email + '</p>'
-                    + '<p style="margin:0;">' + phone + '</p>'
-                    + '<p style="margin:0;">' + city + '</p>'
-                    + '</td>'
-                    + '</tr>'
-                    + '</table>';
-                onDone(html);
-            } catch (e) {
-                console.error("[CardByte] Classic: parse error", e);
-                onDone(null);
-            }
-        } else {
-            console.error("[CardByte] Classic: XHR failed", xhr.status);
-            onDone(null);
+function getCachedSignatureAsync(callback) {
+    _ortGet().then(function (entry) {
+        if (entry && entry.html) {
+            callback(entry.html, "OfficeRuntime");
+            return;
         }
-    };
-    xhr.send();
+        // OfficeRuntime miss — try roamingSettings
+        var rsHtml = getRoamingSignature();
+        if (rsHtml) {
+            callback(rsHtml, "roamingSettings");
+            return;
+        }
+        callback(null, "EMPTY");
+    })["catch"](function (e) {
+        console.warn("[CardByte] Classic: getCachedSignatureAsync unexpected error:", e);
+        // Last resort — roamingSettings
+        var rsHtml = getRoamingSignature();
+        callback(rsHtml || null, rsHtml ? "roamingSettings" : "EMPTY");
+    });
 }
 
 // =============================================================================
-// Write path — setSignatureAsync with prependAsync fallback
-//
-// setSignatureAsync requires req-set 1.10 and a full Exchange Online mailbox.
-// Dev-tenant / trial accounts (e.g. *.onmicrosoft.com auto-provisioned) often
-// return "The operation is not supported" even when the API exists on the
-// object. prependAsync (req-set 1.1) works on virtually every mailbox type
-// and is used as the fallback.
+// Error HTML
+// =============================================================================
+var ERROR_HTML = [
+    "<div style='margin:16px 0;padding:12px 16px;",
+    "border:1px solid #f5c6cb;border-radius:4px;",
+    "background-color:#fff3cd;",
+    "font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#856404;'>",
+    "<strong>[CardByte]</strong> ",
+    "Signature could not be loaded. ",
+    "Please open the CardByte taskpane once to sync your signature, ",
+    "then reopen this compose window.",
+    "</div>"
+].join("");
+
+// =============================================================================
+// Write path
 // =============================================================================
 function _prependFallback(item, html, onDone) {
     if (typeof item.body.prependAsync !== "function") {
-        console.error("[CardByte] Classic: prependAsync not available — no write path left");
+        console.error("[CardByte] Classic: prependAsync not available");
         onDone(false);
         return;
     }
-    console.log("[CardByte] Classic: falling back to prependAsync");
-    item.body.prependAsync(
-        html,
-        { coercionType: Office.CoercionType.Html },
-        function (result) {
-            if (result.status === Office.AsyncResultStatus.Succeeded || result.status === "succeeded") {
-                console.log("[CardByte] Classic: prependAsync succeeded");
-                onDone(true);
-            } else {
-                console.error("[CardByte] Classic: prependAsync failed:", result.error && result.error.message);
-                onDone(false);
-            }
-        }
-    );
+    item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, function (result) {
+        var ok = result.status === Office.AsyncResultStatus.Succeeded || result.status === "succeeded";
+        if (!ok) console.error("[CardByte] Classic: prependAsync failed:", result.error && result.error.message);
+        onDone(ok);
+    });
 }
 
 function setSignature(item, html, onDone) {
@@ -366,60 +193,83 @@ function setSignature(item, html, onDone) {
         _prependFallback(item, html, onDone);
         return;
     }
-    item.body.setSignatureAsync(
-        html,
-        { coercionType: Office.CoercionType.Html },
-        function (result) {
-            if (result.status === Office.AsyncResultStatus.Succeeded || result.status === "succeeded") {
-                console.log("[CardByte] Classic: setSignatureAsync succeeded");
-                onDone(true);
-            } else {
-                console.warn("[CardByte] Classic: setSignatureAsync failed:", result.error && result.error.message, "— trying prependAsync");
-                _prependFallback(item, html, onDone);
-            }
+    item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, function (result) {
+        var ok = result.status === Office.AsyncResultStatus.Succeeded || result.status === "succeeded";
+        if (ok) {
+            console.log("[CardByte] Classic: setSignatureAsync succeeded");
+            onDone(true);
+        } else {
+            console.warn("[CardByte] Classic: setSignatureAsync failed:", result.error && result.error.message);
+            _prependFallback(item, html, onDone);
         }
-    );
-}
-
-// =============================================================================
-// Core apply logic
-// =============================================================================
-function applySignatureCore(item, event) {
-    var cached = getCached();
-    if (cached) {
-        console.log("[CardByte] Classic: using cached signature");
-        setSignature(item, cached + '<span>Cached</span>', function (ok) {
-            if (!ok) console.warn("[CardByte] Classic: signature write failed");
-            event.completed();
-        });
-        return;
-    }
-
-    fetchSignatureHtml(function (html) {
-        var now = new Date();
-        var ts = now.getUTCFullYear() + "-"
-            + ("0" + (now.getUTCMonth() + 1)).slice(-2) + "-"
-            + ("0" + now.getUTCDate()).slice(-2) + " "
-            + ("0" + now.getUTCHours()).slice(-2) + ":"
-            + ("0" + now.getUTCMinutes()).slice(-2) + " UTC";
-        var wrapped = "<div style='margin-top:40px'></div>"
-            + (html || SIGNATURE_HTML)
-            + "<div style='margin-top:40px'></div>"
-            + "<span style='display:none;font-size:0;color:transparent;line-height:0;'"
-            + " data-cb-ts='" + ts + "'>" + ts + "</span>";
-        setCache(wrapped);
-        setSignature(item, wrapped, function (ok) {
-            if (!ok) console.warn("[CardByte] Classic: signature write failed");
-            event.completed();
-        });
     });
 }
 
 // =============================================================================
-// Guarded event.completed — fires exactly once, with timeout safety
+// Wrap helper
+// =============================================================================
+function _buildWrapped(html) {
+    var now = new Date();
+    var ts = now.getUTCFullYear() + "-"
+        + ("0" + (now.getUTCMonth() + 1)).slice(-2) + "-"
+        + ("0" + now.getUTCDate()).slice(-2) + " "
+        + ("0" + now.getUTCHours()).slice(-2) + ":"
+        + ("0" + now.getUTCMinutes()).slice(-2) + " UTC";
+    return "<div style='margin-top:40px'></div>"
+        + html
+        + "<div style='margin-top:40px'></div>"
+        + "<span style='display:none;font-size:0;color:transparent;line-height:0;'"
+        + " data-cb-ts='" + ts + "'>" + ts + "</span>";
+}
+
+// =============================================================================
+// Diagnostic writer
+// =============================================================================
+function _saveCanary(key, value) {
+    try {
+        var rs = Office && Office.context && Office.context.roamingSettings;
+        if (rs) {
+            rs.set(key, value);
+            rs.saveAsync(function () { });
+        }
+    } catch (e) { }
+}
+
+// =============================================================================
+// Core apply logic — now async via getCachedSignatureAsync
+// =============================================================================
+function applySignatureCore(item, event) {
+    console.log("[CardByte] Classic: applySignatureCore");
+
+    getCachedSignatureAsync(function (cached, source) {
+        // Record cache source and size for diagnostics
+        _saveCanary("cb_cache_source", source);
+        _saveCanary("cb_ls_value", cached ? ("size:" + cached.length) : "EMPTY");
+
+        if (cached) {
+            console.log("[CardByte] Classic: cache hit via", source, "— size:", cached.length);
+            setSignature(item, _buildWrapped(cached), function (ok) {
+                if (!ok) _saveCanary("cb_last_error", "setSignature returned false");
+                event.completed();
+            });
+            return;
+        }
+
+        console.error("[CardByte] Classic: all cache layers empty — source:", source);
+        _saveCanary("cb_last_error", "all cache layers empty at " + new Date().toISOString());
+        setSignature(item, ERROR_HTML, function () { event.completed(); });
+    });
+}
+
+// =============================================================================
+// Guarded event.completed
 // =============================================================================
 function makeGuardedEvent(event, timeoutMs) {
     var done = false;
+    var timer = setTimeout(function () {
+        console.warn("[CardByte] Classic: event timeout — completing");
+        complete();
+    }, timeoutMs || 8000);
     function complete(opts) {
         if (done) return;
         done = true;
@@ -427,81 +277,97 @@ function makeGuardedEvent(event, timeoutMs) {
         if (opts) event.completed(opts);
         else event.completed();
     }
-    var timer = setTimeout(function () {
-        console.warn("[CardByte] Classic: event timeout — completing");
-        complete();
-    }, timeoutMs || 8000);
     return { completed: complete };
 }
 
 // =============================================================================
 // Event handlers
 // =============================================================================
-
-/** OnNewMessageCompose */
 function applySignature(event) {
     if (!event) event = { completed: function () { } };
     var guarded = makeGuardedEvent(event, 12000);
+
+    _saveCanary("cb_handler_fired", new Date().toISOString());
+    console.log("[CardByte] Classic: applySignature handler fired");
+
     var mailbox = (typeof Office !== "undefined" && Office.context && Office.context.mailbox)
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
-    if (!item) { console.warn("[CardByte] Classic: applySignature — no item"); guarded.completed(); return; }
+
+    if (!item) {
+        console.warn("[CardByte] Classic: applySignature — no item");
+        _saveCanary("cb_last_error", "no mailbox item");
+        guarded.completed();
+        return;
+    }
+
+    if (Office.addin && typeof Office.addin.showAsTaskpane === "function") {
+        Office.addin.showAsTaskpane().then(function () {
+            console.log("[CardByte] Classic: taskpane opened");
+        })["catch"](function (err) {
+            console.warn("[CardByte] Classic: showAsTaskpane failed (non-fatal):", err);
+        });
+    }
+
     applySignatureCore(item, guarded);
 }
 
-/** OnMessageSend (SoftBlock) */
 function onSendHandler(event) {
     if (!event) event = { completed: function () { } };
     var guarded = makeGuardedEvent(event, 12000);
     console.log("[CardByte] Classic: onSendHandler fired");
+
     var mailbox = (typeof Office !== "undefined" && Office.context && Office.context.mailbox)
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
     if (!item) { guarded.completed({ allowEvent: true }); return; }
 
-    // roamingSettings cache survives runtime restarts — use it to avoid a
-    // second API call. Fall back to SIGNATURE_HTML only if cache is empty.
-    var html = getCached();
-    if (html) {
-        setSignature(item, html, function () { guarded.completed({ allowEvent: true }); });
-    } else {
-        fetchSignatureHtml(function (fetched) {
-            var wrapped = "<div style='margin-top:40px'></div>"
-                + (fetched || SIGNATURE_HTML)
-                + "<div style='margin-top:40px'></div>";
-            setCache(wrapped);
-            setSignature(item, wrapped, function () { guarded.completed({ allowEvent: true }); });
-        });
-    }
+    getCachedSignatureAsync(function (cached, source) {
+        if (cached) {
+            console.log("[CardByte] Classic: onSendHandler — cache hit via", source);
+            setSignature(item, _buildWrapped(cached), function () {
+                guarded.completed({ allowEvent: true });
+            });
+        } else {
+            console.error("[CardByte] Classic: onSendHandler — cache empty at send time");
+            guarded.completed({ allowEvent: true });
+        }
+    });
 }
 
-/** OnMessageFromChanged */
 function onFromChangedHandler(event) {
     if (!event) event = { completed: function () { } };
     var guarded = makeGuardedEvent(event, 12000);
     console.log("[CardByte] Classic: onFromChangedHandler fired");
+
     var mailbox = (typeof Office !== "undefined" && Office.context && Office.context.mailbox)
         ? Office.context.mailbox : null;
     var item = mailbox ? mailbox.item : null;
     if (!item) { guarded.completed(); return; }
-    // clearCache();
+
+    clearRoamingCache();
     applySignatureCore(item, guarded);
 }
 
 // =============================================================================
-// Office.actions.associate — synchronous top-level (required for Classic Outlook)
+// Office.actions.associate
 // =============================================================================
 function _registerHandlers() {
     if (typeof Office === "undefined" || typeof Office.actions === "undefined") {
-        console.warn("[CardByte] Classic: Office.actions not available — skipping registration");
+        console.warn("[CardByte] Classic: Office.actions not available");
+        try {
+            var rs = Office && Office.context && Office.context.roamingSettings;
+            if (rs) {
+                rs.set("cb_last_error", "Office.actions not available at register time");
+                rs.saveAsync(function () { });
+            }
+        } catch (e) { }
         return;
     }
     Office.actions.associate("applySignature", applySignature);
-    console.log("[CardByte] Classic: Registered applySignature");
     Office.actions.associate("onSendHandler", onSendHandler);
-    console.log("[CardByte] Classic: Registered onSendHandler");
     Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
-    console.log("[CardByte] Classic: Registered onFromChangedHandler");
+    console.log("[CardByte] Classic: all handlers registered");
 }
 
 _registerHandlers();
