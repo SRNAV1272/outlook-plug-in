@@ -91,6 +91,20 @@ function getOrCreateSessionId() {
  * because Classic Outlook's JS runtime shares localStorage but roamingSettings
  * provides an additional fallback if localStorage is cleared between sessions.
  */
+// =============================================================================
+// PERSIST CALLBACK — registered by App after it mounts
+// =============================================================================
+let _onSignaturePersisted = null;
+
+/**
+ * Register a callback to be invoked every time persistSignatureToStorage
+ * successfully writes new HTML. App.js calls this once after mounting.
+ * The callback receives the HTML string.
+ */
+export function onSignaturePersisted(cb) {
+  _onSignaturePersisted = typeof cb === "function" ? cb : null;
+}
+
 export function persistSignatureToStorage(html) {
   if (!html) return;
   try {
@@ -99,11 +113,16 @@ export function persistSignatureToStorage(html) {
     localStorage.setItem(LS_SESSION_KEY, sid);
     localStorage.setItem(LS_TS_KEY, Date.now().toString());
     console.log("[CardByte] persistSignatureToStorage: localStorage written — size:", html.length);
+
+    // ── Notify App so it can insert the signature immediately ──
+    if (typeof _onSignaturePersisted === "function") {
+      _onSignaturePersisted(html);
+    }
   } catch (e) {
     console.warn("[CardByte] persistSignatureToStorage: localStorage write failed:", e);
   }
 
-  // Also refresh roamingSettings so event-handler-classic.js has a secondary fallback.
+  // roamingSettings fallback — unchanged
   try {
     const rs = Office?.context?.roamingSettings;
     if (rs) {
@@ -119,6 +138,27 @@ export function persistSignatureToStorage(html) {
   } catch (e) {
     console.warn("[CardByte] persistSignatureToStorage: roamingSettings write failed:", e);
   }
+
+  try {
+    var mailbox = (typeof Office !== "undefined" && Office.context && Office.context.mailbox)
+      ? Office.context.mailbox : null;
+    var item = mailbox ? mailbox.item : null;
+
+    item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, function (result) {
+      var ok = result.status === Office.AsyncResultStatus.Succeeded || result.status === "succeeded";
+      if (ok) {
+        console.log("[CardByte] Classic: setSignatureAsync succeeded");
+        // onDone(true);
+      } else {
+        console.warn("[CardByte] Classic: setSignatureAsync failed:", result.error && result.error.message);
+        // _prependFallback(item, html, onDone);
+      }
+    });
+
+  } catch (e) {
+    console.error(e)
+  }
+
 }
 
 // =============================================================================
@@ -141,10 +181,10 @@ async function _prefetchSignatureForClassic() {
 
     // Still guard on PC so we don't make unnecessary server calls on
     // Mac / OWA / Mobile where the React component fetches its own copy.
-    if (diagnosticsPlatform !== Office.PlatformType.PC) {
-      console.log("[CardByte] Prefetch: skipping — not Classic Windows");
-      return;
-    }
+    // if (diagnosticsPlatform !== Office.PlatformType.PC) {
+    //   console.log("[CardByte] Prefetch: skipping — not Classic Windows");
+    //   return;
+    // }
 
     const email = Office?.context?.mailbox?.userProfile?.emailAddress;
     if (!email) { console.warn("[CardByte] Prefetch: no emailAddress — skipping"); return; }
@@ -381,7 +421,7 @@ export default function App({ user }) {
 
   /* ── Main applySignature — all platforms ──────────────────────────── */
 
-  async function applySignature(signature) {
+  const applySignature = useCallback(async (signature) => {
     if (!signature) return;
     if (typeof Office === "undefined") { console.error("Office.js not available"); return; }
     const mailbox = Office?.context?.mailbox;
@@ -389,18 +429,27 @@ export default function App({ user }) {
 
     try {
       if (!item) { console.warn("[CardByte] No mail item found"); return; }
-
       let compressedSignature = await compressImagesInHtml(signature);
       compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature;
-
       console.log("[CardByte] applySignature: writing to compose body — platform:", detectPlatform());
       await bodySetSignatureAsync(item, compressedSignature);
-      console.log("[CardByte] applySignature: done. User:", user?.emailAddress, "| mobile:", mobile, "| OWA:", isOWA());
-
+      console.log("[CardByte] applySignature: done. platform:", detectPlatform());
     } catch (err) {
       console.error("[CardByte] Error in applySignature:", err);
     }
-  }
+  }, [mobile]);  // mobile is stable after first render
+
+  // Register once so the prefetch loop (and any future persist call)
+  // triggers a live insertion on whatever item is currently open.
+  useEffect(() => {
+    onSignaturePersisted((html) => {
+      console.log("[CardByte] onSignaturePersisted fired — auto-inserting");
+      applySignature(html);   // your existing function, all platforms
+    });
+
+    // Unregister on unmount so stale closures don't fire
+    return () => onSignaturePersisted(null);
+  }, [applySignature]);   // applySignature is stable because it's defined with useCallback
 
   /* ── Fetch signature from server ──────────────────────────────────── */
 
