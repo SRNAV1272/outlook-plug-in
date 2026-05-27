@@ -154,6 +154,7 @@ export default function SignatureView({
                 const data = await primaryRes.text();
                 const decryptedData = await handleAesDecrypt(data);
                 console.log("[CardByte] Using NEW renderer");
+                await apply(JSON.parse(decryptedData)?.html);
                 return JSON.parse(decryptedData)?.html || null;
             }
             console.warn("[CardByte] Primary failed → legacy fallback");
