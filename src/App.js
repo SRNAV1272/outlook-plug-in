@@ -56,39 +56,102 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
 }
 
 // =============================================================================
-// PREFETCH — owned here, but STARTED from index.js inside Office.onReady.
-// No Office.onReady call in this file — that caused the race condition.
+// localStorage cache — SINGLE SOURCE OF TRUTH for all runtimes
+//
+// These key names are shared by three files:
+//   • App.js (this file)        — writes on every successful signature fetch
+//   • event.js                  — reads in applySignature / onSendHandler
+//   • event-handler-classic.js  — reads in applySignatureCore / onSendHandler
+//
+// Do NOT rename these constants without updating the other two files.
 // =============================================================================
-const CACHE_KEY = "cardbyte_sig_html";
+export const LS_SIG_KEY = "cardbyte_cached_signature";          // signature HTML
+export const LS_SESSION_KEY = "cardbyte_cached_signature_session";  // session UUID
+export const LS_TS_KEY = "cardbyte_cached_signature_ts";       // write timestamp (ms)
+
+const SESSION_KEY = "cardbyte_session_id";
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min (used by event.js; kept here for parity)
+
+function getOrCreateSessionId() {
+  try {
+    let sid = sessionStorage.getItem(SESSION_KEY);
+    if (!sid) {
+      sid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36);
+      sessionStorage.setItem(SESSION_KEY, sid);
+    }
+    return sid;
+  } catch { return "unknown"; }
+}
+
+/**
+ * Writes signature HTML to localStorage.
+ * Called after every successful server fetch — keeps all runtimes in sync.
+ *
+ * Also writes to roamingSettings for Classic Outlook (belt-and-suspenders),
+ * because Classic Outlook's JS runtime shares localStorage but roamingSettings
+ * provides an additional fallback if localStorage is cleared between sessions.
+ */
+export function persistSignatureToStorage(html) {
+  if (!html) return;
+  try {
+    const sid = getOrCreateSessionId();
+    localStorage.setItem(LS_SIG_KEY, html);
+    localStorage.setItem(LS_SESSION_KEY, sid);
+    localStorage.setItem(LS_TS_KEY, Date.now().toString());
+    console.log("[CardByte] persistSignatureToStorage: localStorage written — size:", html.length);
+  } catch (e) {
+    console.warn("[CardByte] persistSignatureToStorage: localStorage write failed:", e);
+  }
+
+  // Also refresh roamingSettings so event-handler-classic.js has a secondary fallback.
+  try {
+    const rs = Office?.context?.roamingSettings;
+    if (rs) {
+      rs.set("cardbyte_sig_html", { html, ts: Date.now() });
+      rs.saveAsync(result => {
+        if (result.status === Office.AsyncResultStatus.Succeeded) {
+          console.log("[CardByte] persistSignatureToStorage: roamingSettings updated ✅");
+        } else {
+          console.warn("[CardByte] persistSignatureToStorage: roamingSettings save failed:", result.error?.message);
+        }
+      });
+    }
+  } catch (e) {
+    console.warn("[CardByte] persistSignatureToStorage: roamingSettings write failed:", e);
+  }
+}
+
+// =============================================================================
+// PREFETCH — owned here, started from index.js inside Office.onReady.
+//
+// Previously only wrote to roamingSettings (Classic-only guard).
+// Now writes to localStorage unconditionally so that:
+//   • SharedRuntime event.js handlers get an instant cache hit
+//   • event-handler-classic.js gets the same data from localStorage
+//   • roamingSettings remains as a secondary fallback for Classic
+// =============================================================================
 const REFRESH_INTERVAL_MS = 4 * 60 * 1000; // 4 min
 
-// Module-level handle — persists across React re-renders.
 let _prefetchIntervalId = null;
 
 async function _prefetchSignatureForClassic() {
   try {
     const diagnosticsPlatform = Office?.context?.diagnostics?.platform;
-
     console.log("[CardByte] Prefetch: platform =", diagnosticsPlatform);
 
-    // Guard: only Classic Outlook on Windows needs the roamingSettings cache.
+    // Still guard on PC so we don't make unnecessary server calls on
+    // Mac / OWA / Mobile where the React component fetches its own copy.
     if (diagnosticsPlatform !== Office.PlatformType.PC) {
       console.log("[CardByte] Prefetch: skipping — not Classic Windows");
       return;
     }
 
     const email = Office?.context?.mailbox?.userProfile?.emailAddress;
-    if (!email) {
-      console.warn("[CardByte] Prefetch: no emailAddress — skipping");
-      return;
-    }
+    if (!email) { console.warn("[CardByte] Prefetch: no emailAddress — skipping"); return; }
 
     const xPlatform = diagnosticsPlatform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
     const encryptedMail = await encryptEmail(email);
-    if (!encryptedMail) {
-      console.warn("[CardByte] Prefetch: encryptEmail returned empty — skipping");
-      return;
-    }
+    if (!encryptedMail) { console.warn("[CardByte] Prefetch: encryptEmail returned empty — skipping"); return; }
 
     console.log("[CardByte] Prefetch: fetching signature…");
 
@@ -104,29 +167,18 @@ async function _prefetchSignatureForClassic() {
       }
     );
 
-    if (!res.ok) {
-      console.warn("[CardByte] Prefetch: HTTP", res.status, res.statusText);
-      return;
-    }
+    if (!res.ok) { console.warn("[CardByte] Prefetch: HTTP", res.status, res.statusText); return; }
 
     const encryptedText = await res.text();
     const decryptedText = await handleAesDecrypt(encryptedText);
     const html = JSON.parse(decryptedText)?.html || null;
 
-    if (!html) {
-      console.warn("[CardByte] Prefetch: no html field after decrypt — skipping write");
-      return;
-    }
+    if (!html) { console.warn("[CardByte] Prefetch: no html field after decrypt — skipping write"); return; }
 
-    const rs = Office.context.roamingSettings;
-    rs.set(CACHE_KEY, { html, ts: Date.now() });
-    rs.saveAsync(result => {
-      if (result.status === Office.AsyncResultStatus.Succeeded) {
-        console.log("[CardByte] Prefetch: roamingSettings updated ✅", new Date().toISOString());
-      } else {
-        console.warn("[CardByte] Prefetch: roamingSettings save failed —", result.error?.message);
-      }
-    });
+    // Write to localStorage (primary) + roamingSettings (fallback) in one call.
+    persistSignatureToStorage(html);
+
+    console.log("[CardByte] Prefetch: complete ✅", new Date().toISOString());
 
   } catch (err) {
     console.warn("[CardByte] Prefetch: unexpected error:", err);
@@ -134,19 +186,13 @@ async function _prefetchSignatureForClassic() {
 }
 
 /**
- * Exported — called once from index.js INSIDE Office.onReady,
- * so Office.context is guaranteed to be fully available.
+ * Exported — called once from index.js INSIDE Office.onReady.
  */
 export function startPrefetchLoop() {
-  if (_prefetchIntervalId) {
-    clearInterval(_prefetchIntervalId);
-    _prefetchIntervalId = null;
-  }
+  if (_prefetchIntervalId) { clearInterval(_prefetchIntervalId); _prefetchIntervalId = null; }
 
-  // Immediate fetch — cache warm before first compose
-  _prefetchSignatureForClassic();
+  _prefetchSignatureForClassic(); // immediate — warm cache before first compose
 
-  // Periodic refresh — keeps cache current for long sessions
   _prefetchIntervalId = setInterval(() => {
     console.log("[CardByte] Prefetch: interval refresh");
     _prefetchSignatureForClassic();
@@ -185,30 +231,21 @@ export function detectPlatform() {
   } catch { return "desktop"; }
 }
 
-function isMobile() { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; }
-function isOWA() { return detectPlatform() === "owa"; }
+export function isMobilePlatform() { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; }
+export function isOWAPlatform() { return detectPlatform() === "owa"; }
+
+function isMobile() { return isMobilePlatform(); }
+function isOWA() { return isOWAPlatform(); }
 function isMac() { return detectPlatform() === "mac"; }
 
-export function isMobilePlatform() {
-  const p = detectPlatform();
-  return p === "mobile-ios" || p === "mobile-android";
-}
-
-export function isOWAPlatform() {
-  return detectPlatform() === "owa";
-}
-
-function getMaxHtmlSize() {
-  return isMobilePlatform() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
-}
+function getMaxHtmlSize() { return isMobilePlatform() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE; }
 
 // =============================================================================
 // AUTO-APPLY CONTEXT
 // =============================================================================
 function isAutoApplyContext() {
-  try {
-    return new URLSearchParams(window.location.search).get("autoApply") === "1";
-  } catch { return false; }
+  try { return new URLSearchParams(window.location.search).get("autoApply") === "1"; }
+  catch { return false; }
 }
 
 // =============================================================================
@@ -240,10 +277,7 @@ export default function App({ user }) {
     }
   }, []);
 
-  // Auth init only — prefetch loop is owned by startPrefetchLoop() in index.js.
-  useEffect(() => {
-    init();
-  }, [init]);
+  useEffect(() => { init(); }, [init]);
 
   /* ── Outlook body helpers ──────────────────────────────────────────── */
 
@@ -345,18 +379,6 @@ export default function App({ user }) {
     return result;
   }
 
-  function moveCursorToTop(item) {
-    return new Promise((resolve) => {
-      try {
-        if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-        item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-          if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-          item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-        });
-      } catch { resolve(); }
-    });
-  }
-
   /* ── Main applySignature — all platforms ──────────────────────────── */
 
   async function applySignature(signature) {
@@ -368,35 +390,90 @@ export default function App({ user }) {
     try {
       if (!item) { console.warn("[CardByte] No mail item found"); return; }
 
-      const platform = detectPlatform();
-      const mobile = isMobile();
-      const mac = isMac();
-
       let compressedSignature = await compressImagesInHtml(signature);
       compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature;
 
-      console.log("[CardByte] ════════════════════════════════════",
-        signature ? "Using provided signature" : "No signature provided",
-        compressedSignature, item?.body
-      );
-
+      console.log("[CardByte] applySignature: writing to compose body — platform:", detectPlatform());
       await bodySetSignatureAsync(item, compressedSignature);
-
-      console.log("[CardByte] User:", user?.emailAddress);
-      console.log("[CardByte] Platform:", platform);
-      console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
+      console.log("[CardByte] applySignature: done. User:", user?.emailAddress, "| mobile:", mobile, "| OWA:", isOWA());
 
     } catch (err) {
       console.error("[CardByte] Error in applySignature:", err);
     }
   }
 
+  /* ── Fetch signature from server ──────────────────────────────────── */
+
+  /**
+   * Fetches the user's signature from the CardByte server, writes it to
+   * localStorage (and roamingSettings) via persistSignatureToStorage(), then
+   * returns the raw HTML.
+   *
+   * This is the single place where a network fetch happens in the React app.
+   * After this call, event.js and event-handler-classic.js can read the
+   * signature from localStorage without a network round-trip.
+   */
+  async function fetchSignatureFromServer(emailAddress) {
+    if (!emailAddress) return null;
+    try {
+      const diagnosticsPlatform = Office?.context?.diagnostics?.platform;
+      const xPlatform = diagnosticsPlatform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+      const encryptedMail = await encryptEmail(emailAddress);
+      if (!encryptedMail) return null;
+
+      const res = await fetch(
+        "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "username": encryptedMail,
+            "X-Platform": xPlatform
+          }
+        }
+      );
+
+      if (!res.ok) { console.warn("[CardByte] fetchSignatureFromServer: HTTP", res.status); return null; }
+
+      const encryptedText = await res.text();
+      const decryptedText = await handleAesDecrypt(encryptedText);
+      const html = JSON.parse(decryptedText)?.html || null;
+
+      if (html) {
+        // ── KEY STEP: persist to localStorage immediately so that
+        //    event.js (SharedRuntime) and event-handler-classic.js
+        //    both get an instant cache hit next time they fire.
+        persistSignatureToStorage(html);
+        console.log("[CardByte] fetchSignatureFromServer: signature fetched and persisted ✅");
+      }
+
+      return html;
+    } catch (err) {
+      console.warn("[CardByte] fetchSignatureFromServer: error:", err);
+      return null;
+    }
+  }
+
   /* ── Auth / load ──────────────────────────────────────────────────── */
 
   async function loadSignature() {
-    try { setLoading(true); setMode("ready"); }
-    catch (e) { setError("Unable to load signature"); setMode("ready"); }
-    finally { setLoading(false); }
+    try {
+      setLoading(true);
+
+      // Attempt to fetch a fresh copy and populate the shared cache.
+      const emailAddress = user?.emailAddress || Office?.context?.mailbox?.userProfile?.emailAddress;
+      if (emailAddress) {
+        await fetchSignatureFromServer(emailAddress);
+      }
+
+      setMode("ready");
+    } catch (e) {
+      console.warn("[CardByte] loadSignature error:", e);
+      setError("Unable to load signature");
+      setMode("ready");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleLogin(form) {

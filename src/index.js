@@ -49,20 +49,36 @@ const fallbackUser = {
  * Bootstrap
  *
  * Office.onReady is the SINGLE entry point for both:
- *   1. startPrefetchLoop() — Office.context is guaranteed ready here
- *   2. renderApp()         — React mounts after Office is ready
  *
- * Previously, App.js had its own Office.onReady at module scope which
- * raced against this one and ran before Office.context.mailbox was
- * populated, causing emailAddress to be undefined and the prefetch
- * to silently no-op every time.
+ *   1. startPrefetchLoop()
+ *      For Classic Outlook on Windows, this immediately fetches the
+ *      signature from the CardByte server and writes it to:
+ *        • localStorage["cardbyte_cached_signature"]  ← primary cache
+ *        • Office.context.roamingSettings              ← secondary fallback
+ *
+ *      event-handler-classic.js reads localStorage first (same origin,
+ *      shared between the WebView taskpane runtime and the Classic JS
+ *      worker), so it gets an instant cache hit without any XHR.
+ *
+ *      On OWA / New Outlook / Mac, startPrefetchLoop() skips the fetch
+ *      because those platforms run inside the SharedRuntime and
+ *      App.loadSignature() (called from init()) handles the fetch and
+ *      calls persistSignatureToStorage() directly.
+ *
+ *   2. renderApp()
+ *      React mounts after Office is ready.  App.init() → loadSignature()
+ *      → fetchSignatureFromServer() runs as usual and also calls
+ *      persistSignatureToStorage(), keeping localStorage current.
+ *
  * --------------------------------------------------
  */
 if (typeof Office !== "undefined") {
   Office.onReady((info) => {
     console.log("[CardByte] Office.onReady fired — host:", info.host, "platform:", info.platform);
 
-    // ✅ Start prefetch here — Office.context is fully ready
+    // ✅ Start prefetch here — Office.context is fully ready.
+    //    For Classic Windows: fetches + writes to localStorage immediately.
+    //    For other platforms: no-ops (App.loadSignature handles it).
     startPrefetchLoop();
 
     if (info.host === Office.HostType.Outlook) {
