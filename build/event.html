@@ -94,31 +94,6 @@
             }
           }
         }
-
-        // / After script loads, enhance the applySignature function
-        function enhanceWithAutoOpen() {
-          if (window.applySignature && typeof window.applySignature === 'function') {
-            const original = window.applySignature;
-            window.applySignature = function (event) {
-              // Auto-open taskpane
-              if (Office.addin && typeof Office.addin.showAsTaskpane === 'function') {
-                Office.addin.showAsTaskpane().catch(console.warn);
-              }
-              // Call original
-              return original(event);
-            };
-            console.log("[CardByte] ✅ Enhanced applySignature with auto-open");
-          } else {
-            // Retry after a short delay
-            setTimeout(enhanceWithAutoOpen, 100);
-          }
-        }
-
-        // Wait for Office to be ready before enhancing
-        Office.onReady(function () {
-          enhanceWithAutoOpen();
-        });
-
       }
 
       loadRuntime();
