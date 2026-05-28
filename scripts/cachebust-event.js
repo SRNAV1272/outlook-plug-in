@@ -142,7 +142,7 @@ const WELL_KNOWN_DIR = path.resolve(BUILD_DIR, '.well-known');
 fs.mkdirSync(WELL_KNOWN_DIR, { recursive: true });
 fs.writeFileSync(
   path.resolve(WELL_KNOWN_DIR, 'microsoft-officeaddins-allowed.json'),
-  JSON.stringify({ allow: ['*'] }, null, 2) + '\n'
+  JSON.stringify({ allowed: ['https://qa-signature.cardbyte.ai/runtime/event-handler-classic.js'] }, null, 2) + '\n'
 );
 
 // ── Summary ─────────────────────────────────────────────

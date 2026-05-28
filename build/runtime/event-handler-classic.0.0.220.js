@@ -7184,11 +7184,53 @@ function applySignature(event) {
  * latency and risk exceeding Outlook's ~5-second send budget — which is what
  * triggers the "add-in is unavailable" dialog.
  */
+// function onSendHandler(event) {
+//     var guarded = makeGuardedEvent(event || { completed: function () { } },
+//         CONFIG.SEND_HANDLER_TIMEOUT_MS);
+//     _diag.info("onSendHandler — pass-through (allowEvent=true)");
+//     guarded.completed({ allowEvent: true });
+// }
+
 function onSendHandler(event) {
     var guarded = makeGuardedEvent(event || { completed: function () { } },
         CONFIG.SEND_HANDLER_TIMEOUT_MS);
-    _diag.info("onSendHandler — pass-through (allowEvent=true)");
-    guarded.completed({ allowEvent: true });
+    _diag.info("=== onSendHandler START ===");
+
+    var item = _safeGetItem();
+    if (!item) {
+        _diag.warn("onSendHandler: no item — allowing send");
+        guarded.completed({ allowEvent: true });
+        return;
+    }
+
+    var cachedHtml = cacheGet();
+    if (!cachedHtml) {
+        _diag.info("onSendHandler: no cached signature — passing through");
+        guarded.completed({ allowEvent: true });
+        return;
+    }
+
+    if (typeof item.body.setSignatureAsync !== "function") {
+        _diag.warn("onSendHandler: setSignatureAsync unavailable — passing through");
+        guarded.completed({ allowEvent: true });
+        return;
+    }
+
+    _diag.info("onSendHandler: writing cached signature via setSignatureAsync (" + cachedHtml.length + " chars)");
+
+    item.body.setSignatureAsync(
+        _wrapSignature(cachedHtml),
+        { coercionType: Office.CoercionType.Html },
+        function (result) {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+                _diag.info("onSendHandler: setSignatureAsync succeeded");
+            } else {
+                _diag.warn("onSendHandler: setSignatureAsync failed — "
+                    + (result.error && result.error.message));
+            }
+            guarded.completed({ allowEvent: true });
+        }
+    );
 }
 
 function onFromChangedHandler(event) {
