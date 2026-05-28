@@ -6719,7 +6719,7 @@ var CONFIG = {
     WRAP_BOTTOM_PX: 40,
 
     // Send handler must complete within Outlook's hard send budget (~5s).
-    SEND_HANDLER_TIMEOUT_MS: 3000,
+    SEND_HANDLER_TIMEOUT_MS: 4000,
 
     // Compose / from-changed handlers have a softer budget.
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
@@ -6848,42 +6848,236 @@ function decryptResponse(cipherB64) {
 
 var _memCache = {};
 
-function cacheGet() {
-    if (_memCache[CONFIG.CACHE_KEY]) {
-        _diag.info("Cache hit (mem)");
-        return _memCache[CONFIG.CACHE_KEY].html;
-    }
+function cacheGet(cb) {
+
     try {
-        var entry = Office.context.roamingSettings.get(CONFIG.CACHE_KEY);
-        if (entry && entry.html) {
-            _diag.info("Cache hit (roamingSettings) — size: " + entry.html.length);
-            _memCache[CONFIG.CACHE_KEY] = entry;
-            return entry.html;
+
+        // =====================================================
+        // 1. Runtime memory cache
+        // =====================================================
+
+        var memEntry =
+            _memCache[CONFIG.CACHE_KEY];
+
+        if (
+            memEntry &&
+            memEntry.html &&
+            memEntry.hash
+        ) {
+
+            var memHash =
+                CryptoJS.SHA256(
+                    memEntry.html
+                ).toString();
+
+            if (
+                memHash === memEntry.hash
+            ) {
+
+                _diag.info(
+                    "cacheGet: memory cache hit"
+                );
+
+                cb(memEntry.html);
+
+                return;
+            }
+
+            _diag.warn(
+                "cacheGet: memory hash mismatch"
+            );
         }
+
+        // =====================================================
+        // 2. OfficeRuntime storage
+        // =====================================================
+
+        OfficeRuntime.storage.getItem(
+            CONFIG.CACHE_KEY
+        ).then(
+
+            function (raw) {
+
+                if (!raw) {
+
+                    _diag.warn(
+                        "cacheGet: OfficeRuntime cache miss"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                var entry = null;
+
+                try {
+
+                    entry =
+                        typeof raw === "string"
+                            ? JSON.parse(raw)
+                            : raw;
+
+                } catch (parseErr) {
+
+                    _diag.error(
+                        "cacheGet: invalid JSON"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                if (
+                    !entry ||
+                    !entry.html ||
+                    !entry.hash
+                ) {
+
+                    _diag.warn(
+                        "cacheGet: invalid entry"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                // =================================================
+                // Expiry validation
+                // =================================================
+
+                var MAX_CACHE_AGE =
+                    1000 * 60 * 60 * 6;
+
+                if (
+                    Date.now() - entry.ts >
+                    MAX_CACHE_AGE
+                ) {
+
+                    _diag.warn(
+                        "cacheGet: cache expired"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                // =================================================
+                // Integrity validation
+                // =================================================
+
+                var computedHash =
+                    CryptoJS.SHA256(
+                        entry.html
+                    ).toString();
+
+                if (
+                    computedHash !== entry.hash
+                ) {
+
+                    _diag.error(
+                        "cacheGet: integrity failed"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                // Restore into runtime cache
+                _memCache[
+                    CONFIG.CACHE_KEY
+                ] = entry;
+
+                _diag.info(
+                    "cacheGet: OfficeRuntime cache hit"
+                );
+
+                cb(entry.html);
+            },
+
+            function (err) {
+
+                _diag.warn(
+                    "cacheGet failed: " + err
+                );
+
+                cb(null);
+            }
+        );
+
     } catch (e) {
-        _diag.warn("roamingSettings.get threw: " + e.message);
+
+        _diag.warn(
+            "cacheGet threw: " + e.message
+        );
+
+        cb(null);
     }
-    _diag.info("Cache miss");
-    return null;
 }
 
-function cacheSet(html) {
-    var entry = { html: html, ts: Date.now() };
-    _memCache[CONFIG.CACHE_KEY] = entry;
+function cacheSet(html, cb) {
+
     try {
-        Office.context.roamingSettings.set(CONFIG.CACHE_KEY, entry);
-        Office.context.roamingSettings.saveAsync(function () { });
+
+        var entry = {
+            html: html,
+            ts: Date.now(),
+            hash: CryptoJS.SHA256(html).toString()
+        };
+
+        // Fast runtime cache
+        _memCache[CONFIG.CACHE_KEY] = entry;
+
+        OfficeRuntime.storage.setItem(
+            CONFIG.CACHE_KEY,
+            JSON.stringify(entry)
+        ).then(
+
+            function () {
+
+                _diag.info(
+                    "cacheSet: OfficeRuntime save success"
+                );
+
+                if (cb) cb(true);
+            },
+
+            function (err) {
+
+                _diag.warn(
+                    "cacheSet failed: " + err
+                );
+
+                if (cb) cb(false);
+            }
+        );
+
     } catch (e) {
-        _diag.warn("roamingSettings.set threw: " + e.message);
+
+        _diag.warn(
+            "cacheSet threw: " + e.message
+        );
+
+        if (cb) cb(false);
     }
 }
 
-function cacheClear() {
+function cacheClear(cb) {
     delete _memCache[CONFIG.CACHE_KEY];
-    try {
-        Office.context.roamingSettings.remove(CONFIG.CACHE_KEY);
-        Office.context.roamingSettings.saveAsync(function () { });
-    } catch (_) { }
+    OfficeRuntime.storage.removeItem(CONFIG.CACHE_KEY).then(
+        function () {
+            _diag.info("cacheClear: OfficeRuntime storage cleared");
+            if (cb) cb();
+        },
+        function (err) {
+            _diag.warn("cacheClear failed: " + err);
+            if (cb) cb();
+        }
+    );
 }
 
 // ─── Compose-body write path ──────────────────────────────────────────────────
@@ -7104,31 +7298,110 @@ function fetchSignature(onSuccess, onError) {
  * Tries the backend first, then the cache, then gives up gracefully.
  * Always completes the event when done.
  */
-function applySignatureCore(item, guardedEvent) {
-    _diag.info("applySignatureCore — attempting backend");
+function applySignatureCore(
+    item,
+    guardedEvent
+) {
+
+    _diag.info(
+        "applySignatureCore — attempting backend"
+    );
 
     fetchSignature(
-        // Success — write fetched signature, refresh cache.
+
+        // =====================================================
+        // SUCCESS
+        // =====================================================
+
         function (html) {
-            cacheSet(html);
-            writeSignature(item, _wrapSignature(html), function (ok) {
-                if (!ok) _diag.warn("Fetched signature write failed");
-                writeDiagnostics(item, function () { guardedEvent.completed(); });
+
+            cacheSet(html, function () {
+
+                _diag.info(
+                    "applySignatureCore: cache persisted"
+                );
+
+                writeSignature(
+                    item,
+                    _wrapSignature(html),
+                    function (ok) {
+
+                        if (!ok) {
+
+                            _diag.warn(
+                                "Fetched signature write failed"
+                            );
+                        }
+
+                        writeDiagnostics(
+                            item,
+                            function () {
+
+                                guardedEvent.completed();
+                            }
+                        );
+                    }
+                );
             });
         },
-        // Failure — fall back to cache.
+
+        // =====================================================
+        // FAILURE
+        // =====================================================
+
         function (reason) {
-            _diag.warn("Backend failed (" + reason + ") — falling back to cache");
-            var cached = cacheGet();
-            if (cached) {
-                writeSignature(item, _wrapSignature(cached), function (ok) {
-                    if (!ok) _diag.warn("Cached signature write failed");
-                    writeDiagnostics(item, function () { guardedEvent.completed(); });
-                });
-            } else {
-                _diag.error("Backend miss + cache miss — no signature to write");
-                writeDiagnostics(item, function () { guardedEvent.completed(); });
-            }
+
+            _diag.warn(
+                "Backend failed (" +
+                reason +
+                ") — falling back to cache"
+            );
+
+            cacheGet(function (cachedHtml) {
+
+                if (cachedHtml) {
+
+                    _diag.info(
+                        "Using cached signature"
+                    );
+
+                    writeSignature(
+                        item,
+                        _wrapSignature(cachedHtml),
+                        function (ok) {
+
+                            if (!ok) {
+
+                                _diag.warn(
+                                    "Cached signature write failed"
+                                );
+                            }
+
+                            writeDiagnostics(
+                                item,
+                                function () {
+
+                                    guardedEvent.completed();
+                                }
+                            );
+                        }
+                    );
+
+                } else {
+
+                    _diag.error(
+                        "Backend miss + cache miss — no signature to write"
+                    );
+
+                    writeDiagnostics(
+                        item,
+                        function () {
+
+                            guardedEvent.completed();
+                        }
+                    );
+                }
+            });
         }
     );
 }
@@ -7210,27 +7483,26 @@ function onSendHandler(event) {
     var item = _safeGetItem();
     if (!item) {
         _diag.warn("onSendHandler: no item — allowing send");
-        // ✅ Write diag BEFORE completing so we can see it fired
-        writeDiagnostics(item, function () {
-            guarded.completed({ allowEvent: true });
-        });
+        guarded.completed({ allowEvent: true });
         return;
     }
 
-    var cachedHtml = cacheGet();
-    if (!cachedHtml) {
-        _diag.info("onSendHandler: no cached signature — passing through");
-        writeDiagnostics(item, function () {          // ✅ Added
-            guarded.completed({ allowEvent: true });
-        });
-        return;
-    }
+    // ✅ cacheGet is async — must use callback
+    cacheGet(function (cachedHtml) {
+        if (!cachedHtml) {
+            _diag.info("onSendHandler: no cached signature — passing through");
+            writeDiagnostics(item, function () {
+                guarded.completed({ allowEvent: true });
+            });
+            return;
+        }
 
-    _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
-    writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
-        if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-        writeDiagnostics(item, function () {          // ✅ Added
-            guarded.completed({ allowEvent: true });
+        _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
+        writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
+            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+            writeDiagnostics(item, function () {
+                guarded.completed({ allowEvent: true });
+            });
         });
     });
 }
@@ -7238,13 +7510,13 @@ function onSendHandler(event) {
 function onFromChangedHandler(event) {
     var guarded = makeGuardedEvent(event || { completed: function () { } },
         CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
-    _diag.info("onFromChangedHandler fired — clearing cache and re-fetching");
 
     var item = _safeGetItem();
     if (!item) { guarded.completed(); return; }
 
-    cacheClear();
-    applySignatureCore(item, guarded);
+    cacheClear(function () {
+        applySignatureCore(item, guarded);
+    });
 }
 
 function _safeGetItem() {

@@ -6719,7 +6719,7 @@ var CONFIG = {
     WRAP_BOTTOM_PX: 40,
 
     // Send handler must complete within Outlook's hard send budget (~5s).
-    SEND_HANDLER_TIMEOUT_MS: 3000,
+    SEND_HANDLER_TIMEOUT_MS: 4000,
 
     // Compose / from-changed handlers have a softer budget.
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
@@ -7066,23 +7066,26 @@ function cacheSet(html, cb) {
     }
 }
 
-function cacheClear() {
+function cacheClear(cb) {
     delete _memCache[CONFIG.CACHE_KEY];
-    try {
-        Office.context.roamingSettings.remove(CONFIG.CACHE_KEY);
-        Office.context.roamingSettings.saveAsync(function () { });
-    } catch (_) { }
+    OfficeRuntime.storage.removeItem(CONFIG.CACHE_KEY).then(
+        function () {
+            _diag.info("cacheClear: OfficeRuntime storage cleared");
+            if (cb) cb();
+        },
+        function (err) {
+            _diag.warn("cacheClear failed: " + err);
+            if (cb) cb();
+        }
+    );
 }
 
 // ─── Compose-body write path ──────────────────────────────────────────────────
 
 function _wrapSignature(html) {
-
-    return (
-        "<!-- CARD_BYTE_SIGNATURE_START -->" +
-        html +
-        "<!-- CARD_BYTE_SIGNATURE_END -->"
-    );
+    return "<div style='margin-top:" + CONFIG.WRAP_TOP_PX + "px'></div>"
+        + html
+        + "<div style='margin-top:" + CONFIG.WRAP_BOTTOM_PX + "px'></div>";
 }
 
 /**
@@ -7471,76 +7474,49 @@ function applySignature(event) {
 // }
 
 function onSendHandler(event) {
-
-    _diag.info(
-        "onSendHandler START"
+    var guarded = makeGuardedEvent(
+        event || { completed: function () { } },
+        CONFIG.SEND_HANDLER_TIMEOUT_MS
     );
+    _diag.info("=== onSendHandler START ===");
 
-    try {
+    var item = _safeGetItem();
+    if (!item) {
+        _diag.warn("onSendHandler: no item — allowing send");
+        guarded.completed({ allowEvent: true });
+        return;
+    }
 
-        var item =
-            Office.context.mailbox.item;
+    // ✅ cacheGet is async — must use callback
+    cacheGet(function (cachedHtml) {
+        if (!cachedHtml) {
+            _diag.info("onSendHandler: no cached signature — passing through");
+            writeDiagnostics(item, function () {
+                guarded.completed({ allowEvent: true });
+            });
+            return;
+        }
 
-        cacheGet(function (cachedHtml) {
-
-            if (cachedHtml) {
-
-                _diag.info(
-                    "onSendHandler: cached signature found"
-                );
-
-                writeSignature(
-                    item,
-                    _wrapSignature(cachedHtml),
-                    function () {
-
-                        writeDiagnostics(
-                            item,
-                            function () {
-
-                                event.completed({
-                                    allowEvent: true
-                                });
-                            }
-                        );
-                    }
-                );
-
-                return;
-            }
-
-            _diag.warn(
-                "onSendHandler: no cached signature — passing through"
-            );
-
-            event.completed({
-                allowEvent: true
+        _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
+        writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
+            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+            writeDiagnostics(item, function () {
+                guarded.completed({ allowEvent: true });
             });
         });
-
-    } catch (e) {
-
-        _diag.error(
-            "onSendHandler failed: " +
-            e.message
-        );
-
-        event.completed({
-            allowEvent: true
-        });
-    }
+    });
 }
 
 function onFromChangedHandler(event) {
     var guarded = makeGuardedEvent(event || { completed: function () { } },
         CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
-    _diag.info("onFromChangedHandler fired — clearing cache and re-fetching");
 
     var item = _safeGetItem();
     if (!item) { guarded.completed(); return; }
 
-    cacheClear();
-    applySignatureCore(item, guarded);
+    cacheClear(function () {
+        applySignatureCore(item, guarded);
+    });
 }
 
 function _safeGetItem() {
