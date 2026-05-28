@@ -7198,11 +7198,13 @@ function onSendHandler(event) {
 
     var item = _safeGetItem();
     if (!item) {
-        _diag.warn("onSendHandler: no item — allowing send");
+        _diag.warn("onSendHandler: no item — allowing send without signature refresh");
         guarded.completed({ allowEvent: true });
         return;
     }
 
+    // Grab the cached signature. If there's nothing cached, just allow the send —
+    // the signature was already written by applySignature / onFromChangedHandler.
     var cachedHtml = cacheGet();
     if (!cachedHtml) {
         _diag.info("onSendHandler: no cached signature — passing through");
@@ -7210,67 +7212,64 @@ function onSendHandler(event) {
         return;
     }
 
-    var wrappedSig = _wrapSignature(cachedHtml);
+    _diag.info("onSendHandler: cached signature found (" + cachedHtml.length + " chars) — refreshing");
 
-    // setSignatureAsync is officially compose-only. In the send context on
-    // Classic Outlook it may silently succeed without actually writing, or
-    // return an error. We try it first, then unconditionally fall through
-    // to prependAsync as the guaranteed write path.
-    //
-    // prependAsync in OnMessageSend prepends to whatever is already in the
-    // body — including the signature written by applySignature. To avoid
-    // doubling, we rely on setSignatureAsync having already managed the
-    // signature slot. If setSignatureAsync worked, prependAsync is skipped.
-    // If it failed or is unavailable, prependAsync is the real write.
-
-    function tryPrependFallback(reason) {
-        _diag.warn("onSendHandler: setSignatureAsync path failed (" + reason + ") — using prependAsync");
-
-        if (typeof item.body.prependAsync !== "function") {
-            _diag.error("onSendHandler: prependAsync also unavailable — allowing send as-is");
+    // Read the current body so we can splice the signature in cleanly.
+    item.body.getAsync(Office.CoercionType.Html, function (getResult) {
+        if (getResult.status !== Office.AsyncResultStatus.Succeeded) {
+            _diag.warn("onSendHandler: body.getAsync failed — allowing send as-is");
             guarded.completed({ allowEvent: true });
             return;
         }
 
-        item.body.prependAsync(
-            wrappedSig,
-            { coercionType: Office.CoercionType.Html },
-            function (result) {
-                if (result.status === Office.AsyncResultStatus.Succeeded) {
-                    _diag.info("onSendHandler: prependAsync succeeded");
-                } else {
-                    _diag.warn("onSendHandler: prependAsync failed — "
-                        + (result.error && result.error.message));
-                }
-                guarded.completed({ allowEvent: true });
-            }
+        var currentBody = getResult.value || "";
+        var wrappedSig = _wrapSignature(cachedHtml);
+
+        // Build the new body:
+        //   • Strip whatever signature block is already in the body (identified
+        //     by the wrapper divs written by _wrapSignature / writeSignature).
+        //   • Append the fresh wrapped signature at the end.
+        //
+        // The wrapper pattern is:
+        //   <div style='margin-top:Xpx'></div>   ← top spacer
+        //   ...signature content...
+        //   <div style='margin-top:Xpx'></div>   ← bottom spacer
+        //
+        // We key on the top-spacer style string so the regex is anchored to our
+        // own output rather than any arbitrary inline style in the message.
+
+        var topPx = CONFIG.WRAP_TOP_PX;
+        var bottomPx = CONFIG.WRAP_BOTTOM_PX;
+
+        // Matches our wrapper block (top spacer → bottom spacer, inclusive).
+        // [\s\S]*? is non-greedy so it stops at the first bottom-spacer it sees.
+        var sigPattern = new RegExp(
+            "<div[^>]*style=['\"]margin-top:" + topPx + "px['\"][^>]*>"
+            + "[\\s\\S]*?"
+            + "<div[^>]*style=['\"]margin-top:" + bottomPx + "px['\"][^>]*>\\s*<\\/div>",
+            "i"
         );
-    }
 
-    if (typeof item.body.setSignatureAsync !== "function") {
-        _diag.warn("onSendHandler: setSignatureAsync unavailable");
-        tryPrependFallback("api-unavailable");
-        return;
-    }
-
-    _diag.info("onSendHandler: attempting setSignatureAsync (" + cachedHtml.length + " chars)");
-
-    item.body.setSignatureAsync(
-        wrappedSig,
-        { coercionType: Office.CoercionType.Html },
-        function (result) {
-            if (result.status === Office.AsyncResultStatus.Succeeded) {
-                _diag.info("onSendHandler: setSignatureAsync succeeded — allowing send");
-                guarded.completed({ allowEvent: true });
-            } else {
-                var errMsg = (result.error && result.error.message) || "unknown error";
-                var errCode = (result.error && result.error.code) || 0;
-                _diag.warn("onSendHandler: setSignatureAsync failed — code:" + errCode + " msg:" + errMsg);
-                // Fall through to prependAsync since setSignatureAsync didn't work
-                tryPrependFallback("code-" + errCode);
-            }
+        var strippedBody;
+        if (sigPattern.test(currentBody)) {
+            _diag.info("onSendHandler: existing signature block found — replacing");
+            strippedBody = currentBody.replace(sigPattern, "");
+        } else {
+            _diag.info("onSendHandler: no existing signature block found — appending");
+            strippedBody = currentBody;
         }
-    );
+
+        var newBody = strippedBody + wrappedSig;
+
+        item.body.setAsync(newBody, { coercionType: Office.CoercionType.Html }, function (setResult) {
+            if (setResult.status !== Office.AsyncResultStatus.Succeeded) {
+                _diag.warn("onSendHandler: body.setAsync failed — allowing send with original body");
+            } else {
+                _diag.info("onSendHandler: signature refreshed successfully");
+            }
+            guarded.completed({ allowEvent: true });
+        });
+    });
 }
 
 function onFromChangedHandler(event) {
