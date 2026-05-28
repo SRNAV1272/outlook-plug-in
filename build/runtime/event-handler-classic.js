@@ -6726,7 +6726,7 @@ var CONFIG = {
 
     // Set to false for production builds. When true, every applySignature
     // invocation prepends a yellow diagnostic block to the compose body.
-    DIAG_ENABLED: true
+    DIAG_ENABLED: false
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
@@ -7466,12 +7466,6 @@ function applySignature(event) {
  * latency and risk exceeding Outlook's ~5-second send budget — which is what
  * triggers the "add-in is unavailable" dialog.
  */
-// function onSendHandler(event) {
-//     var guarded = makeGuardedEvent(event || { completed: function () { } },
-//         CONFIG.SEND_HANDLER_TIMEOUT_MS);
-//     _diag.info("onSendHandler — pass-through (allowEvent=true)");
-//     guarded.completed({ allowEvent: true });
-// }
 
 function onSendHandler(event) {
     var guarded = makeGuardedEvent(
