@@ -6848,83 +6848,166 @@ function decryptResponse(cipherB64) {
 
 var _memCache = {};
 
-// function cacheGet() {
-//     if (_memCache[CONFIG.CACHE_KEY]) {
-//         _diag.info("Cache hit (mem)");
-//         return _memCache[CONFIG.CACHE_KEY].html;
-//     }
-//     try {
-//         var entry = Office.context.roamingSettings.get(CONFIG.CACHE_KEY);
-//         if (entry && entry.html) {
-//             _diag.info("Cache hit (roamingSettings) — size: " + entry.html.length);
-//             _memCache[CONFIG.CACHE_KEY] = entry;
-//             return entry.html;
-//         }
-//     } catch (e) {
-//         _diag.warn("roamingSettings.get threw: " + e.message);
-//     }
-//     _diag.info("Cache miss");
-//     return null;
-// }
-
-function cacheGet() {
+function cacheGet(cb) {
 
     try {
 
-        // First preference → runtime memory
-        var memEntry = _memCache[CONFIG.CACHE_KEY];
+        // =====================================================
+        // 1. Runtime memory cache
+        // =====================================================
+
+        var memEntry =
+            _memCache[CONFIG.CACHE_KEY];
 
         if (
             memEntry &&
             memEntry.html &&
-            memEntry.hash === CryptoJS.SHA256(memEntry.html).toString()
+            memEntry.hash
         ) {
 
-            _diag.info("cacheGet: memory cache hit");
+            var memHash =
+                CryptoJS.SHA256(
+                    memEntry.html
+                ).toString();
 
-            return memEntry.html;
-        }
+            if (
+                memHash === memEntry.hash
+            ) {
 
-        // Second preference → roaming settings
-        var raw = Office.context.roamingSettings.get(
-            CONFIG.CACHE_KEY
-        );
+                _diag.info(
+                    "cacheGet: memory cache hit"
+                );
 
-        if (!raw) {
+                cb(memEntry.html);
 
-            _diag.warn("cacheGet: roaming cache miss");
+                return;
+            }
 
-            return null;
-        }
-
-        var entry =
-            typeof raw === "string"
-                ? JSON.parse(raw)
-                : raw;
-
-        if (!entry || !entry.html) {
-
-            _diag.warn("cacheGet: invalid cache entry");
-
-            return null;
-        }
-
-        // Integrity validation
-        var computedHash =
-            CryptoJS.SHA256(entry.html).toString();
-
-        if (computedHash !== entry.hash) {
-
-            _diag.error(
-                "cacheGet: cache integrity validation failed"
+            _diag.warn(
+                "cacheGet: memory hash mismatch"
             );
-
-            return null;
         }
 
-        _diag.info("cacheGet: roaming cache hit");
+        // =====================================================
+        // 2. OfficeRuntime storage
+        // =====================================================
 
-        return entry.html;
+        OfficeRuntime.storage.getItem(
+            CONFIG.CACHE_KEY
+        ).then(
+
+            function (raw) {
+
+                if (!raw) {
+
+                    _diag.warn(
+                        "cacheGet: OfficeRuntime cache miss"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                var entry = null;
+
+                try {
+
+                    entry =
+                        typeof raw === "string"
+                            ? JSON.parse(raw)
+                            : raw;
+
+                } catch (parseErr) {
+
+                    _diag.error(
+                        "cacheGet: invalid JSON"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                if (
+                    !entry ||
+                    !entry.html ||
+                    !entry.hash
+                ) {
+
+                    _diag.warn(
+                        "cacheGet: invalid entry"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                // =================================================
+                // Expiry validation
+                // =================================================
+
+                var MAX_CACHE_AGE =
+                    1000 * 60 * 60 * 6;
+
+                if (
+                    Date.now() - entry.ts >
+                    MAX_CACHE_AGE
+                ) {
+
+                    _diag.warn(
+                        "cacheGet: cache expired"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                // =================================================
+                // Integrity validation
+                // =================================================
+
+                var computedHash =
+                    CryptoJS.SHA256(
+                        entry.html
+                    ).toString();
+
+                if (
+                    computedHash !== entry.hash
+                ) {
+
+                    _diag.error(
+                        "cacheGet: integrity failed"
+                    );
+
+                    cb(null);
+
+                    return;
+                }
+
+                // Restore into runtime cache
+                _memCache[
+                    CONFIG.CACHE_KEY
+                ] = entry;
+
+                _diag.info(
+                    "cacheGet: OfficeRuntime cache hit"
+                );
+
+                cb(entry.html);
+            },
+
+            function (err) {
+
+                _diag.warn(
+                    "cacheGet failed: " + err
+                );
+
+                cb(null);
+            }
+        );
 
     } catch (e) {
 
@@ -6932,46 +7015,46 @@ function cacheGet() {
             "cacheGet threw: " + e.message
         );
 
-        return null;
+        cb(null);
     }
 }
 
 function cacheSet(html, cb) {
 
-    var entry = {
-        html: html,
-        ts: Date.now(),
-        hash: CryptoJS.SHA256(html).toString()
-    };
-
-    // Runtime memory cache
-    _memCache[CONFIG.CACHE_KEY] = entry;
-
     try {
 
-        Office.context.roamingSettings.set(
+        var entry = {
+            html: html,
+            ts: Date.now(),
+            hash: CryptoJS.SHA256(html).toString()
+        };
+
+        // Fast runtime cache
+        _memCache[CONFIG.CACHE_KEY] = entry;
+
+        OfficeRuntime.storage.setItem(
             CONFIG.CACHE_KEY,
             JSON.stringify(entry)
-        );
+        ).then(
 
-        Office.context.roamingSettings.saveAsync(function (res) {
-
-            if (res.status === Office.AsyncResultStatus.Succeeded) {
+            function () {
 
                 _diag.info(
-                    "cacheSet: roamingSettings save success"
+                    "cacheSet: OfficeRuntime save success"
                 );
 
-            } else {
+                if (cb) cb(true);
+            },
+
+            function (err) {
 
                 _diag.warn(
-                    "cacheSet: roamingSettings save failed"
+                    "cacheSet failed: " + err
                 );
+
+                if (cb) cb(false);
             }
-
-            if (cb) cb();
-
-        });
+        );
 
     } catch (e) {
 
@@ -6979,7 +7062,7 @@ function cacheSet(html, cb) {
             "cacheSet threw: " + e.message
         );
 
-        if (cb) cb();
+        if (cb) cb(false);
     }
 }
 
@@ -6994,9 +7077,12 @@ function cacheClear() {
 // ─── Compose-body write path ──────────────────────────────────────────────────
 
 function _wrapSignature(html) {
-    return "<div style='margin-top:" + CONFIG.WRAP_TOP_PX + "px'></div>"
-        + html
-        + "<div style='margin-top:" + CONFIG.WRAP_BOTTOM_PX + "px'></div>";
+
+    return (
+        "<!-- CARD_BYTE_SIGNATURE_START -->" +
+        html +
+        "<!-- CARD_BYTE_SIGNATURE_END -->"
+    );
 }
 
 /**
@@ -7209,42 +7295,10 @@ function fetchSignature(onSuccess, onError) {
  * Tries the backend first, then the cache, then gives up gracefully.
  * Always completes the event when done.
  */
-// function applySignatureCore(item, guardedEvent) {
-//     _diag.info("applySignatureCore — attempting backend");
-
-//     fetchSignature(
-//         // Success — write fetched signature, refresh cache.
-//         function (html) {
-//             cacheSet(html);
-//             writeSignature(item, _wrapSignature(html), function (ok) {
-//                 if (!ok) _diag.warn("Fetched signature write failed");
-//                 writeDiagnostics(item, function () { guardedEvent.completed(); });
-//             });
-//         },
-//         // Failure — fall back to cache.
-//         function (reason) {
-//             _diag.warn("Backend failed (" + reason + ") — falling back to cache");
-//             var cached = cacheGet();
-//             if (cached) {
-//                 writeSignature(item, _wrapSignature(cached), function (ok) {
-//                     if (!ok) _diag.warn("Cached signature write failed");
-//                     writeDiagnostics(item, function () { guardedEvent.completed(); });
-//                 });
-//             } else {
-//                 _diag.error("Backend miss + cache miss — no signature to write");
-//                 writeDiagnostics(item, function () { guardedEvent.completed(); });
-//             }
-//         }
-//     );
-// }
-
-// ─── Guarded event.completed ──────────────────────────────────────────────────
-//
-// Outlook's LaunchEvent runtime hard-kills the handler if event.completed()
-// is not called within the platform budget. We wrap the raw event in a
-// guard that fires completed() at most once, with a safety timer.
-
-function applySignatureCore(item, guardedEvent) {
+function applySignatureCore(
+    item,
+    guardedEvent
+) {
 
     _diag.info(
         "applySignatureCore — attempting backend"
@@ -7252,7 +7306,10 @@ function applySignatureCore(item, guardedEvent) {
 
     fetchSignature(
 
+        // =====================================================
         // SUCCESS
+        // =====================================================
+
         function (html) {
 
             cacheSet(html, function () {
@@ -7285,7 +7342,10 @@ function applySignatureCore(item, guardedEvent) {
             });
         },
 
+        // =====================================================
         // FAILURE
+        // =====================================================
+
         function (reason) {
 
             _diag.warn(
@@ -7294,49 +7354,60 @@ function applySignatureCore(item, guardedEvent) {
                 ") — falling back to cache"
             );
 
-            var cachedHtml = cacheGet();
+            cacheGet(function (cachedHtml) {
 
-            if (cachedHtml) {
+                if (cachedHtml) {
 
-                writeSignature(
-                    item,
-                    _wrapSignature(cachedHtml),
-                    function (ok) {
+                    _diag.info(
+                        "Using cached signature"
+                    );
 
-                        if (!ok) {
+                    writeSignature(
+                        item,
+                        _wrapSignature(cachedHtml),
+                        function (ok) {
 
-                            _diag.warn(
-                                "Cached signature write failed"
+                            if (!ok) {
+
+                                _diag.warn(
+                                    "Cached signature write failed"
+                                );
+                            }
+
+                            writeDiagnostics(
+                                item,
+                                function () {
+
+                                    guardedEvent.completed();
+                                }
                             );
                         }
+                    );
 
-                        writeDiagnostics(
-                            item,
-                            function () {
+                } else {
 
-                                guardedEvent.completed();
-                            }
-                        );
-                    }
-                );
+                    _diag.error(
+                        "Backend miss + cache miss — no signature to write"
+                    );
 
-            } else {
+                    writeDiagnostics(
+                        item,
+                        function () {
 
-                _diag.error(
-                    "Backend miss + cache miss — no signature to write"
-                );
-
-                writeDiagnostics(
-                    item,
-                    function () {
-
-                        guardedEvent.completed();
-                    }
-                );
-            }
+                            guardedEvent.completed();
+                        }
+                    );
+                }
+            });
         }
     );
 }
+
+// ─── Guarded event.completed ──────────────────────────────────────────────────
+//
+// Outlook's LaunchEvent runtime hard-kills the handler if event.completed()
+// is not called within the platform budget. We wrap the raw event in a
+// guard that fires completed() at most once, with a safety timer.
 
 function makeGuardedEvent(event, timeoutMs) {
     var done = false;
@@ -7400,38 +7471,64 @@ function applySignature(event) {
 // }
 
 function onSendHandler(event) {
-    var guarded = makeGuardedEvent(
-        event || { completed: function () { } },
-        CONFIG.SEND_HANDLER_TIMEOUT_MS
+
+    _diag.info(
+        "onSendHandler START"
     );
-    _diag.info("=== onSendHandler START ===");
 
-    var item = _safeGetItem();
-    if (!item) {
-        _diag.warn("onSendHandler: no item — allowing send");
-        // ✅ Write diag BEFORE completing so we can see it fired
-        writeDiagnostics(item, function () {
-            guarded.completed({ allowEvent: true });
+    try {
+
+        var item =
+            Office.context.mailbox.item;
+
+        cacheGet(function (cachedHtml) {
+
+            if (cachedHtml) {
+
+                _diag.info(
+                    "onSendHandler: cached signature found"
+                );
+
+                writeSignature(
+                    item,
+                    _wrapSignature(cachedHtml),
+                    function () {
+
+                        writeDiagnostics(
+                            item,
+                            function () {
+
+                                event.completed({
+                                    allowEvent: true
+                                });
+                            }
+                        );
+                    }
+                );
+
+                return;
+            }
+
+            _diag.warn(
+                "onSendHandler: no cached signature — passing through"
+            );
+
+            event.completed({
+                allowEvent: true
+            });
         });
-        return;
+
+    } catch (e) {
+
+        _diag.error(
+            "onSendHandler failed: " +
+            e.message
+        );
+
+        event.completed({
+            allowEvent: true
+        });
     }
-
-    var cachedHtml = cacheGet();
-    if (!cachedHtml) {
-        _diag.info("onSendHandler: no cached signature — passing through");
-        writeDiagnostics(item, function () {          // ✅ Added
-            guarded.completed({ allowEvent: true });
-        });
-        return;
-    }
-
-    _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
-    writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
-        if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-        writeDiagnostics(item, function () {          // ✅ Added
-            guarded.completed({ allowEvent: true });
-        });
-    });
 }
 
 function onFromChangedHandler(event) {
