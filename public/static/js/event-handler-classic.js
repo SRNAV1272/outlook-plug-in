@@ -7164,6 +7164,15 @@ function makeGuardedEvent(event, timeoutMs) {
 // ─── Event handlers ───────────────────────────────────────────────────────────
 
 function applySignature(event) {
+    // Add this diagnostic check
+    var supported = [];
+    ["1.1", "1.5", "1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12", "1.13"].forEach(function (v) {
+        if (Office.context.requirements.isSetSupported("Mailbox", v)) {
+            supported.push(v);
+        }
+    });
+    _diag.info("Supported Mailbox versions: " + supported.join(", "));
+
     var guarded = makeGuardedEvent(event || { completed: function () { } },
         CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
     _diag.info("=== applySignature START ===");
