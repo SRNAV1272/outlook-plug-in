@@ -7210,25 +7210,65 @@ function onSendHandler(event) {
         return;
     }
 
+    var wrappedSig = _wrapSignature(cachedHtml);
+
+    // setSignatureAsync is officially compose-only. In the send context on
+    // Classic Outlook it may silently succeed without actually writing, or
+    // return an error. We try it first, then unconditionally fall through
+    // to prependAsync as the guaranteed write path.
+    //
+    // prependAsync in OnMessageSend prepends to whatever is already in the
+    // body — including the signature written by applySignature. To avoid
+    // doubling, we rely on setSignatureAsync having already managed the
+    // signature slot. If setSignatureAsync worked, prependAsync is skipped.
+    // If it failed or is unavailable, prependAsync is the real write.
+
+    function tryPrependFallback(reason) {
+        _diag.warn("onSendHandler: setSignatureAsync path failed (" + reason + ") — using prependAsync");
+
+        if (typeof item.body.prependAsync !== "function") {
+            _diag.error("onSendHandler: prependAsync also unavailable — allowing send as-is");
+            guarded.completed({ allowEvent: true });
+            return;
+        }
+
+        item.body.prependAsync(
+            wrappedSig,
+            { coercionType: Office.CoercionType.Html },
+            function (result) {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    _diag.info("onSendHandler: prependAsync succeeded");
+                } else {
+                    _diag.warn("onSendHandler: prependAsync failed — "
+                        + (result.error && result.error.message));
+                }
+                guarded.completed({ allowEvent: true });
+            }
+        );
+    }
+
     if (typeof item.body.setSignatureAsync !== "function") {
-        _diag.warn("onSendHandler: setSignatureAsync unavailable — passing through");
-        guarded.completed({ allowEvent: true });
+        _diag.warn("onSendHandler: setSignatureAsync unavailable");
+        tryPrependFallback("api-unavailable");
         return;
     }
 
-    _diag.info("onSendHandler: writing cached signature via setSignatureAsync (" + cachedHtml.length + " chars)");
+    _diag.info("onSendHandler: attempting setSignatureAsync (" + cachedHtml.length + " chars)");
 
     item.body.setSignatureAsync(
-        _wrapSignature(cachedHtml),
+        wrappedSig,
         { coercionType: Office.CoercionType.Html },
         function (result) {
             if (result.status === Office.AsyncResultStatus.Succeeded) {
-                _diag.info("onSendHandler: setSignatureAsync succeeded");
+                _diag.info("onSendHandler: setSignatureAsync succeeded — allowing send");
+                guarded.completed({ allowEvent: true });
             } else {
-                _diag.warn("onSendHandler: setSignatureAsync failed — "
-                    + (result.error && result.error.message));
+                var errMsg = (result.error && result.error.message) || "unknown error";
+                var errCode = (result.error && result.error.code) || 0;
+                _diag.warn("onSendHandler: setSignatureAsync failed — code:" + errCode + " msg:" + errMsg);
+                // Fall through to prependAsync since setSignatureAsync didn't work
+                tryPrependFallback("code-" + errCode);
             }
-            guarded.completed({ allowEvent: true });
         }
     );
 }
