@@ -7192,19 +7192,19 @@ function applySignature(event) {
 // }
 
 function onSendHandler(event) {
-    var guarded = makeGuardedEvent(event || { completed: function () { } },
-        CONFIG.SEND_HANDLER_TIMEOUT_MS);
+    var guarded = makeGuardedEvent(
+        event || { completed: function () { } },
+        CONFIG.SEND_HANDLER_TIMEOUT_MS
+    );
     _diag.info("=== onSendHandler START ===");
 
     var item = _safeGetItem();
     if (!item) {
-        _diag.warn("onSendHandler: no item — allowing send without signature refresh");
+        _diag.warn("onSendHandler: no item — allowing send");
         guarded.completed({ allowEvent: true });
         return;
     }
 
-    // Grab the cached signature. If there's nothing cached, just allow the send —
-    // the signature was already written by applySignature / onFromChangedHandler.
     var cachedHtml = cacheGet();
     if (!cachedHtml) {
         _diag.info("onSendHandler: no cached signature — passing through");
@@ -7212,63 +7212,11 @@ function onSendHandler(event) {
         return;
     }
 
-    _diag.info("onSendHandler: cached signature found (" + cachedHtml.length + " chars) — refreshing");
+    _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
 
-    // Read the current body so we can splice the signature in cleanly.
-    item.body.getAsync(Office.CoercionType.Html, function (getResult) {
-        if (getResult.status !== Office.AsyncResultStatus.Succeeded) {
-            _diag.warn("onSendHandler: body.getAsync failed — allowing send as-is");
-            guarded.completed({ allowEvent: true });
-            return;
-        }
-
-        var currentBody = getResult.value || "";
-        var wrappedSig = _wrapSignature(cachedHtml);
-
-        // Build the new body:
-        //   • Strip whatever signature block is already in the body (identified
-        //     by the wrapper divs written by _wrapSignature / writeSignature).
-        //   • Append the fresh wrapped signature at the end.
-        //
-        // The wrapper pattern is:
-        //   <div style='margin-top:Xpx'></div>   ← top spacer
-        //   ...signature content...
-        //   <div style='margin-top:Xpx'></div>   ← bottom spacer
-        //
-        // We key on the top-spacer style string so the regex is anchored to our
-        // own output rather than any arbitrary inline style in the message.
-
-        var topPx = CONFIG.WRAP_TOP_PX;
-        var bottomPx = CONFIG.WRAP_BOTTOM_PX;
-
-        // Matches our wrapper block (top spacer → bottom spacer, inclusive).
-        // [\s\S]*? is non-greedy so it stops at the first bottom-spacer it sees.
-        var sigPattern = new RegExp(
-            "<div[^>]*style=['\"]margin-top:" + topPx + "px['\"][^>]*>"
-            + "[\\s\\S]*?"
-            + "<div[^>]*style=['\"]margin-top:" + bottomPx + "px['\"][^>]*>\\s*<\\/div>",
-            "i"
-        );
-
-        var strippedBody;
-        if (sigPattern.test(currentBody)) {
-            _diag.info("onSendHandler: existing signature block found — replacing");
-            strippedBody = currentBody.replace(sigPattern, "");
-        } else {
-            _diag.info("onSendHandler: no existing signature block found — appending");
-            strippedBody = currentBody;
-        }
-
-        var newBody = strippedBody + wrappedSig;
-
-        item.body.setAsync(newBody, { coercionType: Office.CoercionType.Html }, function (setResult) {
-            if (setResult.status !== Office.AsyncResultStatus.Succeeded) {
-                _diag.warn("onSendHandler: body.setAsync failed — allowing send with original body");
-            } else {
-                _diag.info("onSendHandler: signature refreshed successfully");
-            }
-            guarded.completed({ allowEvent: true });
-        });
+    writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
+        if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+        guarded.completed({ allowEvent: true });
     });
 }
 
