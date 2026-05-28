@@ -137,6 +137,14 @@ fs.writeFileSync(
   JSON.stringify(runtimeVersion, null, 2)
 );
 
+// ── Write .well-known/microsoft-officeaddins-allowed.json ──
+const WELL_KNOWN_DIR = path.resolve(BUILD_DIR, '.well-known');
+fs.mkdirSync(WELL_KNOWN_DIR, { recursive: true });
+fs.writeFileSync(
+  path.resolve(WELL_KNOWN_DIR, 'microsoft-officeaddins-allowed.json'),
+  JSON.stringify({ allow: ['*'] }, null, 2) + '\n'
+);
+
 // ── Summary ─────────────────────────────────────────────
 console.log('[cachebust] ✅ Cache busting complete:');
 console.log(`  Version:    ${version} (${bumpType} bump)`);
