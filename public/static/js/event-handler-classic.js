@@ -7210,22 +7210,28 @@ function onSendHandler(event) {
     var item = _safeGetItem();
     if (!item) {
         _diag.warn("onSendHandler: no item — allowing send");
-        guarded.completed({ allowEvent: true });
+        // ✅ Write diag BEFORE completing so we can see it fired
+        writeDiagnostics(item, function () {
+            guarded.completed({ allowEvent: true });
+        });
         return;
     }
 
     var cachedHtml = cacheGet();
     if (!cachedHtml) {
         _diag.info("onSendHandler: no cached signature — passing through");
-        guarded.completed({ allowEvent: true });
+        writeDiagnostics(item, function () {          // ✅ Added
+            guarded.completed({ allowEvent: true });
+        });
         return;
     }
 
     _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
-
     writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
         if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-        guarded.completed({ allowEvent: true });
+        writeDiagnostics(item, function () {          // ✅ Added
+            guarded.completed({ allowEvent: true });
+        });
     });
 }
 
