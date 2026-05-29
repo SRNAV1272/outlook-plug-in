@@ -364,6 +364,13 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             attempt++;
         }
 
+        if (fetched != null) {
+            // Compress immediately after fetch and store compressed version
+            fetched = await compressImagesInHtml(fetched);
+            CACHED_SIGNATURE_HTML = fetched;
+            setCachedSignature(fetched);  // ← store compressed, not raw
+        }
+
         if (fetched == null) {
             console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
         }
@@ -394,15 +401,17 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    let compressedSignature = await compressImagesInHtml(fetched);
-    compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
+    // let compressedSignature = await compressImagesInHtml(fetched);
+    // compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
+
+    let finalSignature = `<div style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
-        compressedSignature, item?.body
+        finalSignature, item?.body
     );
 
-    await bodySetSignatureAsync(item, compressedSignature);
+    await bodySetSignatureAsync(item, finalSignature);
     // await moveCursorToTop(item);
 }
 
