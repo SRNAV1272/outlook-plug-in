@@ -1,0 +1,5 @@
+{
+  "allowed": [
+    "https://ns-signature.cardbyte.ai/runtime/event-handler-classic.js"
+  ]
+}
