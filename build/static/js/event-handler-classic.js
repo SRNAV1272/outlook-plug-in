@@ -7198,6 +7198,30 @@ function writeSignature(item, html, onDone) {
     const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
     const htmlSizeKB = new Blob([html]).size / 1024;
 
+    // ==========================================
+    // IMAGE DIAGNOSTICS HERE
+    // ==========================================
+
+    const imgs =
+        html.match(/<img\b[^>]*src=["']([^"']+)["']/gi) || [];
+
+    _diag.info(`Image count=${imgs.length}`);
+
+    _diag.info(
+        `Base64 image count=${(html.match(/data:image\//gi) || []).length
+        }`
+    );
+
+    imgs.forEach((img, i) => {
+        _diag.info(
+            `IMG ${i + 1}: ${img.substring(0, 300)}`
+        );
+    });
+
+    // ==========================================
+    // Existing functions
+    // ==========================================
+
     function getBody() {
         return new Promise((resolve, reject) => {
             if (typeof item.body.getAsync !== "function") {
@@ -7259,82 +7283,6 @@ function writeSignature(item, html, onDone) {
             );
         });
     }
-
-    // (async () => {
-    //     try {
-    //         _diag.info(
-    //             `Signature size: ${htmlSizeKB.toFixed(1)}KB`
-    //         );
-
-    //         // -----------------------------------------------------------------
-    //         // PATH A: Small signatures -> use setSignatureAsync
-    //         // -----------------------------------------------------------------
-    //         if (
-    //             typeof item.body.setSignatureAsync === "function" &&
-    //             htmlSizeKB < 100
-    //         ) {
-    //             _diag.info("PATH A: setSignatureAsync");
-
-    //             await setSignature(wrappedHtml);
-
-    //             onDone(true);
-    //             return;
-    //         }
-
-    //         // -----------------------------------------------------------------
-    //         // PATH B: Large signatures -> rebuild body
-    //         // -----------------------------------------------------------------
-    //         _diag.info(
-    //             `PATH B: ${htmlSizeKB >= 100
-    //                 ? "large signature"
-    //                 : "setSignatureAsync unavailable"
-    //             }`
-    //         );
-
-    //         // Clear Outlook signature slot first
-    //         if (typeof item.body.setSignatureAsync === "function") {
-    //             try {
-    //                 await setSignature("");
-    //             } catch (e) {
-    //                 _diag.warn(
-    //                     "Failed clearing signature slot: " +
-    //                     (e?.message || e)
-    //                 );
-    //             }
-    //         }
-
-    //         const existingBody = await getBody();
-
-    //         // Prevent duplicate insertion
-    //         if (existingBody.includes(MARKER_ATTR)) {
-    //             _diag.info("Signature already exists");
-    //             onDone(true);
-    //             return;
-    //         }
-
-    //         const strippedBody =
-    //             typeof stripNativeOutlookSignature === "function"
-    //                 ? stripNativeOutlookSignature(existingBody)
-    //                 : existingBody;
-
-    //         const candidateBody =
-    //             strippedBody + wrappedHtml;
-
-    //         await setBody(candidateBody);
-
-    //         _diag.info("Large signature inserted successfully");
-
-    //         onDone(true);
-    //     } catch (err) {
-    //         _diag.error(
-    //             "writeSignature failed: " +
-    //             (err?.message || JSON.stringify(err))
-    //         );
-
-    //         onDone(false);
-    //     }
-    // })();
-
 
     (async () => {
         try {
