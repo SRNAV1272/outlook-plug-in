@@ -314,18 +314,21 @@ function stripNativeOutlookSignature(html) {
     html = html.replace(/<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
     html = html.replace(/<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "");
 
-    // CardByte signature: <table id="cardbyte-signature"> or <table id="x_cardbyte-signature">
-    // Using DOMParser to handle nested tables correctly
+    // CardByte signature: <table id="cardbyte-signature"> or OWA-prefixed variants
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
 
-    // Matches both "cardbyte-signature" and OWA-prefixed "x_cardbyte-signature", "x_x_cardbyte-signature", etc.
-    const sigTables = doc.querySelectorAll('table[id="cardbyte-signature"], table[id$="_cardbyte-signature"]');
+    const sigTables = doc.querySelectorAll(
+        'table[id="cardbyte-signature"], table[id$="_cardbyte-signature"]'
+    );
+
     sigTables.forEach(table => table.remove());
 
-    html = doc.body.innerHTML;
+    // Remove all trailing <br> tags left behind after signature removal
+    let bodyHtml = doc.body.innerHTML;
+    bodyHtml = bodyHtml.replace(/(?:\s*<br\s*\/?>\s*)+$/gi, "");
 
-    return html;
+    return bodyHtml;
 }
 
 async function bodySetSignatureAsync(item, html) {
