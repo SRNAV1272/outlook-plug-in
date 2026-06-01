@@ -309,6 +309,25 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
+function stripNativeOutlookSignature(html) {
+    // OWA / New Outlook: signature lives inside a table wrapped in elementToProof
+    // Pattern: <table id="x_table_0" ...> or <table id="table_0" ...>
+    html = html.replace(/<table[^>]*id=["'][^"']*table_\d+[^"']*["'][^>]*>[\s\S]*?<\/table>/gi, "");
+
+    // OWA: trailing elementToProof <br> blocks (padding around signature)
+    // These appear as <div class="elementToProof"><br></div> after the sig table
+    html = html.replace(/<div[^>]*class=["'][^"']*elementToProof[^"']*["'][^>]*>\s*<br\s*\/?>\s*<\/div>/gi, "");
+
+    // Classic Windows: <div id="Signature"> or <div id="appendonsend">
+    html = html.replace(/<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    html = html.replace(/<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "");
+
+    // Mac: <div class="signature ...">
+    html = html.replace(/<div[^>]*class=["'][^"']*signature[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, "");
+
+    return html;
+}
+
 async function bodySetSignatureAsync(item, html) {
     const MARKER_ATTR = 'data-cardbyte-sig="1"';
     const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
@@ -370,10 +389,7 @@ async function bodySetSignatureAsync(item, html) {
     }
 
     // Strip known native Outlook sig wrappers before appending ours
-    const stripped = existingBody
-        .replace(/<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "")
-        .replace(/<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "")
-        .replace(/<div[^>]*class=["'][^"']*signature[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    const stripped = stripNativeOutlookSignature(existingBody);
 
     const candidate = stripped + wrappedHtml;
 
