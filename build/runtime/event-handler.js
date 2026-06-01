@@ -216,66 +216,6 @@ async function renderSignatureOnServer(user) {
     }
 }
 
-function compressBase64Image(dataUrl, maxWidth, quality) {
-    if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    if (quality === undefined) quality = isMobile() ? MOBILE_IMAGE_QUALITY : 0.7;
-
-    return new Promise((resolve) => {
-        if (dataUrl.startsWith("data:image/gif")) { resolve(dataUrl); return; }
-        const img = new Image();
-        img.onload = () => {
-            try {
-                const canvas = document.createElement("canvas");
-                let width = img.width;
-                let height = img.height;
-                if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext("2d");
-                const isPng = dataUrl.startsWith("data:image/png");
-                if (isPng) {
-                    ctx.clearRect(0, 0, width, height);
-                    ctx.drawImage(img, 0, 0, width, height);
-                    let result = canvas.toDataURL("image/png");
-                    if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                    console.log(`[CardByte] Compressed PNG: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                    resolve(result); return;
-                }
-                ctx.drawImage(img, 0, 0, width, height);
-                let result = canvas.toDataURL("image/jpeg", quality);
-                if (result.length >= dataUrl.length) result = canvas.toDataURL("image/png");
-                if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                console.log(`[CardByte] Compressed: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                resolve(result);
-            } catch (e) { console.warn("[CardByte] Canvas compression failed:", e); resolve(dataUrl); }
-        };
-        img.onerror = () => resolve(dataUrl);
-        img.src = dataUrl;
-    });
-}
-
-async function compressImagesInHtml(html) {
-    if (!html) return html;
-
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, "text/html");
-    const profileImg = doc.querySelector('img[alt="Profile Photo"]');
-
-    if (!profileImg) return html;
-
-    const src = profileImg.getAttribute('src');
-    if (!src || !src.startsWith('data:image/')) return html;
-
-    console.log(`[CardByte] Compressing profile picture (${(src.length / 1024).toFixed(0)}KB)`);
-
-    const compressed = await compressBase64Image(src);
-    if (compressed === src) return html;
-
-    console.log(`[CardByte] Profile picture compressed: ${(src.length / 1024).toFixed(0)}KB -> ${(compressed.length / 1024).toFixed(0)}KB`);
-
-    return html.replace(src, compressed);
-}
-
 function extractBase64Images(html) {
     const images = [];
     let index = 0;
@@ -454,8 +394,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
 
         if (fetched != null) {
-            // Compress immediately after fetch and store compressed version
-            fetched = await compressImagesInHtml(fetched);
             CACHED_SIGNATURE_HTML = fetched;
             setCachedSignature(fetched);  // ← store compressed, not raw
         }
@@ -490,7 +428,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    // let compressedSignature = await compressImagesInHtml(fetched);
     // compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
 
     let finalSignature = `
@@ -511,6 +448,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     // await bodySetSignatureAsync(item, finalSignature);
     try {
         await bodySetSignatureAsync(item, finalSignature);
+        await new Promise(resolve => setTimeout(resolve, 1000));
         await moveCursorToTop(item);
     } catch (err) {
         const isOutOfRange =
