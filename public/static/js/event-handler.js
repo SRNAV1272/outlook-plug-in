@@ -21,31 +21,7 @@ function getOrCreateSessionId() {
 // FIX: Added skipSessionCheck option so onSendHandler (which runs in a separate
 // iframe/JS context with a fresh sessionStorage) can still read the cached
 // signature that was stored by applySignature in the compose iframe.
-// function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-//     const currentSid = getOrCreateSessionId();
-//     const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
 
-//     if (!skipSessionCheck && cachedSid !== currentSid) {
-//         console.log("[CardByte] New session detected — clearing cached signature");
-//         localStorage.removeItem(CACHE_KEY);
-//         localStorage.removeItem(CACHE_SESSION_KEY);
-//         localStorage.removeItem(CACHE_TIMESTAMP_KEY);
-//         return null;
-//     }
-
-//     if (!skipTtl) {
-//         const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
-//         if (Date.now() - ts > CACHE_TTL_MS) {
-//             console.log("[CardByte] Cache TTL expired — clearing cached signature");
-//             localStorage.removeItem(CACHE_KEY);
-//             localStorage.removeItem(CACHE_SESSION_KEY);
-//             localStorage.removeItem(CACHE_TIMESTAMP_KEY);
-//             return null;
-//         }
-//     }
-
-//     return localStorage.getItem(CACHE_KEY);
-// }
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
     // If skipping session check, just return whatever is in cache directly
     if (skipSessionCheck) {
@@ -211,10 +187,9 @@ async function renderSignatureOnServer(user) {
     try {
         const encryptedMail = await encryptEmail(user);
         const primaryRes = await fetch(
-            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
-        console.warn("Encrytped Email...", encryptedMail);
         if (primaryRes.ok) {
             const data = await primaryRes.text();
             const decryptedData = await handleAesDecrypt(data);
@@ -228,7 +203,7 @@ async function renderSignatureOnServer(user) {
 
     try {
         const legacyRes = await fetch(
-            "https://newqa-renderer.cardbyte.ai/render-signature",
+            "https://ns-renderer.cardbyte.ai/render-signature",
             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
@@ -239,92 +214,6 @@ async function renderSignatureOnServer(user) {
         console.error("Both primary and legacy failed:", legacyError);
         return null;
     }
-}
-
-function compressBase64Image(dataUrl, maxWidth, quality) {
-    if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    if (quality === undefined) quality = isMobile() ? MOBILE_IMAGE_QUALITY : 0.7;
-
-    return new Promise((resolve) => {
-        if (dataUrl.startsWith("data:image/gif")) { resolve(dataUrl); return; }
-        const img = new Image();
-        img.onload = () => {
-            try {
-                const canvas = document.createElement("canvas");
-                let width = img.width;
-                let height = img.height;
-                if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext("2d");
-                const isPng = dataUrl.startsWith("data:image/png");
-                if (isPng) {
-                    ctx.clearRect(0, 0, width, height);
-                    ctx.drawImage(img, 0, 0, width, height);
-                    let result = canvas.toDataURL("image/png");
-                    if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                    console.log(`[CardByte] Compressed PNG: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                    resolve(result); return;
-                }
-                ctx.drawImage(img, 0, 0, width, height);
-                let result = canvas.toDataURL("image/jpeg", quality);
-                if (result.length >= dataUrl.length) result = canvas.toDataURL("image/png");
-                if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                console.log(`[CardByte] Compressed: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                resolve(result);
-            } catch (e) { console.warn("[CardByte] Canvas compression failed:", e); resolve(dataUrl); }
-        };
-        img.onerror = () => resolve(dataUrl);
-        img.src = dataUrl;
-    });
-}
-
-async function compressImagesInHtml(html) {
-    // FIX: Guard against null/undefined html to prevent "null" being stringified
-    if (!html) return html;
-
-    const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
-    const matches = [];
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-        matches.push({ fullMatch: match[0], dataUrl: match[1] });
-    }
-    if (matches.length === 0) return html;
-
-    const mobile = isMobile();
-    console.log(`[CardByte] Compressing ${matches.length} base64 image(s) (mobile: ${mobile})`);
-
-    let result = html;
-
-    for (const m of matches) {
-        if (!result.includes(m.dataUrl)) continue;
-        const isGif = m.dataUrl.startsWith("data:image/gif");
-        if (isGif && mobile) {
-            console.log(`[CardByte] Mobile: converting GIF to static PNG (${(m.dataUrl.length / 1024).toFixed(0)}KB)`);
-            const staticPng = await convertGifToStaticPng(m.dataUrl);
-            if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
-            continue;
-        }
-        if (isGif) {
-            console.log(`[CardByte] Skipping GIF (${(m.dataUrl.length / 1024).toFixed(0)}KB) to preserve animation`);
-            continue;
-        }
-        const compressed = await compressBase64Image(m.dataUrl);
-        if (compressed !== m.dataUrl) result = result.replace(m.dataUrl, compressed);
-    }
-
-    const maxSize = getMaxHtmlSize();
-    if (result.length > maxSize) {
-        console.log(`[CardByte] Still too large (${(result.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB), converting remaining GIFs to static PNG`);
-        for (const m of matches) {
-            if (!m.dataUrl.startsWith("data:image/gif")) continue;
-            if (!result.includes(m.dataUrl)) continue;
-            const staticPng = await convertGifToStaticPng(m.dataUrl);
-            if (staticPng !== m.dataUrl) result = result.replace(m.dataUrl, staticPng);
-        }
-    }
-
-    return result;
 }
 
 function extractBase64Images(html) {
@@ -360,25 +249,102 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
-function bodySetSignatureAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
-        item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") resolve(); else reject(r.error);
-        });
-    });
+function stripNativeOutlookSignature(html) {
+    // Classic Windows: <div id="Signature"> or <div id="appendonsend">
+    html = html.replace(/<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    html = html.replace(/<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "");
+
+    // CardByte signature: <table id="cardbyte-signature"> or OWA-prefixed variants
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+
+    const sigTables = doc.querySelectorAll(
+        'table[id="cardbyte-signature"], table[id$="_cardbyte-signature"]'
+    );
+
+    sigTables.forEach(table => table.remove());
+
+    // Remove all trailing <br> tags left behind after signature removal
+    let bodyHtml = doc.body.innerHTML;
+    bodyHtml = bodyHtml.replace(/(?:\s*<br\s*\/?>\s*)+$/gi, "");
+
+    return bodyHtml;
 }
 
-function moveCursorToTop(item) {
-    return new Promise((resolve) => {
-        try {
-            if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-            item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-            });
-        } catch { resolve(); }
+async function bodySetSignatureAsync(item, html) {
+    const MARKER_ATTR = 'data-cardbyte-sig="1"';
+    const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
+    const htmlSizeKB = new Blob([html]).size / 1024;
+    const hasSetSig = typeof item.body.setSignatureAsync === "function";
+
+    const setSignature = (content) => new Promise((resolve, reject) => {
+        item.body.setSignatureAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
+            r.status === "succeeded" ? resolve() : reject(r.error);
+        });
     });
+
+    const getBody = () => new Promise((resolve, reject) => {
+        if (typeof item.body.getAsync !== "function") { reject(new Error("getAsync not available")); return; }
+        item.body.getAsync(Office.CoercionType.Html, (r) => {
+            r.status === "succeeded" ? resolve(r.value || "") : reject(r.error);
+        });
+    });
+
+    const setSelectedDataAsync = (content) => new Promise((resolve, reject) => {
+        if (typeof item.body.setSelectedDataAsync !== "function") { reject(new Error("setSelectedDataAsync not available")); return; }
+        item.body.setSelectedDataAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
+            r.status === "succeeded" ? resolve() : reject(r.error);
+        });
+    });
+
+    console.log(`[CardByte] Signature size: ${htmlSizeKB.toFixed(1)}KB | setSignatureAsync: ${hasSetSig}`);
+
+    // ── PATH A: Small signature + API available ───────────────────────────────
+    // setSignatureAsync is reliable only under ~100KB — use it directly
+    if (hasSetSig && htmlSizeKB < 100) {
+        console.log("[CardByte] PATH A: direct setSignatureAsync");
+        await setSignature(wrappedHtml);
+        return;
+    }
+
+    // ── PATH B: Large signature OR no setSignatureAsync ───────────────────────
+    // Large HTML silently fails/truncates in setSignatureAsync regardless of
+    // API availability — must go through body directly via getAsync → setAsync.
+    // Also the only path for classic Windows / mobile where API doesn't exist.
+    console.log(`[CardByte] PATH B: ${htmlSizeKB >= 100 ? "large signature" : "no setSignatureAsync"} → getAsync → strip → setAsync`);
+
+    // Clear the native signature slot first if API is available —
+    // prevents Outlook from re-injecting its default sig into the body
+    // after we write via setAsync
+    if (hasSetSig) {
+        try { await setSignature(""); }
+        catch (e) { console.warn("[CardByte] Clear slot failed (non-fatal):", e); }
+    }
+
+    const existingBody = await getBody();
+
+
+    // Dedupe guard — data-attribute survives OWA/Mac sanitization unlike HTML comments
+    if (existingBody.includes(MARKER_ATTR)) {
+        console.log("[CardByte] Signature already present — skipping");
+        return;
+    }
+
+    // Strip known native Outlook sig wrappers before appending ours
+    const stripped = stripNativeOutlookSignature(existingBody);
+
+    console.log("[CardByte] Existing body length:", existingBody.length, "characters", existingBody, stripped)
+
+    const candidate = stripped + wrappedHtml;
+
+    // Size guard for mobile
+    // const maxSize = getMaxHtmlSize();
+    // if (candidate.length > maxSize) {
+    //     console.warn(`[CardByte] Body too large for ${detectPlatform()} (${(candidate.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB) — skipping`);
+    //     return;
+    // }
+
+    await setSelectedDataAsync(candidate);
 }
 
 // FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
@@ -390,40 +356,196 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
 
     if (fetchIfMissing && userEmail && fetched == null) {
-        fetched = await renderSignatureOnServer(userEmail);
+        const MAX_RETRIES = 2;
+        let attempt = 0;
+        let lastError = null;
+
+        while (attempt <= MAX_RETRIES) {
+            try {
+                if (attempt > 0) {
+                    console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
+                    await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, then 2s
+                }
+                const result = await renderSignatureOnServer(userEmail);
+                if (result != null) {
+                    fetched = result;
+                    CACHED_SIGNATURE_HTML = fetched;
+                    setCachedSignature(fetched);
+                    break;
+                }
+                lastError = new Error("Server returned null");
+            } catch (err) {
+                lastError = err;
+                console.warn(`[CardByte] Fetch attempt ${attempt + 1} failed:`, err);
+            }
+            attempt++;
+        }
+
         if (fetched != null) {
             CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);
+            setCachedSignature(fetched);  // ← store compressed, not raw
+        }
+
+        if (fetched == null) {
+            console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
         }
     }
 
     // FIX: If signature is still null (server down, cache miss, no email, etc.)
     // fall back to a minimal identity signature instead of inserting "null".
+    // Fallback only if everything above — fresh fetch, retries — all came up empty
     if (!fetched) {
-        console.warn("[CardByte] No signature available — using fallback identity signature.");
-        fetched = `
-            <table cellpadding="0" cellspacing="0" border="0" width="400">
-              <tr>
-                <td style="font-family:Arial,sans-serif;font-size:12px;">
-                  <strong>${userProfile.displayName || ""}</strong><br/>
-                  ${userProfile.emailAddress || ""}<br/>
-                  <span style="color:#999;">Sent via CardByte</span>
-                </td>
-              </tr>
-            </table>
-        `;
+        // Last-ditch: try reading stale cache, bypassing both session and TTL checks
+        const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+        if (staleCache) {
+            console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
+            fetched = staleCache;
+        } else {
+            console.warn("[CardByte] No signature available — using fallback identity signature.");
+            fetched = `
+                <table cellpadding="0" cellspacing="0" border="0" width="400">
+                  <tr>
+                    <td style="font-family:Arial,sans-serif;font-size:12px;">
+                      <strong>${userProfile.displayName || ""}</strong><br/>
+                      ${userProfile.emailAddress || ""}<br/>
+                      <span style="color:#999;">Sent via CardByte</span>
+                    </td>
+                  </tr>
+                </table>
+            `;
+        }
     }
 
-    // let compressedSignature = await compressImagesInHtml(fetched);
-    compressedSignature = "<div style='margin-top:40px'></div>" + fetched + "<div style='margin-top:40px'></div>";
+    let finalSignature = `
+        <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
+        <tr>
+            ${fetched}
+        </tr>
+        </table>
+        `;
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
-        compressedSignature, item?.body
+        finalSignature, item?.body
     );
 
-    await bodySetSignatureAsync(item, compressedSignature);
-    // await moveCursorToTop(item);
+    try {
+        await bodySetSignatureAsync(item, finalSignature);
+    } catch (err) {
+        const isOutOfRange =
+            err?.code === 5009 ||
+            (typeof err?.message === "string" &&
+                err.message.toLowerCase().includes("argumentoutofrange"));
+
+        if (isOutOfRange) {
+            console.warn("[CardByte] ArgumentOutOfRangeException — HTML too large. Diagnosing size...");
+
+            // 1. Extract profile photo src
+            const profileSrc = extractProfilePhotoSrc(fetched);
+            const totalHtmlBytes = new TextEncoder().encode(finalSignature).length;
+
+            let profileSrcBytes = 0;
+            if (profileSrc) {
+                profileSrcBytes = new TextEncoder().encode(profileSrc).length;
+            }
+
+            // 2. Calculate sizes
+            const htmlWithoutImageBytes = totalHtmlBytes - profileSrcBytes;
+            const LIMIT_KB = 100;
+            const totalHtmlKb = totalHtmlBytes / 1024;
+            const profilePicKb = profileSrcBytes / 1024;
+            const htmlWithoutImageKb = htmlWithoutImageBytes / 1024;
+            const allowedProfilePicKb = LIMIT_KB - htmlWithoutImageKb;
+
+            console.warn(`[CardByte] ⚠️ Profile picture size limit: ${allowedProfilePicKb.toFixed(2)} KB`);
+
+            // 3. Build error signature HTML and inject it into the email body
+            const errorSignatureHtml = buildSizeErrorSignatureHtml({
+                totalHtmlKb,
+                profilePicKb,
+                htmlWithoutImageKb,
+                allowedProfilePicKb,
+            });
+
+            try {
+                await bodySetSignatureAsync(item, errorSignatureHtml);
+                console.log("[CardByte] Error diagnostic signature injected into email body.");
+            } catch (innerErr) {
+                console.error("[CardByte] Failed to inject error signature:", innerErr);
+            }
+
+        } else {
+            throw err;
+        }
+    }
+}
+
+// ─── Helper: extract profile photo src ────────────────────────────────────────
+const extractProfilePhotoSrc = (html) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const img = doc.querySelector('img[alt="Profile Photo"]');
+    return img ? img.src : null;
+};
+
+function buildSizeErrorSignatureHtml({ totalHtmlKb, profilePicKb, htmlWithoutImageKb, allowedProfilePicKb }) {
+    const limitColor = allowedProfilePicKb < 0 ? "#c0392b" : "#1a7a1a";
+    const limitNote = allowedProfilePicKb < 0 ? " ⛔ HTML alone exceeds 100 KB!" : "";
+
+    return `
+    <br/>
+        <table cellpadding="0" cellspacing="0" border="0" width="480"
+               style="font-family:Arial,sans-serif; font-size:12px;
+                      border:2px solid #e6a817; border-radius:6px;
+                      background:#fff8e1; margin-top:20px;">
+            <tr>
+                <td style="background:#e6a817; padding:8px 14px; border-radius:4px 4px 0 0;">
+                    <strong style="color:#fff; font-size:13px;">
+                        ⚠️ CardByte — Signature Too Large
+                    </strong>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding:12px 14px; color:#5a3e00;">
+                    <p style="margin:0 0 10px 0;">
+                        Your email signature could not be applied because its total size
+                        exceeds Outlook's <strong>100 KB</strong> limit
+                        (<code>ArgumentOutOfRangeException</code>).
+                    </p>
+                    <table cellpadding="4" cellspacing="0" border="0"
+                           style="width:100%; border-collapse:collapse; font-size:12px;">
+                        <tr style="background:#fff3cd;">
+                            <td style="padding:4px 10px;">📄 Total HTML size</td>
+                            <td style="font-weight:bold; text-align:right;">${totalHtmlKb.toFixed(2)} KB</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:4px 10px;">🖼️ Profile photo size</td>
+                            <td style="font-weight:bold; text-align:right;">${profilePicKb.toFixed(2)} KB</td>
+                        </tr>
+                        <tr style="background:#fff3cd;">
+                            <td style="padding:4px 10px;">📝 HTML without profile photo</td>
+                            <td style="font-weight:bold; text-align:right;">${htmlWithoutImageKb.toFixed(2)} KB</td>
+                        </tr>
+                        <tr style="border-top:2px solid #e6a817;">
+                            <td style="padding:6px 10px;">
+                                <strong>✅ Max allowed profile photo size</strong>
+                            </td>
+                            <td style="font-weight:bold; text-align:right; color:${limitColor};">
+                                ${allowedProfilePicKb.toFixed(2)} KB${limitNote}
+                            </td>
+                        </tr>
+                    </table>
+                    <p style="margin:10px 0 0 0; font-size:11px; color:#7a5800;">
+                        Formula: <strong>100 KB</strong> limit
+                        &minus; <strong>${htmlWithoutImageKb.toFixed(2)} KB</strong> (HTML without photo)
+                        = <strong style="color:${limitColor};">${allowedProfilePicKb.toFixed(2)} KB</strong>
+                        remaining for profile picture.
+                    </p>
+                </td>
+            </tr>
+        </table>
+        <br/>
+    `;
 }
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
