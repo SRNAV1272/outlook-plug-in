@@ -290,41 +290,12 @@ async function bodySetSignatureAsync(item, html) {
         });
     });
 
-    const setBody = (content) =>
-        new Promise((resolve, reject) => {
-            if (typeof item.body.setAsync !== "function") {
-                reject(new Error("setAsync not available"));
-                return;
-            }
-
-            const CURSOR_MARKER = "__CB_CURSOR_TOP__";
-
-            // Insert marker at the very beginning
-            const htmlWithMarker = `<span id="${CURSOR_MARKER}"></span>${content}`;
-
-            item.body.setAsync(
-                htmlWithMarker,
-                { coercionType: Office.CoercionType.Html },
-                (result) => {
-                    if (result.status !== Office.AsyncResultStatus.Succeeded) {
-                        reject(result.error);
-                        return;
-                    }
-
-                    // Move selection to marker
-                    item.body.setSelectedDataAsync(
-                        "",
-                        {
-                            coercionType: Office.CoercionType.Html,
-                            asyncContext: CURSOR_MARKER
-                        },
-                        () => {
-                            resolve();
-                        }
-                    );
-                }
-            );
+    const setBody = (content) => new Promise((resolve, reject) => {
+        if (typeof item.body.setSelectedDataAsync !== "function") { reject(new Error("setSelectedDataAsync not available")); return; }
+        item.body.setSelectedDataAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
+            r.status === "succeeded" ? resolve() : reject(r.error);
         });
+    });
 
     console.log(`[CardByte] Signature size: ${htmlSizeKB.toFixed(1)}KB | setSignatureAsync: ${hasSetSig}`);
 
