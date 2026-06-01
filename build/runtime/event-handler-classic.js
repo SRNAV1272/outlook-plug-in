@@ -7083,9 +7083,18 @@ function cacheClear(cb) {
 // ─── Compose-body write path ──────────────────────────────────────────────────
 
 function _wrapSignature(html) {
-    return "<div style='margin-top:" + CONFIG.WRAP_TOP_PX + "px'></div>"
-        + html
-        + "<div style='margin-top:" + CONFIG.WRAP_BOTTOM_PX + "px'></div>";
+    return `
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+            <tr>
+                <td style="
+                    padding-top:${CONFIG.WRAP_TOP_PX}px;
+                    padding-bottom:${CONFIG.WRAP_BOTTOM_PX}px;
+                ">
+                    ${html}
+                </td>
+            </tr>
+        </table>
+    `;
 }
 
 /**
