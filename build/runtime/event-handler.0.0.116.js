@@ -208,7 +208,7 @@ const Notify = (() => {
                 `CardByte: Signature too large — photo is ${actual} KB (limit ${allowed} KB, over by ${overBy} KB). Upload a smaller profile photo.`
             );
         },
-        
+
         // ── Clear ───────────────────────────────────────────────────────────
         clear() { removeAll(); },
         clearKey(key) { remove(key); },
@@ -573,13 +573,20 @@ async function bodySetSignatureAsync(item, html) {
                 if (r.status === "succeeded") {
                     resolve();
                 } else {
-                    // Post-hoc: if it failed AND it's a size error, give the
-                    // diagnostic banner even if the pre-flight somehow missed it
                     if (isSizeOverflowError(r.error)) {
                         const sizes2 = analyseSignatureSize(html);
                         _notifySizeError(sizes2);
+                        // Throw a clean message so the outer catch doesn't
+                        // overwrite the size-error banner with the raw OWA error
+                        const s = sizes2;
+                        reject(new Error(
+                            `SIZE OVERFLOW — Total HTML: ${s?.totalKb} KB | Photo: ${s?.photoKb} KB | ` +
+                            `Budget for photo: ${s?.photoAllowedKb} KB | Over by: ${s?.photoOverByKb} KB | ` +
+                            `Outlook limit: ${s?.budgetKb} KB`
+                        ));
+                    } else {
+                        reject(r.error);
                     }
-                    reject(r.error);
                 }
             }
         );
@@ -717,7 +724,10 @@ window.applySignature = async function (event = { completed: () => { } }, option
         await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
-        Notify.apiFailed(err.message); // 🔔 Catch-all for unexpected errors
+        // Don't overwrite the size-error banner with the generic API failure message
+        if (!err.message?.startsWith("SIZE OVERFLOW")) {
+            Notify.apiFailed(err.message);
+        }
     } finally {
         event.completed();
     }
