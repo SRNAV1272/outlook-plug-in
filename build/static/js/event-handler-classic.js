@@ -7219,7 +7219,7 @@ function extractBase64ImagesToCid(html) {
 function _addCidAttachment(item, att, cb) {
     if (typeof item.addFileAttachmentFromBase64Async !== "function") {
         _diag.error("addFileAttachmentFromBase64Async unavailable (requires Mailbox 1.8)");
-        cb(false);
+        cb(false, null);
         return;
     }
 
@@ -7229,43 +7229,48 @@ function _addCidAttachment(item, att, cb) {
         att.base64,
         att.name,
         {
-            isInline: true,   // ← hidden from paperclip list, renderable via cid:
+            isInline: true,
             asyncContext: att.cid
         },
         function (result) {
             if (result.status === Office.AsyncResultStatus.Succeeded) {
-                _diag.info("CID attachment added OK: " + att.cid);
-                cb(true);
+                // result.value is the attachment ID assigned by Outlook
+                var assignedId = result.value;
+                _diag.info("CID attachment added OK: " + att.cid + " | assignedId=" + assignedId);
+                cb(true, assignedId);
             } else {
                 _diag.error(
                     "CID attachment failed: " + att.cid +
                     " | " + JSON.stringify(result.error)
                 );
-                cb(false);
+                cb(false, null);
             }
         }
     );
 }
 
-/**
- * Adds all CID attachments sequentially (one at a time).
- * Calls onDone(allSucceeded: boolean).
- */
-function addCidAttachmentsSequentially(item, attachments, index, onDone) {
+function addCidAttachmentsSequentially(item, attachments, index, cidHtmlRef, onDone) {
     if (index >= attachments.length) {
         _diag.info("addCidAttachmentsSequentially: all " + attachments.length + " attachment(s) added");
-        onDone(true);
+        onDone(true, cidHtmlRef);
         return;
     }
 
-    _addCidAttachment(item, attachments[index], function (ok) {
-        if (!ok) {
-            // Non-fatal — continue so other images still get added
-            _diag.warn("Attachment " + (index + 1) + " failed — continuing");
+    var att = attachments[index];
+
+    _addCidAttachment(item, att, function (ok, assignedId) {
+        if (ok && assignedId) {
+            // Replace cid:cbimgN@cardbyte with cid:ASSIGNED_ID in the HTML
+            var oldCid = "cid:" + att.cid;
+            var newCid = "cid:" + assignedId;
+            cidHtmlRef = cidHtmlRef.split(oldCid).join(newCid);
+            _diag.info("CID remapped: " + oldCid + " -> " + newCid);
+        } else {
+            _diag.warn("Attachment " + (index + 1) + " failed — CID reference left unresolved");
         }
-        // Small delay between attachment calls
+
         setTimeout(function () {
-            addCidAttachmentsSequentially(item, attachments, index + 1, onDone);
+            addCidAttachmentsSequentially(item, attachments, index + 1, cidHtmlRef, onDone);
         }, 80);
     });
 }
@@ -7380,7 +7385,8 @@ function writeSignature(item, html, onDone) {
         }
 
         _diag.info("step_addAttachments: adding " + attachments.length + " attachment(s)");
-        addCidAttachmentsSequentially(item, attachments, 0, function () {
+        addCidAttachmentsSequentially(item, attachments, 0, cleanHtml, function (allOk, remappedHtml) {
+            cleanHtml = remappedHtml;  // ← use the remapped HTML with correct CIDs
             next();
         });
     }
