@@ -290,12 +290,41 @@ async function bodySetSignatureAsync(item, html) {
         });
     });
 
-    const setBody = (content) => new Promise((resolve, reject) => {
-        if (typeof item.body.setAsync !== "function") { reject(new Error("setAsync not available")); return; }
-        item.body.setAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
-            r.status === "succeeded" ? resolve() : reject(r.error);
+    const setBody = (content) =>
+        new Promise((resolve, reject) => {
+            if (typeof item.body.setAsync !== "function") {
+                reject(new Error("setAsync not available"));
+                return;
+            }
+
+            const CURSOR_MARKER = "__CB_CURSOR_TOP__";
+
+            // Insert marker at the very beginning
+            const htmlWithMarker = `<span id="${CURSOR_MARKER}"></span>${content}`;
+
+            item.body.setAsync(
+                htmlWithMarker,
+                { coercionType: Office.CoercionType.Html },
+                (result) => {
+                    if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                        reject(result.error);
+                        return;
+                    }
+
+                    // Move selection to marker
+                    item.body.setSelectedDataAsync(
+                        "",
+                        {
+                            coercionType: Office.CoercionType.Html,
+                            asyncContext: CURSOR_MARKER
+                        },
+                        () => {
+                            resolve();
+                        }
+                    );
+                }
+            );
         });
-    });
 
     console.log(`[CardByte] Signature size: ${htmlSizeKB.toFixed(1)}KB | setSignatureAsync: ${hasSetSig}`);
 
@@ -417,21 +446,14 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     }
 
     let finalSignature = `
-        <p>&nbsp;</p>
-        <p>&nbsp;</p>
-
-        <table id="cardbyte-signature"
-            role="presentation"
-            cellpadding="0"
-            cellspacing="0"
-            border="0">
-            <tr>
-                <td style="padding-top:40px;padding-bottom:40px;">
-                    ${fetched}
-                </td>
-            </tr>
+        <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
+        <tr>
+            <td style="padding-top:40px; padding-bottom:40px;">
+            ${fetched}
+            </td>
+        </tr>
         </table>
-    `;
+        `;
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
