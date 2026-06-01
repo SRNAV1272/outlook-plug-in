@@ -7260,80 +7260,354 @@ function writeSignature(item, html, onDone) {
         });
     }
 
+    // (async () => {
+    //     try {
+    //         _diag.info(
+    //             `Signature size: ${htmlSizeKB.toFixed(1)}KB`
+    //         );
+
+    //         // -----------------------------------------------------------------
+    //         // PATH A: Small signatures -> use setSignatureAsync
+    //         // -----------------------------------------------------------------
+    //         if (
+    //             typeof item.body.setSignatureAsync === "function" &&
+    //             htmlSizeKB < 100
+    //         ) {
+    //             _diag.info("PATH A: setSignatureAsync");
+
+    //             await setSignature(wrappedHtml);
+
+    //             onDone(true);
+    //             return;
+    //         }
+
+    //         // -----------------------------------------------------------------
+    //         // PATH B: Large signatures -> rebuild body
+    //         // -----------------------------------------------------------------
+    //         _diag.info(
+    //             `PATH B: ${htmlSizeKB >= 100
+    //                 ? "large signature"
+    //                 : "setSignatureAsync unavailable"
+    //             }`
+    //         );
+
+    //         // Clear Outlook signature slot first
+    //         if (typeof item.body.setSignatureAsync === "function") {
+    //             try {
+    //                 await setSignature("");
+    //             } catch (e) {
+    //                 _diag.warn(
+    //                     "Failed clearing signature slot: " +
+    //                     (e?.message || e)
+    //                 );
+    //             }
+    //         }
+
+    //         const existingBody = await getBody();
+
+    //         // Prevent duplicate insertion
+    //         if (existingBody.includes(MARKER_ATTR)) {
+    //             _diag.info("Signature already exists");
+    //             onDone(true);
+    //             return;
+    //         }
+
+    //         const strippedBody =
+    //             typeof stripNativeOutlookSignature === "function"
+    //                 ? stripNativeOutlookSignature(existingBody)
+    //                 : existingBody;
+
+    //         const candidateBody =
+    //             strippedBody + wrappedHtml;
+
+    //         await setBody(candidateBody);
+
+    //         _diag.info("Large signature inserted successfully");
+
+    //         onDone(true);
+    //     } catch (err) {
+    //         _diag.error(
+    //             "writeSignature failed: " +
+    //             (err?.message || JSON.stringify(err))
+    //         );
+
+    //         onDone(false);
+    //     }
+    // })();
+
+
     (async () => {
         try {
+            _diag.info("==================================================");
+            _diag.info("writeSignature START");
+            _diag.info("==================================================");
+
             _diag.info(
                 `Signature size: ${htmlSizeKB.toFixed(1)}KB`
             );
 
-            // -----------------------------------------------------------------
-            // PATH A: Small signatures -> use setSignatureAsync
-            // -----------------------------------------------------------------
+            _diag.info(
+                `Raw signature length: ${html.length}`
+            );
+
+            _diag.info(
+                `Wrapped signature length: ${wrappedHtml.length}`
+            );
+
+            // ---------------------------------------------------------
+            // PATH A
+            // ---------------------------------------------------------
             if (
                 typeof item.body.setSignatureAsync === "function" &&
                 htmlSizeKB < 100
             ) {
-                _diag.info("PATH A: setSignatureAsync");
+                _diag.info(
+                    "PATH A selected -> setSignatureAsync"
+                );
+
+                _diag.info(
+                    "Calling setSignatureAsync"
+                );
 
                 await setSignature(wrappedHtml);
+
+                _diag.info(
+                    "setSignatureAsync completed successfully"
+                );
+
+                try {
+                    const verifyBody = await getBody();
+
+                    _diag.info(
+                        `Verification body length=${verifyBody.length}`
+                    );
+
+                    _diag.info(
+                        `Marker found=${verifyBody.includes(MARKER_ATTR)}`
+                    );
+                } catch (e) {
+                    _diag.warn(
+                        "Verification read failed: " +
+                        (e?.message || e)
+                    );
+                }
+
+                _diag.info("writeSignature END");
 
                 onDone(true);
                 return;
             }
 
-            // -----------------------------------------------------------------
-            // PATH B: Large signatures -> rebuild body
-            // -----------------------------------------------------------------
+            // ---------------------------------------------------------
+            // PATH B
+            // ---------------------------------------------------------
             _diag.info(
-                `PATH B: ${htmlSizeKB >= 100
+                `PATH B selected -> ${htmlSizeKB >= 100
                     ? "large signature"
                     : "setSignatureAsync unavailable"
                 }`
             );
 
-            // Clear Outlook signature slot first
+            // ---------------------------------------------------------
+            // CLEAR SIGNATURE SLOT
+            // ---------------------------------------------------------
             if (typeof item.body.setSignatureAsync === "function") {
                 try {
+                    _diag.info(
+                        "Clearing Outlook signature slot"
+                    );
+
                     await setSignature("");
+
+                    _diag.info(
+                        "Signature slot cleared successfully"
+                    );
                 } catch (e) {
                     _diag.warn(
                         "Failed clearing signature slot: " +
-                        (e?.message || e)
+                        (e?.message || JSON.stringify(e))
                     );
                 }
+            } else {
+                _diag.info(
+                    "setSignatureAsync not available"
+                );
             }
+
+            // ---------------------------------------------------------
+            // READ BODY
+            // ---------------------------------------------------------
+            _diag.info(
+                "Reading existing compose body"
+            );
 
             const existingBody = await getBody();
 
-            // Prevent duplicate insertion
+            _diag.info(
+                `Existing body length=${existingBody.length}`
+            );
+
+            _diag.info(
+                `Existing body contains marker=${existingBody.includes(MARKER_ATTR)}`
+            );
+
+            _diag.info(
+                `Existing body contains cardbyte-signature=${existingBody.indexOf("cardbyte-signature") >= 0}`
+            );
+
+            // ---------------------------------------------------------
+            // DUPLICATE CHECK
+            // ---------------------------------------------------------
             if (existingBody.includes(MARKER_ATTR)) {
-                _diag.info("Signature already exists");
+                _diag.info(
+                    "Signature already exists. Skipping insertion."
+                );
+
                 onDone(true);
                 return;
             }
+
+            // ---------------------------------------------------------
+            // STRIP
+            // ---------------------------------------------------------
+            _diag.info(
+                "Removing Outlook/CardByte signatures from body"
+            );
 
             const strippedBody =
                 typeof stripNativeOutlookSignature === "function"
                     ? stripNativeOutlookSignature(existingBody)
                     : existingBody;
 
+            _diag.info(
+                `Stripped body length=${strippedBody.length}`
+            );
+
+            _diag.info(
+                `Characters removed=${existingBody.length - strippedBody.length}`
+            );
+
+            // ---------------------------------------------------------
+            // BUILD FINAL BODY
+            // ---------------------------------------------------------
             const candidateBody =
                 strippedBody + wrappedHtml;
 
+            _diag.info(
+                `Candidate body length=${candidateBody.length}`
+            );
+
+            _diag.info(
+                `Candidate contains marker=${candidateBody.includes(MARKER_ATTR)}`
+            );
+
+            // ---------------------------------------------------------
+            // INSERT
+            // ---------------------------------------------------------
+            _diag.info(
+                "Calling setSelectedDataAsync"
+            );
+
+            _diag.info(
+                `Payload length=${candidateBody.length}`
+            );
+
             await setBody(candidateBody);
 
-            _diag.info("Large signature inserted successfully");
+            _diag.info(
+                "setSelectedDataAsync completed successfully"
+            );
+
+            // ---------------------------------------------------------
+            // VERIFY
+            // ---------------------------------------------------------
+            _diag.info(
+                "Verifying body after insertion"
+            );
+
+            const bodyAfterInsert = await getBody();
+
+            _diag.info(
+                `Body after insert length=${bodyAfterInsert.length}`
+            );
+
+            _diag.info(
+                `Body delta=${bodyAfterInsert.length - existingBody.length}`
+            );
+
+            _diag.info(
+                `Marker found after insert=${bodyAfterInsert.includes(MARKER_ATTR)}`
+            );
+
+            _diag.info(
+                `CardByte signature found after insert=${bodyAfterInsert.indexOf("cardbyte-signature") >= 0}`
+            );
+
+            const markerPos =
+                bodyAfterInsert.indexOf(MARKER_ATTR);
+
+            _diag.info(
+                `Marker position=${markerPos}`
+            );
+
+            if (markerPos >= 0) {
+                const snippet =
+                    bodyAfterInsert.substring(
+                        Math.max(0, markerPos - 200),
+                        Math.min(
+                            bodyAfterInsert.length,
+                            markerPos + 1000
+                        )
+                    );
+
+                _diag.info(
+                    "Marker snippet follows:"
+                );
+
+                _diag.info(snippet);
+            } else {
+                _diag.warn(
+                    "Marker NOT FOUND after insertion"
+                );
+            }
+
+            _diag.info(
+                "Large signature inserted successfully"
+            );
+
+            _diag.info(
+                "=================================================="
+            );
+
+            _diag.info(
+                "writeSignature END SUCCESS"
+            );
+
+            _diag.info(
+                "=================================================="
+            );
 
             onDone(true);
+
         } catch (err) {
+
             _diag.error(
-                "writeSignature failed: " +
-                (err?.message || JSON.stringify(err))
+                "writeSignature failed"
             );
+
+            _diag.error(
+                err?.message ||
+                JSON.stringify(err)
+            );
+
+            if (err?.stack) {
+                _diag.error(err.stack);
+            }
 
             onDone(false);
         }
     })();
+
 }
 
 /**
