@@ -7208,33 +7208,123 @@ function splitHtmlAtBlockBoundaries(html, maxKB) {
     return chunks;
 }
 
+// ─── CID Image Externalization ────────────────────────────────────────────────
+
 /**
- * Clears the body with setAsync to reset the cursor to position 0.
- * This is the ONLY reliable way to guarantee cursor position before
- * the first setSelectedDataAsync call.
+ * Extracts all base64 images from the signature HTML, replaces each with a
+ * CID reference, and returns the cleaned HTML + an array of attachment descriptors.
+ *
+ * @param {string} html - Raw signature HTML
+ * @returns {{ html: string, attachments: Array<{cid, name, base64, mimeType}> }}
  */
-function _resetBodyForChunking(item, baseBody, cb) {
-    if (typeof item.body.setAsync !== "function") {
-        cb(new Error("setAsync unavailable — cannot reset cursor"));
+function extractBase64ImagesToCid(html) {
+    var attachments = [];
+    var counter = 0;
+
+    // Matches: src="data:image/TYPE;base64,DATA"
+    // Also handles src='...' (single quotes)
+    var cleaned = html.replace(
+        /src=(["'])data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,([A-Za-z0-9+/=\s]+?)\1/gi,
+        function (match, quote, ext, b64Data) {
+            counter++;
+
+            // Normalize ext for MIME type and filename
+            var mimeExt = ext.toLowerCase().replace("jpeg", "jpg").replace("svg+xml", "svg");
+            var mimeType = "image/" + ext.toLowerCase();
+            var cid = "cbimg" + counter + "@cardbyte";
+            var name = "cbimg" + counter + "." + mimeExt;
+
+            // Strip any whitespace that crept into the base64 string
+            var cleanB64 = b64Data.replace(/\s/g, "");
+
+            attachments.push({
+                cid: cid,
+                name: name,
+                base64: cleanB64,
+                mimeType: mimeType
+            });
+
+            _diag.info(
+                "CID extracted: " + cid +
+                " | type=" + mimeType +
+                " | size=" + (cleanB64.length * 0.75 / 1024).toFixed(1) + "KB"
+            );
+
+            return 'src=' + quote + 'cid:' + cid + quote;
+        }
+    );
+
+    _diag.info(
+        "extractBase64ImagesToCid: " + attachments.length + " image(s) extracted" +
+        " | HTML " + (new Blob([html]).size / 1024).toFixed(1) + "KB" +
+        " -> " + (new Blob([cleaned]).size / 1024).toFixed(1) + "KB"
+    );
+
+    return { html: cleaned, attachments: attachments };
+}
+
+/**
+ * Adds a single attachment to the compose item.
+ * Uses addFileAttachmentFromBase64Async (Mailbox 1.8+).
+ * Calls cb(success: boolean).
+ *
+ * attachmentOptions { isInline: true } tells Outlook this is a CID
+ * inline attachment — it will NOT appear in the paperclip list.
+ */
+function _addCidAttachment(item, att, cb) {
+    if (typeof item.addFileAttachmentFromBase64Async !== "function") {
+        _diag.error("addFileAttachmentFromBase64Async unavailable (requires Mailbox 1.8)");
+        cb(false);
         return;
     }
 
-    _diag.info("_resetBodyForChunking: writing base body (" +
-        (new Blob([baseBody]).size / 1024).toFixed(1) + "KB) to reset cursor");
+    _diag.info("Adding CID attachment: " + att.name + " (" + att.cid + ")");
 
-    item.body.setAsync(
-        baseBody,
-        { coercionType: Office.CoercionType.Html },
+    item.addFileAttachmentFromBase64Async(
+        att.base64,
+        att.name,
+        {
+            isInline: true,   // ← hidden from paperclip list, renderable via cid:
+            asyncContext: att.cid
+        },
         function (result) {
-            if (result.status !== Office.AsyncResultStatus.Succeeded) {
-                cb(result.error);
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+                _diag.info("CID attachment added OK: " + att.cid);
+                cb(true);
             } else {
-                _diag.info("_resetBodyForChunking: base body written, cursor at end of base");
-                cb(null);
+                _diag.error(
+                    "CID attachment failed: " + att.cid +
+                    " | " + JSON.stringify(result.error)
+                );
+                cb(false);
             }
         }
     );
 }
+
+/**
+ * Adds all CID attachments sequentially (one at a time).
+ * Calls onDone(allSucceeded: boolean).
+ */
+function addCidAttachmentsSequentially(item, attachments, index, onDone) {
+    if (index >= attachments.length) {
+        _diag.info("addCidAttachmentsSequentially: all " + attachments.length + " attachment(s) added");
+        onDone(true);
+        return;
+    }
+
+    _addCidAttachment(item, attachments[index], function (ok) {
+        if (!ok) {
+            // Non-fatal — continue so other images still get added
+            _diag.warn("Attachment " + (index + 1) + " failed — continuing");
+        }
+        // Small delay between attachment calls
+        setTimeout(function () {
+            addCidAttachmentsSequentially(item, attachments, index + 1, onDone);
+        }, 80);
+    });
+}
+
 
 /**
  * Inserts one chunk at the current cursor position via setSelectedDataAsync,
@@ -7289,36 +7379,30 @@ function _insertChunksViaSelectedData(item, chunks, index, onDone) {
     );
 }
 
-/**
- * Full write path using setSelectedDataAsync for chunked insertion.
- *
- * Flow:
- *   1. PATH A  — small sig + setSignatureAsync available → single API call
- *   2. PATH B  — large sig OR no setSignatureAsync:
- *        a. Clear native sig slot (if API available)
- *        b. Read + strip existing body
- *        c. Write stripped body via setAsync  ← resets cursor to end of base
- *        d. Insert signature chunks one by one via setSelectedDataAsync
- *        e. Verify marker presence
- *
- * Drop-in replacement. Pure callbacks. JSRuntime safe.
- */
 function writeSignature(item, html, onDone) {
 
     var MARKER_ATTR = 'data-cardbyte-sig="1"';
-    var htmlSizeKB = new Blob([html]).size / 1024;
 
-    // ── Diagnostics (preserved from your original) ────────────────────────────
-    var imgs = html.match(/<img\b[^>]*src=["']([^"']+)["']/gi) || [];
-    _diag.info("Image count=" + imgs.length);
-    _diag.info("Base64 image count=" + (html.match(/data:image\//gi) || []).length);
+    // ── STEP 0: Extract base64 images → CID attachments ──────────────────────
+    //
+    // Do this BEFORE size checks so htmlSizeKB reflects the cleaned HTML,
+    // which is what actually gets written to the body.
+    var extracted = extractBase64ImagesToCid(html);
+    var cleanHtml = extracted.html;        // src="cid:..." refs only
+    var attachments = extracted.attachments; // [{cid, name, base64, mimeType}]
+
+    var htmlSizeKB = new Blob([cleanHtml]).size / 1024;
+
+    _diag.info("Image count=" + attachments.length);
+    _diag.info("Base64 image count=" + attachments.length);
     _diag.info("==================================================");
     _diag.info("writeSignature START");
     _diag.info("==================================================");
-    _diag.info("Signature size: " + htmlSizeKB.toFixed(1) + "KB");
-    _diag.info("Raw html length: " + html.length);
+    _diag.info("Original html size: " + (new Blob([html]).size / 1024).toFixed(1) + "KB");
+    _diag.info("Cleaned html size:  " + htmlSizeKB.toFixed(1) + "KB  (after CID extraction)");
+    _diag.info("CID attachments:    " + attachments.length);
 
-    // ── Shared helpers ────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     function setSignatureSlot(content, cb) {
         if (typeof item.body.setSignatureAsync !== "function") {
@@ -7346,146 +7430,197 @@ function writeSignature(item, html, onDone) {
         });
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // PATH A — small sig + setSignatureAsync → single call, no chunking needed
-    // ─────────────────────────────────────────────────────────────────────────
-    if (
-        typeof item.body.setSignatureAsync === "function" &&
-        htmlSizeKB < 100
-    ) {
-        _diag.info("PATH A -> setSignatureAsync (single call)");
-
-        var wrappedA = '<div ' + MARKER_ATTR + '>' + html + '</div>';
-
-        setSignatureSlot(wrappedA, function (result) {
-            if (result.status !== Office.AsyncResultStatus.Succeeded) {
-                _diag.error("PATH A failed: " + JSON.stringify(result.error));
-                onDone(false);
-                return;
+    function setBody(content, cb) {
+        if (typeof item.body.setAsync !== "function") {
+            cb(new Error("setAsync unavailable"));
+            return;
+        }
+        item.body.setAsync(
+            content,
+            { coercionType: Office.CoercionType.Html },
+            function (result) {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    cb(null);
+                } else {
+                    cb(result.error);
+                }
             }
-            _diag.info("PATH A succeeded");
-            _diag.info("writeSignature END");
-            onDone(true);
-        });
-
-        return;
+        );
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // PATH B — large sig OR no setSignatureAsync → chunked setSelectedDataAsync
-    // ─────────────────────────────────────────────────────────────────────────
-    _diag.info(
-        "PATH B -> " +
-        (htmlSizeKB >= 100
-            ? "large sig (" + htmlSizeKB.toFixed(1) + "KB)"
-            : "no setSignatureAsync") +
-        " -> chunked setSelectedDataAsync"
-    );
+    function setSelectedData(content, cb) {
+        if (typeof item.body.setSelectedDataAsync !== "function") {
+            cb(new Error("setSelectedDataAsync unavailable"));
+            return;
+        }
+        item.body.setSelectedDataAsync(
+            content,
+            { coercionType: Office.CoercionType.Html },
+            function (result) {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    cb(null);
+                } else {
+                    cb(result.error);
+                }
+            }
+        );
+    }
 
-    // ── Step 1: Clear native sig slot ────────────────────────────────────────
-    function step_clearSlot(next) {
-        if (typeof item.body.setSignatureAsync !== "function") {
-            _diag.info("step_clearSlot: API unavailable — skipping");
+    // ── Step A: Add all CID attachments first ─────────────────────────────────
+    //
+    // Attachments must exist BEFORE the HTML referencing them is written,
+    // otherwise Outlook cannot resolve the cid: references when rendering.
+    function step_addAttachments(next) {
+        if (attachments.length === 0) {
+            _diag.info("step_addAttachments: no CID attachments — skipping");
             next();
             return;
         }
-        _diag.info("step_clearSlot: clearing slot");
-        setSignatureSlot("", function (r) {
-            if (r.status !== Office.AsyncResultStatus.Succeeded) {
-                _diag.warn("step_clearSlot: failed (non-fatal): " + JSON.stringify(r.error));
-            } else {
-                _diag.info("step_clearSlot: cleared");
+
+        var hasApi = typeof item.addFileAttachmentFromBase64Async === "function";
+        if (!hasApi) {
+            // Mailbox < 1.8 — fall back to writing original HTML with base64
+            // PATH B chunking will handle it as before (images may still be
+            // stripped by Outlook on large payloads, but we have no better option)
+            _diag.warn(
+                "step_addAttachments: addFileAttachmentFromBase64Async unavailable" +
+                " (Mailbox < 1.8) — reverting to inline base64"
+            );
+            cleanHtml = html;           // restore original with base64
+            attachments = [];
+            next();
+            return;
+        }
+
+        _diag.info("step_addAttachments: adding " + attachments.length + " CID attachment(s)");
+
+        addCidAttachmentsSequentially(item, attachments, 0, function (ok) {
+            if (!ok) {
+                _diag.warn("step_addAttachments: some attachments failed — images may be broken");
             }
             next();
         });
     }
 
-    // ── Step 2: Read existing body ────────────────────────────────────────────
-    function step_readBody(next) {
-        _diag.info("step_readBody: reading body");
-        getBody(function (body, err) {
-            if (err) {
-                _diag.error("step_readBody: " + JSON.stringify(err));
-                onDone(false);
-                return;
-            }
-            _diag.info("step_readBody: length=" + body.length +
-                " | hasMarker=" + body.includes(MARKER_ATTR));
-            next(body);
-        });
-    }
+    // ── Step B: Write cleaned HTML into body ──────────────────────────────────
+    function step_writeBody(next) {
 
-    // ── Step 3: Dedup → strip → split → reset cursor → insert chunks ──────────
-    function step_insertChunks(existingBody) {
+        // PATH A — small cleaned HTML + setSignatureAsync available
+        if (
+            typeof item.body.setSignatureAsync === "function" &&
+            htmlSizeKB < 100
+        ) {
+            _diag.info("PATH A -> setSignatureAsync (cleaned HTML is " + htmlSizeKB.toFixed(1) + "KB)");
 
-        // Duplicate guard
-        if (existingBody.includes(MARKER_ATTR)) {
-            _diag.info("step_insertChunks: marker already present — skipping");
-            onDone(true);
+            var wrapped = '<div ' + MARKER_ATTR + '>' + cleanHtml + '</div>';
+
+            setSignatureSlot(wrapped, function (result) {
+                if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                    _diag.error("PATH A failed: " + JSON.stringify(result.error));
+                    next(false);
+                    return;
+                }
+                _diag.info("PATH A succeeded");
+                next(true);
+            });
+
             return;
         }
 
-        var strippedBody = typeof stripNativeOutlookSignature === "function"
-            ? stripNativeOutlookSignature(existingBody)
-            : existingBody;
+        // PATH B — chunked setSelectedDataAsync
+        _diag.info(
+            "PATH B -> chunked setSelectedDataAsync" +
+            " (cleaned HTML=" + htmlSizeKB.toFixed(1) + "KB)"
+        );
 
-        _diag.info("step_insertChunks: stripped length=" + strippedBody.length);
+        // Clear native slot
+        function clearSlot(cb) {
+            if (typeof item.body.setSignatureAsync !== "function") { cb(); return; }
+            setSignatureSlot("", function (r) {
+                if (r.status !== Office.AsyncResultStatus.Succeeded) {
+                    _diag.warn("clearSlot failed (non-fatal)");
+                }
+                cb();
+            });
+        }
 
-        // Wrap the full signature then split the WRAPPED html into chunks
-        // so the marker div always opens in chunk 1 and closes in the last chunk
-        var openTag = '<div ' + MARKER_ATTR + '>';
-        var closeTag = '</div>';
+        // Read body
+        function readBody(cb) {
+            getBody(function (body, err) {
+                if (err) { _diag.error("readBody: " + JSON.stringify(err)); cb(null); return; }
+                _diag.info("readBody: length=" + body.length);
+                cb(body);
+            });
+        }
 
-        var chunks = splitHtmlAtBlockBoundaries(html, CHUNK_SIZE_KB);
+        // Chunk insert via setSelectedDataAsync
+        function insertChunks(strippedBody) {
+            if (strippedBody === null) { next(false); return; }
 
-        // Prepend the opening marker tag onto the first chunk
-        // and close it on the last chunk so the full wrapped div
-        // is intact once all chunks are inserted
-        chunks[0] = openTag + chunks[0];
-        chunks[chunks.length - 1] = chunks[chunks.length - 1] + closeTag;
-
-        _diag.info("step_insertChunks: " + chunks.length + " chunk(s)");
-        chunks.forEach(function (c, i) {
-            _diag.info("  chunk " + (i + 1) + ": " + (new Blob([c]).size / 1024).toFixed(1) + "KB");
-        });
-
-        // Reset cursor to end of strippedBody via setAsync, THEN chunk-insert
-        _resetBodyForChunking(item, strippedBody, function (err) {
-            if (err) {
-                _diag.error("step_insertChunks: resetBody failed: " + JSON.stringify(err));
-                onDone(false);
+            if (strippedBody.includes(MARKER_ATTR)) {
+                _diag.info("Marker already present — skipping");
+                next(true);
                 return;
             }
 
-            _insertChunksViaSelectedData(item, chunks, 0, function (success) {
-                if (!success) {
-                    _diag.error("step_insertChunks: chunked insert failed");
-                    onDone(false);
+            var chunks = splitHtmlAtBlockBoundaries(cleanHtml, CHUNK_SIZE_KB);
+
+            // Open/close the wrapper div across the chunk boundary
+            chunks[0] = '<div ' + MARKER_ATTR + '>' + chunks[0];
+            chunks[chunks.length - 1] = chunks[chunks.length - 1] + '</div>';
+
+            _diag.info("Chunks: " + chunks.length);
+            chunks.forEach(function (c, i) {
+                _diag.info("  chunk " + (i + 1) + ": " + (new Blob([c]).size / 1024).toFixed(1) + "KB");
+            });
+
+            // Reset cursor to end of strippedBody
+            setBody(strippedBody, function (err) {
+                if (err) {
+                    _diag.error("setBody for cursor reset failed: " + JSON.stringify(err));
+                    next(false);
                     return;
                 }
 
-                // Verify
-                getBody(function (bodyAfter, err) {
-                    if (err) {
-                        _diag.warn("Verification read failed: " + JSON.stringify(err));
-                        onDone(true); // write succeeded, verify is best-effort
-                        return;
-                    }
-                    _diag.info("Body after insert: length=" + bodyAfter.length +
-                        " | markerFound=" + bodyAfter.includes(MARKER_ATTR));
-                    _diag.info("==================================================");
-                    _diag.info("writeSignature END SUCCESS");
-                    _diag.info("==================================================");
-                    onDone(true);
+                _diag.info("Cursor reset to end of base body — starting chunk insert");
+
+                _insertChunksViaSelectedData(item, chunks, 0, function (success) {
+                    if (!success) { next(false); return; }
+
+                    // Verify
+                    getBody(function (bodyAfter, e) {
+                        if (e) {
+                            _diag.warn("Verify read failed");
+                            next(true);
+                            return;
+                        }
+                        _diag.info(
+                            "Body after insert: length=" + bodyAfter.length +
+                            " | markerFound=" + bodyAfter.includes(MARKER_ATTR)
+                        );
+                        next(bodyAfter.includes(MARKER_ATTR));
+                    });
                 });
+            });
+        }
+
+        clearSlot(function () {
+            readBody(function (body) {
+                var stripped = body !== null && typeof stripNativeOutlookSignature === "function"
+                    ? stripNativeOutlookSignature(body)
+                    : body;
+                insertChunks(stripped);
             });
         });
     }
 
-    // ── Chain ─────────────────────────────────────────────────────────────────
-    step_clearSlot(function () {
-        step_readBody(function (existingBody) {
-            step_insertChunks(existingBody);
+    // ── Chain: attachments first, then body ───────────────────────────────────
+    step_addAttachments(function () {
+        step_writeBody(function (success) {
+            _diag.info("==================================================");
+            _diag.info("writeSignature " + (success ? "END SUCCESS" : "END FAILED"));
+            _diag.info("==================================================");
+            onDone(success);
         });
     });
 }
