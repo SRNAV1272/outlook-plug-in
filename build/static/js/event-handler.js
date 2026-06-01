@@ -198,7 +198,17 @@ const Notify = (() => {
                 true
             );
         },
-
+        // ── Size overflow ───────────────────────────────────────────────────
+        sizeError(sizes) {
+            const actual = sizes?.photoKb ?? 0;
+            const allowed = sizes?.photoAllowedKb ?? 0;
+            const overBy = sizes?.photoOverByKb ?? 0;
+            showError(
+                NOTIFY_KEYS.API_FAILURE,
+                `CardByte: Signature too large — photo is ${actual} KB (limit ${allowed} KB, over by ${overBy} KB). Upload a smaller profile photo.`
+            );
+        },
+        
         // ── Clear ───────────────────────────────────────────────────────────
         clear() { removeAll(); },
         clearKey(key) { remove(key); },
