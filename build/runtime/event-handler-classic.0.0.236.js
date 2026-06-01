@@ -7153,511 +7153,174 @@ function stripNativeOutlookSignature(html) {
     return html;
 }
 
-// function writeSignature(item, html, onDone) {
-//     const MARKER_ATTR = 'data-cardbyte-sig="1"';
-//     const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
-//     const htmlSizeKB = new Blob([html]).size / 1024;
+// ─── setSelectedDataAsync chunked write path (JSRuntime safe) ────────────────
 
-//     // ==========================================
-//     // IMAGE DIAGNOSTICS HERE
-//     // ==========================================
-
-//     const imgs =
-//         html.match(/<img\b[^>]*src=["']([^"']+)["']/gi) || [];
-
-//     _diag.info(`Image count=${imgs.length}`);
-
-//     _diag.info(
-//         `Base64 image count=${(html.match(/data:image\//gi) || []).length
-//         }`
-//     );
-
-//     imgs.forEach((img, i) => {
-//         _diag.info(
-//             `IMG ${i + 1}:size=${sizeKB.toFixed(1)} KB:  ${img.substring(0, 300)}`
-//         );
-//     });
-
-//     // ==========================================
-//     // Existing functions
-//     // ==========================================
-
-//     function getBody() {
-//         return new Promise((resolve, reject) => {
-//             if (typeof item.body.getAsync !== "function") {
-//                 reject(new Error("getAsync unavailable"));
-//                 return;
-//             }
-
-//             item.body.getAsync(
-//                 Office.CoercionType.Html,
-//                 (result) => {
-//                     if (result.status === Office.AsyncResultStatus.Succeeded) {
-//                         resolve(result.value || "");
-//                     } else {
-//                         reject(result.error);
-//                     }
-//                 }
-//             );
-//         });
-//     }
-
-//     function setSignature(content) {
-//         return new Promise((resolve, reject) => {
-//             if (typeof item.body.setSignatureAsync !== "function") {
-//                 reject(new Error("setSignatureAsync unavailable"));
-//                 return;
-//             }
-
-//             item.body.setSignatureAsync(
-//                 content,
-//                 { coercionType: Office.CoercionType.Html },
-//                 (result) => {
-//                     if (result.status === Office.AsyncResultStatus.Succeeded) {
-//                         resolve();
-//                     } else {
-//                         reject(result.error);
-//                     }
-//                 }
-//             );
-//         });
-//     }
-
-//     function setBody(content) {
-//         return new Promise((resolve, reject) => {
-//             if (typeof item.body.setAsync !== "function") {
-//                 reject(new Error("setAsync unavailable"));
-//                 return;
-//             }
-
-//             item.body.setAsync(
-//                 content,
-//                 { coercionType: Office.CoercionType.Html },
-//                 (result) => {
-//                     if (result.status === Office.AsyncResultStatus.Succeeded) {
-//                         resolve();
-//                     } else {
-//                         reject(result.error);
-//                     }
-//                 }
-//             );
-//         });
-//     }
-
-//     (async () => {
-//         try {
-//             _diag.info("==================================================");
-//             _diag.info("writeSignature START");
-//             _diag.info("==================================================");
-
-//             _diag.info(
-//                 `Signature size: ${htmlSizeKB.toFixed(1)}KB`
-//             );
-
-//             _diag.info(
-//                 `Raw signature length: ${html.length}`
-//             );
-
-//             _diag.info(
-//                 `Wrapped signature length: ${wrappedHtml.length}`
-//             );
-
-//             // ---------------------------------------------------------
-//             // PATH A
-//             // ---------------------------------------------------------
-//             if (
-//                 typeof item.body.setSignatureAsync === "function" &&
-//                 htmlSizeKB < 100
-//             ) {
-//                 _diag.info(
-//                     "PATH A selected -> setSignatureAsync"
-//                 );
-
-//                 _diag.info(
-//                     "Calling setSignatureAsync"
-//                 );
-
-//                 await setSignature(wrappedHtml);
-
-//                 _diag.info(
-//                     "setSignatureAsync completed successfully"
-//                 );
-
-//                 try {
-//                     const verifyBody = await getBody();
-
-//                     _diag.info(
-//                         `Verification body length=${verifyBody.length}`
-//                     );
-
-//                     _diag.info(
-//                         `Marker found=${verifyBody.includes(MARKER_ATTR)}`
-//                     );
-//                 } catch (e) {
-//                     _diag.warn(
-//                         "Verification read failed: " +
-//                         (e?.message || e)
-//                     );
-//                 }
-
-//                 _diag.info("writeSignature END");
-
-//                 onDone(true);
-//                 return;
-//             }
-
-//             // ---------------------------------------------------------
-//             // PATH B
-//             // ---------------------------------------------------------
-//             _diag.info(
-//                 `PATH B selected -> ${htmlSizeKB >= 100
-//                     ? "large signature"
-//                     : "setSignatureAsync unavailable"
-//                 }`
-//             );
-
-//             // ---------------------------------------------------------
-//             // CLEAR SIGNATURE SLOT
-//             // ---------------------------------------------------------
-//             if (typeof item.body.setSignatureAsync === "function") {
-//                 try {
-//                     _diag.info(
-//                         "Clearing Outlook signature slot"
-//                     );
-
-//                     await setSignature("");
-
-//                     _diag.info(
-//                         "Signature slot cleared successfully"
-//                     );
-//                 } catch (e) {
-//                     _diag.warn(
-//                         "Failed clearing signature slot: " +
-//                         (e?.message || JSON.stringify(e))
-//                     );
-//                 }
-//             } else {
-//                 _diag.info(
-//                     "setSignatureAsync not available"
-//                 );
-//             }
-
-//             // ---------------------------------------------------------
-//             // READ BODY
-//             // ---------------------------------------------------------
-//             _diag.info(
-//                 "Reading existing compose body"
-//             );
-
-//             const existingBody = await getBody();
-
-//             _diag.info(
-//                 `Existing body length=${existingBody.length}`
-//             );
-
-//             _diag.info(
-//                 `Existing body contains marker=${existingBody.includes(MARKER_ATTR)}`
-//             );
-
-//             _diag.info(
-//                 `Existing body contains cardbyte-signature=${existingBody.indexOf("cardbyte-signature") >= 0}`
-//             );
-
-//             // ---------------------------------------------------------
-//             // DUPLICATE CHECK
-//             // ---------------------------------------------------------
-//             if (existingBody.includes(MARKER_ATTR)) {
-//                 _diag.info(
-//                     "Signature already exists. Skipping insertion."
-//                 );
-
-//                 onDone(true);
-//                 return;
-//             }
-
-//             // ---------------------------------------------------------
-//             // STRIP
-//             // ---------------------------------------------------------
-//             _diag.info(
-//                 "Removing Outlook/CardByte signatures from body"
-//             );
-
-//             const strippedBody =
-//                 typeof stripNativeOutlookSignature === "function"
-//                     ? stripNativeOutlookSignature(existingBody)
-//                     : existingBody;
-
-//             _diag.info(
-//                 `Stripped body length=${strippedBody.length}`
-//             );
-
-//             _diag.info(
-//                 `Characters removed=${existingBody.length - strippedBody.length}`
-//             );
-
-//             // ---------------------------------------------------------
-//             // BUILD FINAL BODY
-//             // ---------------------------------------------------------
-//             const candidateBody =
-//                 strippedBody + wrappedHtml;
-
-//             _diag.info(
-//                 `Candidate body length=${candidateBody.length}`
-//             );
-
-//             _diag.info(
-//                 `Candidate contains marker=${candidateBody.includes(MARKER_ATTR)}`
-//             );
-
-//             // ---------------------------------------------------------
-//             // INSERT
-//             // ---------------------------------------------------------
-//             _diag.info(
-//                 "Calling setSelectedDataAsync"
-//             );
-
-//             _diag.info(
-//                 `Payload length=${candidateBody.length}`
-//             );
-
-//             await setBody(candidateBody);
-
-//             _diag.info(
-//                 "setSelectedDataAsync completed successfully"
-//             );
-
-//             // ---------------------------------------------------------
-//             // VERIFY
-//             // ---------------------------------------------------------
-//             _diag.info(
-//                 "Verifying body after insertion"
-//             );
-
-//             const bodyAfterInsert = await getBody();
-
-//             _diag.info(
-//                 `Body after insert length=${bodyAfterInsert.length}`
-//             );
-
-//             _diag.info(
-//                 `Body delta=${bodyAfterInsert.length - existingBody.length}`
-//             );
-
-//             _diag.info(
-//                 `Marker found after insert=${bodyAfterInsert.includes(MARKER_ATTR)}`
-//             );
-
-//             _diag.info(
-//                 `CardByte signature found after insert=${bodyAfterInsert.indexOf("cardbyte-signature") >= 0}`
-//             );
-
-//             const markerPos =
-//                 bodyAfterInsert.indexOf(MARKER_ATTR);
-
-//             _diag.info(
-//                 `Marker position=${markerPos}`
-//             );
-
-//             if (markerPos >= 0) {
-//                 const snippet =
-//                     bodyAfterInsert.substring(
-//                         Math.max(0, markerPos - 200),
-//                         Math.min(
-//                             bodyAfterInsert.length,
-//                             markerPos + 1000
-//                         )
-//                     );
-
-//                 _diag.info(
-//                     "Marker snippet follows:"
-//                 );
-
-//                 _diag.info(snippet);
-//             } else {
-//                 _diag.warn(
-//                     "Marker NOT FOUND after insertion"
-//                 );
-//             }
-
-//             _diag.info(
-//                 "Large signature inserted successfully"
-//             );
-
-//             _diag.info(
-//                 "=================================================="
-//             );
-
-//             _diag.info(
-//                 "writeSignature END SUCCESS"
-//             );
-
-//             _diag.info(
-//                 "=================================================="
-//             );
-
-//             onDone(true);
-
-//         } catch (err) {
-
-//             _diag.error(
-//                 "writeSignature failed"
-//             );
-
-//             _diag.error(
-//                 err?.message ||
-//                 JSON.stringify(err)
-//             );
-
-//             if (err?.stack) {
-//                 _diag.error(err.stack);
-//             }
-
-//             onDone(false);
-//         }
-//     })();
-
-// }
-
-// ─── Chunked write path (JSRuntime safe — no async/await) ────────────────────
-
-var CHUNK_SIZE_KB = 150; // safe ceiling per setAsync call
+var CHUNK_SIZE_KB = 150;
 
 /**
- * Splits HTML at top-level block boundaries so no chunk contains
- * a broken tag. Returns an array of HTML strings.
+ * Splits HTML only at top-level block element boundaries.
+ * Never splits mid-tag or mid-attribute.
+ *
+ * Strategy:
+ *   - Walk the HTML string finding closing tags of top-level blocks
+ *   - A chunk boundary is only valid AFTER a complete closing tag
+ *   - If a single element exceeds maxKB (e.g. one giant base64 img),
+ *     it becomes its own oversized chunk — nothing we can do about that
+ *     without externalizing the image
  */
 function splitHtmlAtBlockBoundaries(html, maxKB) {
     var maxBytes = maxKB * 1024;
     var chunks = [];
     var current = "";
 
-    // Match self-closing or paired block elements at top level
-    var pattern = /(<(?:table|div|p|tr|td|img|br)[\s\S]*?(?:<\/(?:table|div|p|tr|td)>|\/?>))/gi;
-    var lastIndex = 0;
+    // Matches a complete top-level block — table, div, p, or self-closing br/img
+    // Uses[\s\S] so it crosses newlines inside the element
+    var blockRe = /([\s\S]*?(?:<\/(?:table|div|p|tr|td)>|<(?:br|img)[^>]*\/?>))/gi;
     var match;
+    var lastIndex = 0;
 
-    while ((match = pattern.exec(html)) !== null) {
-        var segment = html.slice(lastIndex, match.index + match[0].length);
-        var testSize = new Blob([current + segment]).size;
+    while ((match = blockRe.exec(html)) !== null) {
+        var segment = match[0];
+        var candidate = current + segment;
 
-        if (testSize > maxBytes && current !== "") {
+        if (new Blob([candidate]).size > maxBytes && current !== "") {
+            // current chunk is full — flush it
             chunks.push(current);
             current = segment;
         } else {
-            current += segment;
+            current = candidate;
         }
-        lastIndex = match.index + match[0].length;
+
+        lastIndex = blockRe.lastIndex;
     }
 
-    // Remainder after last matched block
+    // Anything after the last matched block boundary
     if (lastIndex < html.length) {
         current += html.slice(lastIndex);
     }
     if (current) chunks.push(current);
 
-    // Fallback: if regex matched nothing, hard-split by byte boundary
-    if (chunks.length === 0) {
-        var i = 0;
-        while (i < html.length) {
-            chunks.push(html.slice(i, i + (maxKB * 1024)));
-            i += maxKB * 1024;
-        }
+    // Fallback — regex matched nothing (flat text / no block tags)
+    if (chunks.length === 0 && html.length > 0) {
+        chunks.push(html);
     }
 
     return chunks;
 }
 
 /**
- * Iterates chunks one by one using setAsync (accumulates body per iteration).
- * Pure callback — no async/await, safe in JSRuntime.
- *
- * @param {object}   item        - Office mailbox item
- * @param {string}   baseBody    - Existing stripped body (prefix for all chunks)
- * @param {string[]} chunks      - Signature HTML chunks to append sequentially
- * @param {number}   index       - Current chunk index (start with 0)
- * @param {string}   accumulated - Signature HTML built so far (start with "")
- * @param {function} onDone      - onDone(success: boolean)
+ * Clears the body with setAsync to reset the cursor to position 0.
+ * This is the ONLY reliable way to guarantee cursor position before
+ * the first setSelectedDataAsync call.
  */
-function _insertChunksSequentially(item, baseBody, chunks, index, accumulated, onDone) {
-    if (index >= chunks.length) {
-        // All chunks written — done
-        _diag.info("_insertChunksSequentially: all " + chunks.length + " chunks written");
-        onDone(true);
+function _resetBodyForChunking(item, baseBody, cb) {
+    if (typeof item.body.setAsync !== "function") {
+        cb(new Error("setAsync unavailable — cannot reset cursor"));
         return;
     }
 
-    accumulated = accumulated + chunks[index];
-
-    var MARKER_ATTR = 'data-cardbyte-sig="1"';
-    var candidateBody = baseBody + '<div ' + MARKER_ATTR + '>' + accumulated + '</div>';
-
-    _diag.info(
-        "_insertChunksSequentially: writing chunk " + (index + 1) +
-        "/" + chunks.length +
-        " | candidate size=" + (new Blob([candidateBody]).size / 1024).toFixed(1) + "KB"
-    );
+    _diag.info("_resetBodyForChunking: writing base body (" +
+        (new Blob([baseBody]).size / 1024).toFixed(1) + "KB) to reset cursor");
 
     item.body.setAsync(
-        candidateBody,
+        baseBody,
         { coercionType: Office.CoercionType.Html },
         function (result) {
             if (result.status !== Office.AsyncResultStatus.Succeeded) {
-                _diag.error(
-                    "_insertChunksSequentially: setAsync failed on chunk " +
-                    (index + 1) + " — " + JSON.stringify(result.error)
-                );
-                onDone(false);
-                return;
+                cb(result.error);
+            } else {
+                _diag.info("_resetBodyForChunking: base body written, cursor at end of base");
+                cb(null);
             }
-
-            _diag.info("Chunk " + (index + 1) + " written OK");
-
-            // Small breathing room for Outlook's DOM between chunks
-            setTimeout(function () {
-                _insertChunksSequentially(
-                    item,
-                    baseBody,
-                    chunks,
-                    index + 1,
-                    accumulated,
-                    onDone
-                );
-            }, 80);
         }
     );
 }
 
 /**
- * Writes a signature HTML block into the compose body.
- * Tries setSignatureAsync (PATH A) for small sigs, chunked setAsync
- * (PATH B) for large ones.
+ * Inserts one chunk at the current cursor position via setSelectedDataAsync,
+ * then recurses to the next chunk.
  *
- * Drop-in replacement for your existing writeSignature().
- * Pure callbacks — no async/await — JSRuntime safe.
+ * Pure callbacks — JSRuntime safe, no async/await.
+ */
+function _insertChunksViaSelectedData(item, chunks, index, onDone) {
+    if (index >= chunks.length) {
+        _diag.info("_insertChunksViaSelectedData: all " + chunks.length + " chunk(s) inserted");
+        onDone(true);
+        return;
+    }
+
+    var chunk = chunks[index];
+    var chunkSizeKB = (new Blob([chunk]).size / 1024).toFixed(1);
+
+    _diag.info(
+        "_insertChunksViaSelectedData: inserting chunk " +
+        (index + 1) + "/" + chunks.length +
+        " | size=" + chunkSizeKB + "KB"
+    );
+
+    if (typeof item.body.setSelectedDataAsync !== "function") {
+        _diag.error("setSelectedDataAsync unavailable");
+        onDone(false);
+        return;
+    }
+
+    item.body.setSelectedDataAsync(
+        chunk,
+        { coercionType: Office.CoercionType.Html },
+        function (result) {
+            if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                _diag.error(
+                    "setSelectedDataAsync failed on chunk " + (index + 1) +
+                    ": " + JSON.stringify(result.error)
+                );
+                onDone(false);
+                return;
+            }
+
+            _diag.info("Chunk " + (index + 1) + " inserted OK");
+
+            // Breathing room for Outlook's DOM between inserts
+            // Without this, the cursor may not have advanced before
+            // the next setSelectedDataAsync fires
+            setTimeout(function () {
+                _insertChunksViaSelectedData(item, chunks, index + 1, onDone);
+            }, 100);
+        }
+    );
+}
+
+/**
+ * Full write path using setSelectedDataAsync for chunked insertion.
  *
- * @param {object}   item   - Office mailbox item
- * @param {string}   html   - Signature HTML (pre-wrapped by _wrapSignature)
- * @param {function} onDone - onDone(success: boolean)
+ * Flow:
+ *   1. PATH A  — small sig + setSignatureAsync available → single API call
+ *   2. PATH B  — large sig OR no setSignatureAsync:
+ *        a. Clear native sig slot (if API available)
+ *        b. Read + strip existing body
+ *        c. Write stripped body via setAsync  ← resets cursor to end of base
+ *        d. Insert signature chunks one by one via setSelectedDataAsync
+ *        e. Verify marker presence
+ *
+ * Drop-in replacement. Pure callbacks. JSRuntime safe.
  */
 function writeSignature(item, html, onDone) {
 
     var MARKER_ATTR = 'data-cardbyte-sig="1"';
     var htmlSizeKB = new Blob([html]).size / 1024;
 
-    // ── Image diagnostics (preserved from your original) ─────────────────────
+    // ── Diagnostics (preserved from your original) ────────────────────────────
     var imgs = html.match(/<img\b[^>]*src=["']([^"']+)["']/gi) || [];
     _diag.info("Image count=" + imgs.length);
     _diag.info("Base64 image count=" + (html.match(/data:image\//gi) || []).length);
-
     _diag.info("==================================================");
     _diag.info("writeSignature START");
     _diag.info("==================================================");
     _diag.info("Signature size: " + htmlSizeKB.toFixed(1) + "KB");
     _diag.info("Raw html length: " + html.length);
 
-    // ── Helpers (callback style, matching your codebase) ─────────────────────
+    // ── Shared helpers ────────────────────────────────────────────────────────
 
-    function setSignature(content, cb) {
+    function setSignatureSlot(content, cb) {
         if (typeof item.body.setSignatureAsync !== "function") {
             cb({ status: "failed", error: { message: "setSignatureAsync unavailable" } });
             return;
@@ -7684,24 +7347,23 @@ function writeSignature(item, html, onDone) {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // PATH A — small signature + API available → single setSignatureAsync call
+    // PATH A — small sig + setSignatureAsync → single call, no chunking needed
     // ─────────────────────────────────────────────────────────────────────────
     if (
         typeof item.body.setSignatureAsync === "function" &&
         htmlSizeKB < 100
     ) {
-        _diag.info("PATH A selected -> setSignatureAsync");
+        _diag.info("PATH A -> setSignatureAsync (single call)");
 
         var wrappedA = '<div ' + MARKER_ATTR + '>' + html + '</div>';
 
-        setSignature(wrappedA, function (result) {
+        setSignatureSlot(wrappedA, function (result) {
             if (result.status !== Office.AsyncResultStatus.Succeeded) {
-                _diag.error("PATH A setSignatureAsync failed: " + JSON.stringify(result.error));
+                _diag.error("PATH A failed: " + JSON.stringify(result.error));
                 onDone(false);
                 return;
             }
-
-            _diag.info("PATH A: setSignatureAsync succeeded");
+            _diag.info("PATH A succeeded");
             _diag.info("writeSignature END");
             onDone(true);
         });
@@ -7710,52 +7372,55 @@ function writeSignature(item, html, onDone) {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // PATH B — large signature OR no setSignatureAsync → chunked setAsync
+    // PATH B — large sig OR no setSignatureAsync → chunked setSelectedDataAsync
     // ─────────────────────────────────────────────────────────────────────────
     _diag.info(
-        "PATH B selected -> " +
-        (htmlSizeKB >= 100 ? "large signature (" + htmlSizeKB.toFixed(1) + "KB)" : "no setSignatureAsync") +
-        " -> chunked setAsync"
+        "PATH B -> " +
+        (htmlSizeKB >= 100
+            ? "large sig (" + htmlSizeKB.toFixed(1) + "KB)"
+            : "no setSignatureAsync") +
+        " -> chunked setSelectedDataAsync"
     );
 
-    // Step 1: Clear native signature slot to prevent Outlook re-injecting it
-    function _step_clearSlot(next) {
+    // ── Step 1: Clear native sig slot ────────────────────────────────────────
+    function step_clearSlot(next) {
         if (typeof item.body.setSignatureAsync !== "function") {
-            _diag.info("No setSignatureAsync — skipping slot clear");
+            _diag.info("step_clearSlot: API unavailable — skipping");
             next();
             return;
         }
-        _diag.info("Clearing Outlook signature slot");
-        setSignature("", function (r) {
+        _diag.info("step_clearSlot: clearing slot");
+        setSignatureSlot("", function (r) {
             if (r.status !== Office.AsyncResultStatus.Succeeded) {
-                _diag.warn("Slot clear failed (non-fatal): " + JSON.stringify(r.error));
+                _diag.warn("step_clearSlot: failed (non-fatal): " + JSON.stringify(r.error));
             } else {
-                _diag.info("Signature slot cleared");
+                _diag.info("step_clearSlot: cleared");
             }
             next();
         });
     }
 
-    // Step 2: Read existing body
-    function _step_readBody(next) {
-        _diag.info("Reading existing compose body");
+    // ── Step 2: Read existing body ────────────────────────────────────────────
+    function step_readBody(next) {
+        _diag.info("step_readBody: reading body");
         getBody(function (body, err) {
             if (err) {
-                _diag.error("getBody failed: " + JSON.stringify(err));
+                _diag.error("step_readBody: " + JSON.stringify(err));
                 onDone(false);
                 return;
             }
-            _diag.info("Existing body length=" + body.length);
-            _diag.info("Contains marker=" + body.includes(MARKER_ATTR));
+            _diag.info("step_readBody: length=" + body.length +
+                " | hasMarker=" + body.includes(MARKER_ATTR));
             next(body);
         });
     }
 
-    // Step 3: Dedup check → strip → split → insert chunks
-    function _step_insertChunks(existingBody) {
+    // ── Step 3: Dedup → strip → split → reset cursor → insert chunks ──────────
+    function step_insertChunks(existingBody) {
+
         // Duplicate guard
         if (existingBody.includes(MARKER_ATTR)) {
-            _diag.info("Signature already present — skipping");
+            _diag.info("step_insertChunks: marker already present — skipping");
             onDone(true);
             return;
         }
@@ -7764,58 +7429,63 @@ function writeSignature(item, html, onDone) {
             ? stripNativeOutlookSignature(existingBody)
             : existingBody;
 
-        _diag.info("Stripped body length=" + strippedBody.length);
-        _diag.info("Characters removed=" + (existingBody.length - strippedBody.length));
+        _diag.info("step_insertChunks: stripped length=" + strippedBody.length);
 
-        // Split signature into safe chunks
+        // Wrap the full signature then split the WRAPPED html into chunks
+        // so the marker div always opens in chunk 1 and closes in the last chunk
+        var openTag = '<div ' + MARKER_ATTR + '>';
+        var closeTag = '</div>';
+
         var chunks = splitHtmlAtBlockBoundaries(html, CHUNK_SIZE_KB);
 
-        _diag.info(
-            "Signature split into " + chunks.length + " chunk(s)" +
-            " (max " + CHUNK_SIZE_KB + "KB each)"
-        );
+        // Prepend the opening marker tag onto the first chunk
+        // and close it on the last chunk so the full wrapped div
+        // is intact once all chunks are inserted
+        chunks[0] = openTag + chunks[0];
+        chunks[chunks.length - 1] = chunks[chunks.length - 1] + closeTag;
 
+        _diag.info("step_insertChunks: " + chunks.length + " chunk(s)");
         chunks.forEach(function (c, i) {
-            _diag.info("  Chunk " + (i + 1) + ": " + (new Blob([c]).size / 1024).toFixed(1) + "KB");
+            _diag.info("  chunk " + (i + 1) + ": " + (new Blob([c]).size / 1024).toFixed(1) + "KB");
         });
 
-        // Kick off sequential chunk insertion
-        _insertChunksSequentially(
-            item,
-            strippedBody,
-            chunks,
-            0,    // start at index 0
-            "",   // nothing accumulated yet
-            function (success) {
+        // Reset cursor to end of strippedBody via setAsync, THEN chunk-insert
+        _resetBodyForChunking(item, strippedBody, function (err) {
+            if (err) {
+                _diag.error("step_insertChunks: resetBody failed: " + JSON.stringify(err));
+                onDone(false);
+                return;
+            }
+
+            _insertChunksViaSelectedData(item, chunks, 0, function (success) {
                 if (!success) {
-                    _diag.error("Chunked insertion failed");
+                    _diag.error("step_insertChunks: chunked insert failed");
                     onDone(false);
                     return;
                 }
 
-                // Verification read
-                _diag.info("Verifying body after chunked insert");
+                // Verify
                 getBody(function (bodyAfter, err) {
                     if (err) {
                         _diag.warn("Verification read failed: " + JSON.stringify(err));
                         onDone(true); // write succeeded, verify is best-effort
                         return;
                     }
-                    _diag.info("Body after insert length=" + bodyAfter.length);
-                    _diag.info("Marker found=" + bodyAfter.includes(MARKER_ATTR));
+                    _diag.info("Body after insert: length=" + bodyAfter.length +
+                        " | markerFound=" + bodyAfter.includes(MARKER_ATTR));
                     _diag.info("==================================================");
                     _diag.info("writeSignature END SUCCESS");
                     _diag.info("==================================================");
                     onDone(true);
                 });
-            }
-        );
+            });
+        });
     }
 
-    // ── Chain the steps ───────────────────────────────────────────────────────
-    _step_clearSlot(function () {
-        _step_readBody(function (existingBody) {
-            _step_insertChunks(existingBody);
+    // ── Chain ─────────────────────────────────────────────────────────────────
+    step_clearSlot(function () {
+        step_readBody(function (existingBody) {
+            step_insertChunks(existingBody);
         });
     });
 }
