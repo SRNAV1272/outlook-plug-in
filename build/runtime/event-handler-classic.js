@@ -7234,10 +7234,12 @@ function _addCidAttachment(item, att, cb) {
         },
         function (result) {
             if (result.status === Office.AsyncResultStatus.Succeeded) {
-                // result.value is the attachment ID assigned by Outlook
                 var assignedId = result.value;
-                _diag.info("CID attachment added OK: " + att.cid + " | assignedId=" + assignedId);
-                cb(true, assignedId);
+                _diag.info("CID attachment added OK: " + att.cid +
+                    " | assignedId=" + assignedId +
+                    " | usingName=" + att.name);
+                // Outlook resolves inline CIDs by filename, not by assignedId integer
+                cb(true, att.name);
             } else {
                 _diag.error(
                     "CID attachment failed: " + att.cid +
