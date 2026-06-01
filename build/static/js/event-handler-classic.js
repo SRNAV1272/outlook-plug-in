@@ -6726,7 +6726,7 @@ var CONFIG = {
 
     // Set to false for production builds. When true, every applySignature
     // invocation prepends a yellow diagnostic block to the compose body.
-    DIAG_ENABLED: true
+    DIAG_ENABLED: false
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
