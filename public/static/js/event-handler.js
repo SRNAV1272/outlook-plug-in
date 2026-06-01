@@ -291,8 +291,8 @@ async function bodySetSignatureAsync(item, html) {
     });
 
     const setBody = (content) => new Promise((resolve, reject) => {
-        if (typeof item.body.prependAsync !== "function") { reject(new Error("prependAsync not available")); return; }
-        item.body.prependAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
+        if (typeof item.body.setAsync !== "function") { reject(new Error("setAsync not available")); return; }
+        item.body.setAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
             r.status === "succeeded" ? resolve() : reject(r.error);
         });
     });
@@ -416,24 +416,28 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    // compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
-
     let finalSignature = `
-        <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
-        <tr>
-            <td style="padding-top:40px; padding-bottom:40px;">
-            ${fetched}
-            </td>
-        </tr>
+        <p>&nbsp;</p>
+        <p>&nbsp;</p>
+
+        <table id="cardbyte-signature"
+            role="presentation"
+            cellpadding="0"
+            cellspacing="0"
+            border="0">
+            <tr>
+                <td style="padding-top:40px;padding-bottom:40px;">
+                    ${fetched}
+                </td>
+            </tr>
         </table>
-        `;
+    `;
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
         finalSignature, item?.body
     );
 
-    // await bodySetSignatureAsync(item, finalSignature);
     try {
         await bodySetSignatureAsync(item, finalSignature);
     } catch (err) {
