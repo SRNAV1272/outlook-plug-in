@@ -137,6 +137,15 @@ fs.writeFileSync(
   JSON.stringify(runtimeVersion, null, 2)
 );
 
+// ── Write classic-redirect.conf for nginx include ────────
+// nginx's event-handler-classic.js location block includes this file.
+// On each deploy it is rewritten to point to the latest versioned file,
+// so Classic Outlook always gets a fresh JS even if it ignores cache headers.
+fs.writeFileSync(
+  path.resolve(RUNTIME_DIR, 'classic-redirect.conf'),
+  `return 302 /runtime/event-handler-classic.${version}.js;\n`
+);
+
 // ── Write .well-known/microsoft-officeaddins-allowed.json ──
 const WELL_KNOWN_DIR = path.resolve(BUILD_DIR, '.well-known');
 fs.mkdirSync(WELL_KNOWN_DIR, { recursive: true });
@@ -153,4 +162,5 @@ for (const f of processed) {
   console.log(`  ${f.label} fallback:   runtime/${f.name}.js`);
 }
 console.log(`  Manifest:   runtime/version.json`);
+console.log(`  Redirect:   runtime/classic-redirect.conf → event-handler-classic.${version}.js`);
 console.log(`  Timestamp:  ${runtimeVersion.timestamp}`);
