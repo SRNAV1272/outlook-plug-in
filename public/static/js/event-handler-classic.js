@@ -7241,12 +7241,12 @@ function writeSignature(item, html, onDone) {
 
     function setBody(content) {
         return new Promise((resolve, reject) => {
-            if (typeof item.body.setSelectedDataAsync !== "function") {
-                reject(new Error("setSelectedDataAsync unavailable"));
+            if (typeof item.body.setAsync !== "function") {
+                reject(new Error("setAsync unavailable"));
                 return;
             }
 
-            item.body.setSelectedDataAsync(
+            item.body.setAsync(
                 content,
                 { coercionType: Office.CoercionType.Html },
                 (result) => {
