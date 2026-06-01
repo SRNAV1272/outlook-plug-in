@@ -309,13 +309,80 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
-function bodySetSignatureAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
-        item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") resolve(); else reject(r.error);
+async function bodySetSignatureAsync(item, html) {
+    const MARKER_ATTR = 'data-cardbyte-sig="1"';
+    const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
+    const htmlSizeKB = new Blob([html]).size / 1024;
+    const hasSetSig = typeof item.body.setSignatureAsync === "function";
+
+    const setSignature = (content) => new Promise((resolve, reject) => {
+        item.body.setSignatureAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
+            r.status === "succeeded" ? resolve() : reject(r.error);
         });
     });
+
+    const getBody = () => new Promise((resolve, reject) => {
+        if (typeof item.body.getAsync !== "function") { reject(new Error("getAsync not available")); return; }
+        item.body.getAsync(Office.CoercionType.Html, (r) => {
+            r.status === "succeeded" ? resolve(r.value || "") : reject(r.error);
+        });
+    });
+
+    const setBody = (content) => new Promise((resolve, reject) => {
+        if (typeof item.body.setAsync !== "function") { reject(new Error("setAsync not available")); return; }
+        item.body.setAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
+            r.status === "succeeded" ? resolve() : reject(r.error);
+        });
+    });
+
+    console.log(`[CardByte] Signature size: ${htmlSizeKB.toFixed(1)}KB | setSignatureAsync: ${hasSetSig}`);
+
+    // ── PATH A: Small signature + API available ───────────────────────────────
+    // setSignatureAsync is reliable only under ~100KB — use it directly
+    if (hasSetSig && htmlSizeKB < 100) {
+        console.log("[CardByte] PATH A: direct setSignatureAsync");
+        await setSignature(wrappedHtml);
+        return;
+    }
+
+    // ── PATH B: Large signature OR no setSignatureAsync ───────────────────────
+    // Large HTML silently fails/truncates in setSignatureAsync regardless of
+    // API availability — must go through body directly via getAsync → setAsync.
+    // Also the only path for classic Windows / mobile where API doesn't exist.
+    console.log(`[CardByte] PATH B: ${htmlSizeKB >= 100 ? "large signature" : "no setSignatureAsync"} → getAsync → strip → setAsync`);
+
+    // Clear the native signature slot first if API is available —
+    // prevents Outlook from re-injecting its default sig into the body
+    // after we write via setAsync
+    if (hasSetSig) {
+        try { await setSignature(""); }
+        catch (e) { console.warn("[CardByte] Clear slot failed (non-fatal):", e); }
+    }
+
+    const existingBody = await getBody();
+
+    // Dedupe guard — data-attribute survives OWA/Mac sanitization unlike HTML comments
+    if (existingBody.includes(MARKER_ATTR)) {
+        console.log("[CardByte] Signature already present — skipping");
+        return;
+    }
+
+    // Strip known native Outlook sig wrappers before appending ours
+    const stripped = existingBody
+        .replace(/<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "")
+        .replace(/<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "")
+        .replace(/<div[^>]*class=["'][^"']*signature[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, "");
+
+    const candidate = stripped + wrappedHtml;
+
+    // Size guard for mobile
+    const maxSize = getMaxHtmlSize();
+    if (candidate.length > maxSize) {
+        console.warn(`[CardByte] Body too large for ${detectPlatform()} (${(candidate.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB) — skipping`);
+        return;
+    }
+
+    await setBody(candidate);
 }
 
 function moveCursorToTop(item) {
