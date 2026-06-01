@@ -7900,6 +7900,40 @@ function applySignature(event) {
  * triggers the "add-in is unavailable" dialog.
  */
 
+// function onSendHandler(event) {
+//     var guarded = makeGuardedEvent(
+//         event || { completed: function () { } },
+//         CONFIG.SEND_HANDLER_TIMEOUT_MS
+//     );
+//     _diag.info("=== onSendHandler START ===");
+
+//     var item = _safeGetItem();
+//     if (!item) {
+//         _diag.warn("onSendHandler: no item — allowing send");
+//         guarded.completed({ allowEvent: true });
+//         return;
+//     }
+
+//     // ✅ cacheGet is async — must use callback
+//     cacheGet(function (cachedHtml) {
+//         if (!cachedHtml) {
+//             _diag.info("onSendHandler: no cached signature — passing through");
+//             writeDiagnostics(item, function () {
+//                 guarded.completed({ allowEvent: true });
+//             });
+//             return;
+//         }
+
+//         _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
+//         writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
+//             if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+//             writeDiagnostics(item, function () {
+//                 guarded.completed({ allowEvent: true });
+//             });
+//         });
+//     });
+// }
+
 function onSendHandler(event) {
     var guarded = makeGuardedEvent(
         event || { completed: function () { } },
@@ -7907,31 +7941,9 @@ function onSendHandler(event) {
     );
     _diag.info("=== onSendHandler START ===");
 
-    var item = _safeGetItem();
-    if (!item) {
-        _diag.warn("onSendHandler: no item — allowing send");
-        guarded.completed({ allowEvent: true });
-        return;
-    }
-
-    // ✅ cacheGet is async — must use callback
-    cacheGet(function (cachedHtml) {
-        if (!cachedHtml) {
-            _diag.info("onSendHandler: no cached signature — passing through");
-            writeDiagnostics(item, function () {
-                guarded.completed({ allowEvent: true });
-            });
-            return;
-        }
-
-        _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
-        writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
-            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-            writeDiagnostics(item, function () {
-                guarded.completed({ allowEvent: true });
-            });
-        });
-    });
+    // Signature is already in the body from applySignature.
+    // Do NOT re-write here — it risks blocking send within the 5s budget.
+    guarded.completed({ allowEvent: true });
 }
 
 function onFromChangedHandler(event) {
