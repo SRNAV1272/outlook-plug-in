@@ -509,9 +509,9 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     );
 
     // await bodySetSignatureAsync(item, finalSignature);
-    // await moveCursorToTop(item);
     try {
         await bodySetSignatureAsync(item, finalSignature);
+        await moveCursorToTop(item);
     } catch (err) {
         const isOutOfRange =
             err?.code === 5009 ||
