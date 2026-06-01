@@ -10,6 +10,79 @@ const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// ─── Size constants ───────────────────────────────────────────────────────────
+// setSignatureAsync hard limit: 30,000 characters (~29.3 KB)
+// We reserve headroom for the wrapper table + HTML overhead
+const SIGNATURE_CHAR_LIMIT = 100 * 1024;
+const HTML_OVERHEAD_ESTIMATE_KB = 5; // wrapper table, inline styles, etc.
+const OVERHEAD_CHARS = HTML_OVERHEAD_ESTIMATE_KB * 1024;
+const PROFILE_PHOTO_CHAR_BUDGET = SIGNATURE_CHAR_LIMIT - OVERHEAD_CHARS; // ~24 KB chars
+
+// ─── Size diagnostics ────────────────────────────────────────────────────────
+
+function extractProfilePhotoSrc(html) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const img = doc.querySelector('img[alt="Profile Photo"]');
+    return img ? img.getAttribute("src") : null;
+}
+
+/**
+ * Analyses the signature HTML and returns a size breakdown.
+ * All sizes in KB (chars / 1024, since base64 is single-byte ASCII).
+ *
+ *  totalKb          — full HTML string size
+ *  photoKb          — profile photo src size (base64 data URL)
+ *  htmlWithoutPhoto — HTML size after removing the photo src
+ *  budgetKb         — Outlook's limit in KB (≈ 29.3)
+ *  photoAllowedKb   — how many KB the photo is allowed to occupy
+ *  photoOverBy      — how many KB the photo exceeds its budget (0 = fine)
+ *  willFail         — true if the total exceeds the Outlook limit
+ */
+function analyseSignatureSize(html) {
+    if (!html) return null;
+
+    const totalChars = html.length;
+    const totalKb = totalChars / 1024;
+
+    const photoSrc = extractProfilePhotoSrc(html);
+    const photoChars = photoSrc ? photoSrc.length : 0;
+    const photoKb = photoChars / 1024;
+
+    const htmlWithoutPhotoChars = totalChars - photoChars;
+    const htmlWithoutPhotoKb = htmlWithoutPhotoChars / 1024;
+
+    const budgetKb = SIGNATURE_CHAR_LIMIT / 1024;                        // ≈ 29.3 KB
+    const photoAllowedKb = (SIGNATURE_CHAR_LIMIT - htmlWithoutPhotoChars) / 1024;
+    const photoOverByKb = Math.max(0, photoKb - photoAllowedKb);
+
+    return {
+        totalKb: +totalKb.toFixed(1),
+        photoKb: +photoKb.toFixed(1),
+        htmlWithoutPhotoKb: +htmlWithoutPhotoKb.toFixed(1),
+        budgetKb: +budgetKb.toFixed(1),
+        photoAllowedKb: +Math.max(0, photoAllowedKb).toFixed(1),
+        photoOverByKb: +photoOverByKb.toFixed(1),
+        willFail: totalChars > SIGNATURE_CHAR_LIMIT,
+    };
+}
+
+/**
+ * Checks if the error thrown by setSignatureAsync is the Outlook size overflow.
+ * Works for both OWA (string match) and Classic Outlook (numeric code).
+ */
+function isSizeOverflowError(err) {
+    if (!err) return false;
+    const msg = (err.message || err.toString()).toLowerCase();
+    return (
+        msg.includes("argumentoutofrange") ||
+        msg.includes("out of the range") ||
+        msg.includes("dataexceedsmaximumsize") ||
+        msg.includes("data parameter") ||
+        err.code === 9001   // Office.ErrorCodes.DataExceedsMaximumSize
+    );
+}
+
 // ─── Notification keys ────────────────────────────────────────────────────────
 const NOTIFY_KEYS = {
     API_FAILURE: "cb_api_failure",
@@ -429,12 +502,83 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
-function bodySetSignatureAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
-        item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") resolve(); else reject(r.error);
+// ─── Size error notification ──────────────────────────────────────────────────
+
+function _notifySizeError(sizes) {
+    const allowed = sizes?.photoAllowedKb ?? 0;
+    const actual = sizes?.photoKb ?? 0;
+    const overBy = sizes?.photoOverByKb ?? 0;
+
+    const nativeMsg =
+        `CardByte: Signature too large for Outlook. ` +
+        `Profile photo is ${actual} KB — limit is ${allowed} KB (${overBy} KB over).`;
+
+    // Native Office infobar (always fires)
+    showError(NOTIFY_KEYS.API_FAILURE, nativeMsg);
+
+    // Taskpane styled banner (fires if taskpane is open)
+    if (typeof window.__cbSetNotification === "function") {
+        window.__cbSetNotification({
+            type: "error",
+            title: "Signature too large for Outlook",
+            sub:
+                `Profile photo: ${actual} KB  ·  Allowed: ${allowed} KB  ·  Over by: ${overBy} KB. ` +
+                `Upload a smaller profile photo to fix this.`,
+            dismissible: true,
         });
+    }
+
+    console.error(
+        `[CardByte] SIZE OVERFLOW — ` +
+        `Total HTML: ${sizes?.totalKb} KB | Photo: ${actual} KB | ` +
+        `Budget for photo: ${allowed} KB | Over by: ${overBy} KB | ` +
+        `Outlook limit: ${sizes?.budgetKb} KB`
+    );
+}
+
+// Replace your existing bodySetSignatureAsync with this:
+async function bodySetSignatureAsync(item, html) {
+    // Pre-flight size check — diagnose BEFORE attempting the call
+    const sizes = analyseSignatureSize(html);
+    if (sizes) {
+        console.log(
+            `[CardByte] Size check — total: ${sizes.totalKb} KB | ` +
+            `photo: ${sizes.photoKb} KB | html (no photo): ${sizes.htmlWithoutPhotoKb} KB | ` +
+            `limit: ${sizes.budgetKb} KB | photo budget: ${sizes.photoAllowedKb} KB`
+        );
+
+        if (sizes.willFail) {
+            console.warn(
+                `[CardByte] ⚠ Signature will exceed Outlook limit. ` +
+                `Photo is ${sizes.photoOverByKb} KB over its ${sizes.photoAllowedKb} KB budget.`
+            );
+            // Notify before the call so the user sees it immediately
+            _notifySizeError(sizes);
+        }
+    }
+
+    return new Promise((resolve, reject) => {
+        if (typeof item.body.setSignatureAsync !== "function") {
+            reject(new Error("setSignatureAsync not available"));
+            return;
+        }
+        item.body.setSignatureAsync(
+            html,
+            { coercionType: Office.CoercionType.Html },
+            (r) => {
+                if (r.status === "succeeded") {
+                    resolve();
+                } else {
+                    // Post-hoc: if it failed AND it's a size error, give the
+                    // diagnostic banner even if the pre-flight somehow missed it
+                    if (isSizeOverflowError(r.error)) {
+                        const sizes2 = analyseSignatureSize(html);
+                        _notifySizeError(sizes2);
+                    }
+                    reject(r.error);
+                }
+            }
+        );
     });
 }
 
