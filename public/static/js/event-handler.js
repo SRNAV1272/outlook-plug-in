@@ -380,7 +380,6 @@ async function bodySetSignatureAsync(item, html) {
 
     const existingBody = await getBody();
 
-    console.log("[CardByte] Existing body length:", existingBody.length, "characters", existingBody)
 
     // Dedupe guard — data-attribute survives OWA/Mac sanitization unlike HTML comments
     if (existingBody.includes(MARKER_ATTR)) {
@@ -390,6 +389,8 @@ async function bodySetSignatureAsync(item, html) {
 
     // Strip known native Outlook sig wrappers before appending ours
     const stripped = stripNativeOutlookSignature(existingBody);
+
+    console.log("[CardByte] Existing body length:", existingBody.length, "characters", existingBody, stripped)
 
     const candidate = stripped + wrappedHtml;
 
