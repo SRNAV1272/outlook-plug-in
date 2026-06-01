@@ -485,6 +485,7 @@ function buildSizeErrorSignatureHtml({ totalHtmlKb, profilePicKb, htmlWithoutIma
     const limitNote = allowedProfilePicKb < 0 ? " ⛔ HTML alone exceeds 100 KB!" : "";
 
     return `
+    <br/>
         <table cellpadding="0" cellspacing="0" border="0" width="480"
                style="font-family:Arial,sans-serif; font-size:12px;
                       border:2px solid #e6a817; border-radius:6px;
@@ -535,6 +536,7 @@ function buildSizeErrorSignatureHtml({ totalHtmlKb, profilePicKb, htmlWithoutIma
                 </td>
             </tr>
         </table>
+        <br/>
     `;
 }
 
