@@ -310,20 +310,20 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
 }
 
 function stripNativeOutlookSignature(html) {
-    // OWA / New Outlook: signature lives inside a table wrapped in elementToProof
-    // Pattern: <table id="x_table_0" ...> or <table id="table_0" ...>
-    html = html.replace(/<table[^>]*id=["'][^"']*table_\d+[^"']*["'][^>]*>[\s\S]*?<\/table>/gi, "");
-
-    // OWA: trailing elementToProof <br> blocks (padding around signature)
-    // These appear as <div class="elementToProof"><br></div> after the sig table
-    html = html.replace(/<div[^>]*class=["'][^"']*elementToProof[^"']*["'][^>]*>\s*<br\s*\/?>\s*<\/div>/gi, "");
-
     // Classic Windows: <div id="Signature"> or <div id="appendonsend">
     html = html.replace(/<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
     html = html.replace(/<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "");
 
-    // Mac: <div class="signature ...">
-    html = html.replace(/<div[^>]*class=["'][^"']*signature[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    // CardByte signature: <table id="cardbyte-signature"> or <table id="x_cardbyte-signature">
+    // Using DOMParser to handle nested tables correctly
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+
+    // Matches both "cardbyte-signature" and OWA-prefixed "x_cardbyte-signature", "x_x_cardbyte-signature", etc.
+    const sigTables = doc.querySelectorAll('table[id="cardbyte-signature"], table[id$="_cardbyte-signature"]');
+    sigTables.forEach(table => table.remove());
+
+    html = doc.body.innerHTML;
 
     return html;
 }
