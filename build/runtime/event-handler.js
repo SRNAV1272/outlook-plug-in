@@ -419,8 +419,111 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         finalSignature, item?.body
     );
 
-    await bodySetSignatureAsync(item, finalSignature);
+    // await bodySetSignatureAsync(item, finalSignature);
     // await moveCursorToTop(item);
+    try {
+        await bodySetSignatureAsync(item, finalSignature);
+    } catch (err) {
+        // ─── Handle ArgumentOutOfRangeException ───────────────────────────────
+        const isOutOfRange =
+            err?.code === 5009 ||
+            (typeof err?.message === "string" &&
+                err.message.toLowerCase().includes("argumentoutofrange"));
+
+        if (isOutOfRange) {
+            console.warn("[CardByte] ArgumentOutOfRangeException — HTML too large. Diagnosing size...");
+
+            // 1. Extract profile photo src
+            const profileSrc = extractProfilePhotoSrc(fetched);
+            const totalHtmlBytes = new TextEncoder().encode(finalSignature).length;
+
+            let profileSrcBytes = 0;
+            if (profileSrc) {
+                profileSrcBytes = new TextEncoder().encode(profileSrc).length;
+                console.log(`[CardByte] Profile photo src size : ${(profileSrcBytes / 1024).toFixed(2)} KB`);
+            } else {
+                console.log("[CardByte] No profile photo found in signature HTML.");
+            }
+
+            // 2. HTML size minus profile photo src
+            const htmlWithoutImageBytes = totalHtmlBytes - profileSrcBytes;
+            console.log(`[CardByte] Total HTML size          : ${(totalHtmlBytes / 1024).toFixed(2)} KB`);
+            console.log(`[CardByte] HTML without profile pic : ${(htmlWithoutImageBytes / 1024).toFixed(2)} KB`);
+
+            // 3. Remaining KB from the 100 KB limit after subtracting HTML-without-image
+            const LIMIT_KB = 100;
+            const htmlWithoutImageKb = htmlWithoutImageBytes / 1024;
+            const allowedProfilePicKb = LIMIT_KB - htmlWithoutImageKb;
+
+            console.warn(
+                `[CardByte] ⚠️ Profile picture size limit : ${allowedProfilePicKb.toFixed(2)} KB` +
+                ` (100 KB total − ${htmlWithoutImageKb.toFixed(2)} KB HTML without image)`
+            );
+
+            // 4. Surface to the user/developer in a visible way
+            showSizeErrorBanner({
+                totalHtmlKb: totalHtmlBytes / 1024,
+                profilePicKb: profileSrcBytes / 1024,
+                htmlWithoutImageKb,
+                allowedProfilePicKb,
+            });
+        } else {
+            throw err; // re-throw unrelated errors
+        }
+    }
+}
+
+// ─── Helper: extract profile photo src ────────────────────────────────────────
+const extractProfilePhotoSrc = (html) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const img = doc.querySelector('img[alt="Profile Photo"]');
+    return img ? img.src : null;
+};
+
+// ─── Helper: show a visible warning banner in the task pane ───────────────────
+function showSizeErrorBanner({ totalHtmlKb, profilePicKb, htmlWithoutImageKb, allowedProfilePicKb }) {
+    // Try to find or create a banner container in the task pane DOM
+    let banner = document.getElementById("cardbyte-size-error-banner");
+    if (!banner) {
+        banner = document.createElement("div");
+        banner.id = "cardbyte-size-error-banner";
+        banner.style.cssText = `
+            position: fixed; top: 0; left: 0; right: 0; z-index: 9999;
+            background: #fff3cd; border-bottom: 2px solid #e6a817;
+            color: #5a3e00; font-family: Arial, sans-serif; font-size: 12px;
+            padding: 10px 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+        `;
+        document.body.prepend(banner);
+    }
+
+    banner.innerHTML = `
+        <strong>⚠️ Signature too large (ArgumentOutOfRangeException)</strong><br/>
+        <table style="margin-top:6px; border-collapse:collapse; width:100%;">
+            <tr>
+                <td style="padding:2px 8px 2px 0;">📄 Total HTML size</td>
+                <td style="font-weight:bold;">${totalHtmlKb.toFixed(2)} KB</td>
+            </tr>
+            <tr>
+                <td style="padding:2px 8px 2px 0;">🖼️ Profile photo size</td>
+                <td style="font-weight:bold;">${profilePicKb.toFixed(2)} KB</td>
+            </tr>
+            <tr>
+                <td style="padding:2px 8px 2px 0;">📝 HTML without profile pic</td>
+                <td style="font-weight:bold;">${htmlWithoutImageKb.toFixed(2)} KB</td>
+            </tr>
+            <tr style="border-top:1px solid #e6a817;">
+                <td style="padding:4px 8px 2px 0;"><strong>✅ Max allowed profile pic size</strong></td>
+                <td style="font-weight:bold; color:${allowedProfilePicKb < 0 ? '#c0392b' : '#1a7a1a'};">
+                    ${allowedProfilePicKb.toFixed(2)} KB
+                    ${allowedProfilePicKb < 0 ? " ⛔ (HTML alone exceeds 100 KB!)" : ""}
+                </td>
+            </tr>
+        </table>
+        <div style="margin-top:6px; font-size:11px; color:#7a5800;">
+            Formula: 100 KB limit − ${htmlWithoutImageKb.toFixed(2)} KB (HTML without image) = <strong>${allowedProfilePicKb.toFixed(2)} KB</strong> left for profile picture
+        </div>
+    `;
 }
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
