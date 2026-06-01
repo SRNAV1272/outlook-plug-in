@@ -7084,7 +7084,7 @@ function cacheClear(cb) {
 
 function _wrapSignature(html) {
     return `
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+        <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
             <tr>
                 <td style="
                     padding-top:${CONFIG.WRAP_TOP_PX}px;
@@ -7104,45 +7104,236 @@ function _wrapSignature(html) {
  *
  * Calls onDone(success: boolean).
  */
-function writeSignature(item, html, onDone) {
-    function fallbackPrepend() {
-        if (typeof item.body.prependAsync !== "function") {
-            _diag.error("No write path available — neither setSignatureAsync nor prependAsync");
-            onDone(false);
-            return;
-        }
-        item.body.prependAsync(
-            html,
-            { coercionType: Office.CoercionType.Html },
-            function (result) {
-                var ok = result.status === Office.AsyncResultStatus.Succeeded;
-                if (!ok) _diag.error("prependAsync failed: " + (result.error && result.error.message));
-                onDone(ok);
-            }
-        );
-    }
+// function writeSignature(item, html, onDone) {
+//     function fallbackPrepend() {
+//         if (typeof item.body.prependAsync !== "function") {
+//             _diag.error("No write path available — neither setSignatureAsync nor prependAsync");
+//             onDone(false);
+//             return;
+//         }
+//         item.body.prependAsync(
+//             html,
+//             { coercionType: Office.CoercionType.Html },
+//             function (result) {
+//                 var ok = result.status === Office.AsyncResultStatus.Succeeded;
+//                 if (!ok) _diag.error("prependAsync failed: " + (result.error && result.error.message));
+//                 onDone(ok);
+//             }
+//         );
+//     }
 
-    if (typeof item.body.setSignatureAsync !== "function") {
-        _diag.warn("setSignatureAsync unavailable — using prependAsync");
-        fallbackPrepend();
-        return;
-    }
+//     if (typeof item.body.setSignatureAsync !== "function") {
+//         _diag.warn("setSignatureAsync unavailable — using prependAsync");
+//         fallbackPrepend();
+//         return;
+//     }
 
-    item.body.setSignatureAsync(
-        html,
-        { coercionType: Office.CoercionType.Html },
-        function (result) {
-            if (result.status === Office.AsyncResultStatus.Succeeded) {
-                _diag.info("setSignatureAsync succeeded");
-                onDone(true);
-            } else {
-                _diag.warn("setSignatureAsync failed: "
-                    + (result.error && result.error.message)
-                    + " — trying prependAsync");
-                fallbackPrepend();
-            }
-        }
+//     item.body.setSignatureAsync(
+//         html,
+//         { coercionType: Office.CoercionType.Html },
+//         function (result) {
+//             if (result.status === Office.AsyncResultStatus.Succeeded) {
+//                 _diag.info("setSignatureAsync succeeded");
+//                 onDone(true);
+//             } else {
+//                 _diag.warn("setSignatureAsync failed: "
+//                     + (result.error && result.error.message)
+//                     + " — trying prependAsync");
+//                 fallbackPrepend();
+//             }
+//         }
+//     );
+// }
+
+function stripNativeOutlookSignature(html) {
+    // ------------------------------------------------------------
+    // Outlook native signatures
+    // ------------------------------------------------------------
+
+    // <div id="Signature">...</div>
+    html = html.replace(
+        /<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi,
+        ""
     );
+
+    // <div id="appendonsend">...</div>
+    html = html.replace(
+        /<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi,
+        ""
+    );
+
+    // ------------------------------------------------------------
+    // CardByte signature tables
+    // ------------------------------------------------------------
+
+    // Exact id="cardbyte-signature"
+    html = html.replace(
+        /<table[^>]*id=["']cardbyte-signature["'][^>]*>[\s\S]*?<\/table>/gi,
+        ""
+    );
+
+    // OWA-generated ids such as:
+    // id="OWA123_cardbyte-signature"
+    // id="abc_cardbyte-signature"
+    html = html.replace(
+        /<table[^>]*id=["'][^"']*_cardbyte-signature["'][^>]*>[\s\S]*?<\/table>/gi,
+        ""
+    );
+
+    // ------------------------------------------------------------
+    // Remove trailing BRs left behind
+    // ------------------------------------------------------------
+
+    html = html.replace(/(?:\s*<br\s*\/?>\s*)+$/gi, "");
+
+    // Optional cleanup of empty wrappers
+    html = html.replace(/<div>\s*<\/div>/gi, "");
+    html = html.replace(/<p>\s*<\/p>/gi, "");
+
+    return html;
+}
+
+function writeSignature(item, html, onDone) {
+    const MARKER_ATTR = 'data-cardbyte-sig="1"';
+    const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
+    const htmlSizeKB = new Blob([html]).size / 1024;
+
+    function getBody() {
+        return new Promise((resolve, reject) => {
+            if (typeof item.body.getAsync !== "function") {
+                reject(new Error("getAsync unavailable"));
+                return;
+            }
+
+            item.body.getAsync(
+                Office.CoercionType.Html,
+                (result) => {
+                    if (result.status === Office.AsyncResultStatus.Succeeded) {
+                        resolve(result.value || "");
+                    } else {
+                        reject(result.error);
+                    }
+                }
+            );
+        });
+    }
+
+    function setSignature(content) {
+        return new Promise((resolve, reject) => {
+            if (typeof item.body.setSignatureAsync !== "function") {
+                reject(new Error("setSignatureAsync unavailable"));
+                return;
+            }
+
+            item.body.setSignatureAsync(
+                content,
+                { coercionType: Office.CoercionType.Html },
+                (result) => {
+                    if (result.status === Office.AsyncResultStatus.Succeeded) {
+                        resolve();
+                    } else {
+                        reject(result.error);
+                    }
+                }
+            );
+        });
+    }
+
+    function setBody(content) {
+        return new Promise((resolve, reject) => {
+            if (typeof item.body.setSelectedDataAsync !== "function") {
+                reject(new Error("setSelectedDataAsync unavailable"));
+                return;
+            }
+
+            item.body.setSelectedDataAsync(
+                content,
+                { coercionType: Office.CoercionType.Html },
+                (result) => {
+                    if (result.status === Office.AsyncResultStatus.Succeeded) {
+                        resolve();
+                    } else {
+                        reject(result.error);
+                    }
+                }
+            );
+        });
+    }
+
+    (async () => {
+        try {
+            _diag.info(
+                `Signature size: ${htmlSizeKB.toFixed(1)}KB`
+            );
+
+            // -----------------------------------------------------------------
+            // PATH A: Small signatures -> use setSignatureAsync
+            // -----------------------------------------------------------------
+            if (
+                typeof item.body.setSignatureAsync === "function" &&
+                htmlSizeKB < 100
+            ) {
+                _diag.info("PATH A: setSignatureAsync");
+
+                await setSignature(wrappedHtml);
+
+                onDone(true);
+                return;
+            }
+
+            // -----------------------------------------------------------------
+            // PATH B: Large signatures -> rebuild body
+            // -----------------------------------------------------------------
+            _diag.info(
+                `PATH B: ${htmlSizeKB >= 100
+                    ? "large signature"
+                    : "setSignatureAsync unavailable"
+                }`
+            );
+
+            // Clear Outlook signature slot first
+            if (typeof item.body.setSignatureAsync === "function") {
+                try {
+                    await setSignature("");
+                } catch (e) {
+                    _diag.warn(
+                        "Failed clearing signature slot: " +
+                        (e?.message || e)
+                    );
+                }
+            }
+
+            const existingBody = await getBody();
+
+            // Prevent duplicate insertion
+            if (existingBody.includes(MARKER_ATTR)) {
+                _diag.info("Signature already exists");
+                onDone(true);
+                return;
+            }
+
+            const strippedBody =
+                typeof stripNativeOutlookSignature === "function"
+                    ? stripNativeOutlookSignature(existingBody)
+                    : existingBody;
+
+            const candidateBody =
+                strippedBody + wrappedHtml;
+
+            await setBody(candidateBody);
+
+            _diag.info("Large signature inserted successfully");
+
+            onDone(true);
+        } catch (err) {
+            _diag.error(
+                "writeSignature failed: " +
+                (err?.message || JSON.stringify(err))
+            );
+
+            onDone(false);
+        }
+    })();
 }
 
 /**
