@@ -350,12 +350,26 @@ async function bodySetSignatureAsync(item, html) {
 function moveCursorToTop(item) {
     return new Promise((resolve) => {
         try {
-            if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
+            if (typeof item.body?.prependAsync !== "function") {
+                resolve();
+                return;
+            }
+
             item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+                if (typeof item.body?.setSelectedDataAsync !== "function") {
+                    resolve();
+                    return;
+                }
+
+                item.body.setSelectedDataAsync(
+                    "",
+                    { coercionType: Office.CoercionType.Text },
+                    () => resolve()
+                );
             });
-        } catch { resolve(); }
+        } catch {
+            resolve();
+        }
     });
 }
 
@@ -448,8 +462,14 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     // await bodySetSignatureAsync(item, finalSignature);
     try {
         await bodySetSignatureAsync(item, finalSignature);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        await moveCursorToTop(item);
+        setTimeout(async () => {
+            await moveCursorToTop(item);
+
+            // second attempt
+            setTimeout(async () => {
+                await moveCursorToTop(item);
+            }, 500);
+        }, 2500);
     } catch (err) {
         const isOutOfRange =
             err?.code === 5009 ||
