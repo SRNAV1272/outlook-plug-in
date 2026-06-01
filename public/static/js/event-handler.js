@@ -479,7 +479,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
                 if (result != null) {
                     fetched = result;
                     CACHED_SIGNATURE_HTML = fetched;
-                    setCachedSignature(fetched);
+                    // setCachedSignature(fetched);
                     break;
                 }
                 lastError = new Error("Server returned null");
@@ -502,7 +502,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             // Compress immediately after fetch and store compressed version
             fetched = await compressImagesInHtml(fetched);
             CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);
+            // setCachedSignature(fetched);
             Notify.clear(); // ✅ Fetch succeeded — clear the retrying bar
         } else {
             // All retries exhausted — show the right error
