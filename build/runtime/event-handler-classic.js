@@ -7502,17 +7502,18 @@ function writeSignature(item, html, onDone) {
         });
     }
 
-    // ── Step B: Write cleaned HTML into body ──────────────────────────────────
+    // ── Step B: Write body ────────────────────────────────────────────────────────
     function step_writeBody(next) {
 
-        // PATH A — small cleaned HTML + setSignatureAsync available
+        var wrapped = '<div ' + MARKER_ATTR + '>' + cleanHtml + '</div>';
+
+        // PATH A — only when NO CID attachments and setSignatureAsync available
         if (
+            !hasCidAttachments &&
             typeof item.body.setSignatureAsync === "function" &&
             htmlSizeKB < 100
         ) {
-            _diag.info("PATH A -> setSignatureAsync (cleaned HTML is " + htmlSizeKB.toFixed(1) + "KB)");
-
-            var wrapped = '<div ' + MARKER_ATTR + '>' + cleanHtml + '</div>';
+            _diag.info("PATH A -> setSignatureAsync (no CID, " + htmlSizeKB.toFixed(1) + "KB)");
 
             setSignatureSlot(wrapped, function (result) {
                 if (result.status !== Office.AsyncResultStatus.Succeeded) {
@@ -7527,89 +7528,210 @@ function writeSignature(item, html, onDone) {
             return;
         }
 
-        // PATH B — chunked setSelectedDataAsync
+        // PATH B — setSelectedDataAsync (required when CID attachments present,
+        // or large HTML, or no setSignatureAsync)
+        // 
+        // Why NOT setAsync for the final write:
+        //   setAsync replaces the entire body in one shot — fine functionally,
+        //   but setSelectedDataAsync keeps each write atomic and smaller,
+        //   and more importantly it's what your codebase already uses everywhere.
+        //
+        // Flow:
+        //   1. clearSlot  — prevent Outlook re-injecting native sig
+        //   2. readBody   — get existing stripped body
+        //   3. setAsync("") — reset cursor to position 0 (ONLY use of setAsync)
+        //   4. setSelectedDataAsync(strippedBody) — write existing content
+        //   5. setSelectedDataAsync(wrapped)      — append signature at cursor
+
         _diag.info(
-            "PATH B -> chunked setSelectedDataAsync" +
-            " (cleaned HTML=" + htmlSizeKB.toFixed(1) + "KB)"
+            "PATH B -> setSelectedDataAsync" +
+            (hasCidAttachments
+                ? " (CID attachments — body context required for cid: resolution)"
+                : " (large or no setSignatureAsync API)") +
+            " | cleanedHTML=" + htmlSizeKB.toFixed(1) + "KB"
         );
 
-        // Clear native slot
+        function setSelectedData(content, cb) {
+            if (typeof item.body.setSelectedDataAsync !== "function") {
+                cb(new Error("setSelectedDataAsync unavailable"));
+                return;
+            }
+            item.body.setSelectedDataAsync(
+                content,
+                { coercionType: Office.CoercionType.Html },
+                function (result) {
+                    if (result.status === Office.AsyncResultStatus.Succeeded) {
+                        cb(null);
+                    } else {
+                        cb(result.error);
+                    }
+                }
+            );
+        }
+
+        function resetCursor(cb) {
+            // setAsync("") is the ONLY reliable way to move cursor to position 0
+            // before setSelectedDataAsync. We use it purely for cursor positioning,
+            // not for content writing.
+            if (typeof item.body.setAsync !== "function") {
+                cb(new Error("setAsync unavailable — cannot reset cursor"));
+                return;
+            }
+            _diag.info("resetCursor: setAsync('') to move cursor to position 0");
+            item.body.setAsync(
+                "",
+                { coercionType: Office.CoercionType.Html },
+                function (result) {
+                    if (result.status === Office.AsyncResultStatus.Succeeded) {
+                        _diag.info("resetCursor: done");
+                        cb(null);
+                    } else {
+                        cb(result.error);
+                    }
+                }
+            );
+        }
+
         function clearSlot(cb) {
-            if (typeof item.body.setSignatureAsync !== "function") { cb(); return; }
+            if (typeof item.body.setSignatureAsync !== "function") {
+                _diag.info("clearSlot: unavailable — skipping");
+                cb();
+                return;
+            }
             setSignatureSlot("", function (r) {
                 if (r.status !== Office.AsyncResultStatus.Succeeded) {
-                    _diag.warn("clearSlot failed (non-fatal)");
+                    _diag.warn("clearSlot: failed (non-fatal)");
+                } else {
+                    _diag.info("clearSlot: cleared");
                 }
                 cb();
             });
         }
 
-        // Read body
         function readBody(cb) {
+            _diag.info("readBody: reading existing compose body");
             getBody(function (body, err) {
-                if (err) { _diag.error("readBody: " + JSON.stringify(err)); cb(null); return; }
-                _diag.info("readBody: length=" + body.length);
+                if (err) {
+                    _diag.error("readBody: " + JSON.stringify(err));
+                    cb(null);
+                    return;
+                }
+                _diag.info("readBody: length=" + body.length +
+                    " | hasMarker=" + body.includes(MARKER_ATTR));
                 cb(body);
             });
         }
 
-        // Chunk insert via setSelectedDataAsync
-        function insertChunks(strippedBody) {
+        function insertViaSelectedData(strippedBody) {
             if (strippedBody === null) { next(false); return; }
 
             if (strippedBody.includes(MARKER_ATTR)) {
-                _diag.info("Marker already present — skipping");
+                _diag.info("insertViaSelectedData: marker already present — skipping");
                 next(true);
                 return;
             }
 
-            var chunks = splitHtmlAtBlockBoundaries(cleanHtml, CHUNK_SIZE_KB);
-
-            // Open/close the wrapper div across the chunk boundary
-            chunks[0] = '<div ' + MARKER_ATTR + '>' + chunks[0];
-            chunks[chunks.length - 1] = chunks[chunks.length - 1] + '</div>';
-
-            _diag.info("Chunks: " + chunks.length);
-            chunks.forEach(function (c, i) {
-                _diag.info("  chunk " + (i + 1) + ": " + (new Blob([c]).size / 1024).toFixed(1) + "KB");
-            });
-
-            // Reset cursor to end of strippedBody
-            setBody(strippedBody, function (err) {
+            // Step 1: Reset cursor to 0
+            resetCursor(function (err) {
                 if (err) {
-                    _diag.error("setBody for cursor reset failed: " + JSON.stringify(err));
+                    _diag.error("resetCursor failed: " + JSON.stringify(err));
                     next(false);
                     return;
                 }
 
-                _diag.info("Cursor reset to end of base body — starting chunk insert");
-
-                _insertChunksViaSelectedData(item, chunks, 0, function (success) {
-                    if (!success) { next(false); return; }
-
-                    // Verify
-                    getBody(function (bodyAfter, e) {
-                        if (e) {
-                            _diag.warn("Verify read failed");
-                            next(true);
+                // Step 2: Write stripped existing body at cursor (position 0)
+                // If body is empty, skip this call — setSelectedDataAsync("") 
+                // on some platforms inserts a stray <br>
+                function writeExistingBody(cb) {
+                    if (!strippedBody || strippedBody.trim() === "") {
+                        _diag.info("writeExistingBody: empty — skipping");
+                        cb();
+                        return;
+                    }
+                    _diag.info(
+                        "writeExistingBody: inserting stripped body" +
+                        " | size=" + (new Blob([strippedBody]).size / 1024).toFixed(1) + "KB"
+                    );
+                    setSelectedData(strippedBody, function (err) {
+                        if (err) {
+                            _diag.error("writeExistingBody failed: " + JSON.stringify(err));
+                            cb(err);
                             return;
                         }
-                        _diag.info(
-                            "Body after insert: length=" + bodyAfter.length +
-                            " | markerFound=" + bodyAfter.includes(MARKER_ATTR)
-                        );
-                        next(bodyAfter.includes(MARKER_ATTR));
+                        _diag.info("writeExistingBody: done");
+                        cb(null);
                     });
+                }
+
+                // Step 3: Append signature at cursor (end of existing body)
+                function writeSignatureHtml(cb) {
+                    _diag.info(
+                        "writeSignatureHtml: inserting wrapped signature" +
+                        " | size=" + (new Blob([wrapped]).size / 1024).toFixed(1) + "KB"
+                    );
+                    setSelectedData(wrapped, function (err) {
+                        if (err) {
+                            _diag.error("writeSignatureHtml failed: " + JSON.stringify(err));
+                            cb(err);
+                            return;
+                        }
+                        _diag.info("writeSignatureHtml: done");
+                        cb(null);
+                    });
+                }
+
+                // Step 4: Verify marker
+                function verify(cb) {
+                    getBody(function (bodyAfter, e) {
+                        if (e) {
+                            _diag.warn("verify: read failed — assuming success");
+                            cb(true);
+                            return;
+                        }
+                        var found = bodyAfter.includes(MARKER_ATTR);
+                        _diag.info(
+                            "verify: length=" + bodyAfter.length +
+                            " | markerFound=" + found
+                        );
+                        cb(found);
+                    });
+                }
+
+                // Chain steps 2 → 3 → 4
+                writeExistingBody(function (err) {
+                    if (err) { next(false); return; }
+
+                    // Small breathing room between the two setSelectedDataAsync calls
+                    // so Outlook's cursor has settled at end of existing body
+                    setTimeout(function () {
+                        writeSignatureHtml(function (err) {
+                            if (err) { next(false); return; }
+
+                            verify(function (ok) {
+                                _diag.info("==================================================");
+                                _diag.info("writeSignature " + (ok ? "END SUCCESS" : "END FAILED"));
+                                _diag.info("==================================================");
+                                next(ok);
+                            });
+                        });
+                    }, 100);
                 });
             });
         }
 
+        // Chain: clearSlot → readBody → strip → insert
         clearSlot(function () {
             readBody(function (body) {
                 var stripped = body !== null && typeof stripNativeOutlookSignature === "function"
                     ? stripNativeOutlookSignature(body)
                     : body;
-                insertChunks(stripped);
+
+                _diag.info(
+                    "stripped body: length=" + (stripped ? stripped.length : 0) +
+                    " | removed=" + ((body ? body.length : 0) - (stripped ? stripped.length : 0)) + " chars"
+                );
+
+                insertViaSelectedData(stripped);
             });
         });
     }
