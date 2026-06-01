@@ -424,7 +424,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     try {
         await bodySetSignatureAsync(item, finalSignature);
     } catch (err) {
-        // ─── Handle ArgumentOutOfRangeException ───────────────────────────────
         const isOutOfRange =
             err?.code === 5009 ||
             (typeof err?.message === "string" &&
@@ -440,35 +439,35 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             let profileSrcBytes = 0;
             if (profileSrc) {
                 profileSrcBytes = new TextEncoder().encode(profileSrc).length;
-                console.log(`[CardByte] Profile photo src size : ${(profileSrcBytes / 1024).toFixed(2)} KB`);
-            } else {
-                console.log("[CardByte] No profile photo found in signature HTML.");
             }
 
-            // 2. HTML size minus profile photo src
+            // 2. Calculate sizes
             const htmlWithoutImageBytes = totalHtmlBytes - profileSrcBytes;
-            console.log(`[CardByte] Total HTML size          : ${(totalHtmlBytes / 1024).toFixed(2)} KB`);
-            console.log(`[CardByte] HTML without profile pic : ${(htmlWithoutImageBytes / 1024).toFixed(2)} KB`);
-
-            // 3. Remaining KB from the 100 KB limit after subtracting HTML-without-image
             const LIMIT_KB = 100;
+            const totalHtmlKb = totalHtmlBytes / 1024;
+            const profilePicKb = profileSrcBytes / 1024;
             const htmlWithoutImageKb = htmlWithoutImageBytes / 1024;
             const allowedProfilePicKb = LIMIT_KB - htmlWithoutImageKb;
 
-            console.warn(
-                `[CardByte] ⚠️ Profile picture size limit : ${allowedProfilePicKb.toFixed(2)} KB` +
-                ` (100 KB total − ${htmlWithoutImageKb.toFixed(2)} KB HTML without image)`
-            );
+            console.warn(`[CardByte] ⚠️ Profile picture size limit: ${allowedProfilePicKb.toFixed(2)} KB`);
 
-            // 4. Surface to the user/developer in a visible way
-            showSizeErrorBanner({
-                totalHtmlKb: totalHtmlBytes / 1024,
-                profilePicKb: profileSrcBytes / 1024,
+            // 3. Build error signature HTML and inject it into the email body
+            const errorSignatureHtml = buildSizeErrorSignatureHtml({
+                totalHtmlKb,
+                profilePicKb,
                 htmlWithoutImageKb,
                 allowedProfilePicKb,
             });
+
+            try {
+                await bodySetSignatureAsync(item, errorSignatureHtml);
+                console.log("[CardByte] Error diagnostic signature injected into email body.");
+            } catch (innerErr) {
+                console.error("[CardByte] Failed to inject error signature:", innerErr);
+            }
+
         } else {
-            throw err; // re-throw unrelated errors
+            throw err;
         }
     }
 }
@@ -481,48 +480,61 @@ const extractProfilePhotoSrc = (html) => {
     return img ? img.src : null;
 };
 
-// ─── Helper: show a visible warning banner in the task pane ───────────────────
-function showSizeErrorBanner({ totalHtmlKb, profilePicKb, htmlWithoutImageKb, allowedProfilePicKb }) {
-    // Try to find or create a banner container in the task pane DOM
-    let banner = document.getElementById("cardbyte-size-error-banner");
-    if (!banner) {
-        banner = document.createElement("div");
-        banner.id = "cardbyte-size-error-banner";
-        banner.style.cssText = `
-            position: fixed; top: 0; left: 0; right: 0; z-index: 9999;
-            background: #fff3cd; border-bottom: 2px solid #e6a817;
-            color: #5a3e00; font-family: Arial, sans-serif; font-size: 12px;
-            padding: 10px 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);
-        `;
-        document.body.prepend(banner);
-    }
+function buildSizeErrorSignatureHtml({ totalHtmlKb, profilePicKb, htmlWithoutImageKb, allowedProfilePicKb }) {
+    const limitColor = allowedProfilePicKb < 0 ? "#c0392b" : "#1a7a1a";
+    const limitNote = allowedProfilePicKb < 0 ? " ⛔ HTML alone exceeds 100 KB!" : "";
 
-    banner.innerHTML = `
-        <strong>⚠️ Signature too large (ArgumentOutOfRangeException)</strong><br/>
-        <table style="margin-top:6px; border-collapse:collapse; width:100%;">
+    return `
+        <table cellpadding="0" cellspacing="0" border="0" width="480"
+               style="font-family:Arial,sans-serif; font-size:12px;
+                      border:2px solid #e6a817; border-radius:6px;
+                      background:#fff8e1; margin-top:20px;">
             <tr>
-                <td style="padding:2px 8px 2px 0;">📄 Total HTML size</td>
-                <td style="font-weight:bold;">${totalHtmlKb.toFixed(2)} KB</td>
+                <td style="background:#e6a817; padding:8px 14px; border-radius:4px 4px 0 0;">
+                    <strong style="color:#fff; font-size:13px;">
+                        ⚠️ CardByte — Signature Too Large
+                    </strong>
+                </td>
             </tr>
             <tr>
-                <td style="padding:2px 8px 2px 0;">🖼️ Profile photo size</td>
-                <td style="font-weight:bold;">${profilePicKb.toFixed(2)} KB</td>
-            </tr>
-            <tr>
-                <td style="padding:2px 8px 2px 0;">📝 HTML without profile pic</td>
-                <td style="font-weight:bold;">${htmlWithoutImageKb.toFixed(2)} KB</td>
-            </tr>
-            <tr style="border-top:1px solid #e6a817;">
-                <td style="padding:4px 8px 2px 0;"><strong>✅ Max allowed profile pic size</strong></td>
-                <td style="font-weight:bold; color:${allowedProfilePicKb < 0 ? '#c0392b' : '#1a7a1a'};">
-                    ${allowedProfilePicKb.toFixed(2)} KB
-                    ${allowedProfilePicKb < 0 ? " ⛔ (HTML alone exceeds 100 KB!)" : ""}
+                <td style="padding:12px 14px; color:#5a3e00;">
+                    <p style="margin:0 0 10px 0;">
+                        Your email signature could not be applied because its total size
+                        exceeds Outlook's <strong>100 KB</strong> limit
+                        (<code>ArgumentOutOfRangeException</code>).
+                    </p>
+                    <table cellpadding="4" cellspacing="0" border="0"
+                           style="width:100%; border-collapse:collapse; font-size:12px;">
+                        <tr style="background:#fff3cd;">
+                            <td style="padding:4px 10px;">📄 Total HTML size</td>
+                            <td style="font-weight:bold; text-align:right;">${totalHtmlKb.toFixed(2)} KB</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:4px 10px;">🖼️ Profile photo size</td>
+                            <td style="font-weight:bold; text-align:right;">${profilePicKb.toFixed(2)} KB</td>
+                        </tr>
+                        <tr style="background:#fff3cd;">
+                            <td style="padding:4px 10px;">📝 HTML without profile photo</td>
+                            <td style="font-weight:bold; text-align:right;">${htmlWithoutImageKb.toFixed(2)} KB</td>
+                        </tr>
+                        <tr style="border-top:2px solid #e6a817;">
+                            <td style="padding:6px 10px;">
+                                <strong>✅ Max allowed profile photo size</strong>
+                            </td>
+                            <td style="font-weight:bold; text-align:right; color:${limitColor};">
+                                ${allowedProfilePicKb.toFixed(2)} KB${limitNote}
+                            </td>
+                        </tr>
+                    </table>
+                    <p style="margin:10px 0 0 0; font-size:11px; color:#7a5800;">
+                        Formula: <strong>100 KB</strong> limit
+                        &minus; <strong>${htmlWithoutImageKb.toFixed(2)} KB</strong> (HTML without photo)
+                        = <strong style="color:${limitColor};">${allowedProfilePicKb.toFixed(2)} KB</strong>
+                        remaining for profile picture.
+                    </p>
                 </td>
             </tr>
         </table>
-        <div style="margin-top:6px; font-size:11px; color:#7a5800;">
-            Formula: 100 KB limit − ${htmlWithoutImageKb.toFixed(2)} KB (HTML without image) = <strong>${allowedProfilePicKb.toFixed(2)} KB</strong> left for profile picture
-        </div>
     `;
 }
 
