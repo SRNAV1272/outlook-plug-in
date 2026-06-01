@@ -7104,46 +7104,6 @@ function _wrapSignature(html) {
  *
  * Calls onDone(success: boolean).
  */
-// function writeSignature(item, html, onDone) {
-//     function fallbackPrepend() {
-//         if (typeof item.body.prependAsync !== "function") {
-//             _diag.error("No write path available — neither setSignatureAsync nor prependAsync");
-//             onDone(false);
-//             return;
-//         }
-//         item.body.prependAsync(
-//             html,
-//             { coercionType: Office.CoercionType.Html },
-//             function (result) {
-//                 var ok = result.status === Office.AsyncResultStatus.Succeeded;
-//                 if (!ok) _diag.error("prependAsync failed: " + (result.error && result.error.message));
-//                 onDone(ok);
-//             }
-//         );
-//     }
-
-//     if (typeof item.body.setSignatureAsync !== "function") {
-//         _diag.warn("setSignatureAsync unavailable — using prependAsync");
-//         fallbackPrepend();
-//         return;
-//     }
-
-//     item.body.setSignatureAsync(
-//         html,
-//         { coercionType: Office.CoercionType.Html },
-//         function (result) {
-//             if (result.status === Office.AsyncResultStatus.Succeeded) {
-//                 _diag.info("setSignatureAsync succeeded");
-//                 onDone(true);
-//             } else {
-//                 _diag.warn("setSignatureAsync failed: "
-//                     + (result.error && result.error.message)
-//                     + " — trying prependAsync");
-//                 fallbackPrepend();
-//             }
-//         }
-//     );
-// }
 
 function stripNativeOutlookSignature(html) {
     // ------------------------------------------------------------
@@ -7193,369 +7153,671 @@ function stripNativeOutlookSignature(html) {
     return html;
 }
 
-function writeSignature(item, html, onDone) {
-    const MARKER_ATTR = 'data-cardbyte-sig="1"';
-    const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
-    const htmlSizeKB = new Blob([html]).size / 1024;
+// function writeSignature(item, html, onDone) {
+//     const MARKER_ATTR = 'data-cardbyte-sig="1"';
+//     const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
+//     const htmlSizeKB = new Blob([html]).size / 1024;
 
-    // ==========================================
-    // IMAGE DIAGNOSTICS HERE
-    // ==========================================
+//     // ==========================================
+//     // IMAGE DIAGNOSTICS HERE
+//     // ==========================================
 
-    const imgs =
-        html.match(/<img\b[^>]*src=["']([^"']+)["']/gi) || [];
+//     const imgs =
+//         html.match(/<img\b[^>]*src=["']([^"']+)["']/gi) || [];
 
-    _diag.info(`Image count=${imgs.length}`);
+//     _diag.info(`Image count=${imgs.length}`);
+
+//     _diag.info(
+//         `Base64 image count=${(html.match(/data:image\//gi) || []).length
+//         }`
+//     );
+
+//     imgs.forEach((img, i) => {
+//         _diag.info(
+//             `IMG ${i + 1}:size=${sizeKB.toFixed(1)} KB:  ${img.substring(0, 300)}`
+//         );
+//     });
+
+//     // ==========================================
+//     // Existing functions
+//     // ==========================================
+
+//     function getBody() {
+//         return new Promise((resolve, reject) => {
+//             if (typeof item.body.getAsync !== "function") {
+//                 reject(new Error("getAsync unavailable"));
+//                 return;
+//             }
+
+//             item.body.getAsync(
+//                 Office.CoercionType.Html,
+//                 (result) => {
+//                     if (result.status === Office.AsyncResultStatus.Succeeded) {
+//                         resolve(result.value || "");
+//                     } else {
+//                         reject(result.error);
+//                     }
+//                 }
+//             );
+//         });
+//     }
+
+//     function setSignature(content) {
+//         return new Promise((resolve, reject) => {
+//             if (typeof item.body.setSignatureAsync !== "function") {
+//                 reject(new Error("setSignatureAsync unavailable"));
+//                 return;
+//             }
+
+//             item.body.setSignatureAsync(
+//                 content,
+//                 { coercionType: Office.CoercionType.Html },
+//                 (result) => {
+//                     if (result.status === Office.AsyncResultStatus.Succeeded) {
+//                         resolve();
+//                     } else {
+//                         reject(result.error);
+//                     }
+//                 }
+//             );
+//         });
+//     }
+
+//     function setBody(content) {
+//         return new Promise((resolve, reject) => {
+//             if (typeof item.body.setAsync !== "function") {
+//                 reject(new Error("setAsync unavailable"));
+//                 return;
+//             }
+
+//             item.body.setAsync(
+//                 content,
+//                 { coercionType: Office.CoercionType.Html },
+//                 (result) => {
+//                     if (result.status === Office.AsyncResultStatus.Succeeded) {
+//                         resolve();
+//                     } else {
+//                         reject(result.error);
+//                     }
+//                 }
+//             );
+//         });
+//     }
+
+//     (async () => {
+//         try {
+//             _diag.info("==================================================");
+//             _diag.info("writeSignature START");
+//             _diag.info("==================================================");
+
+//             _diag.info(
+//                 `Signature size: ${htmlSizeKB.toFixed(1)}KB`
+//             );
+
+//             _diag.info(
+//                 `Raw signature length: ${html.length}`
+//             );
+
+//             _diag.info(
+//                 `Wrapped signature length: ${wrappedHtml.length}`
+//             );
+
+//             // ---------------------------------------------------------
+//             // PATH A
+//             // ---------------------------------------------------------
+//             if (
+//                 typeof item.body.setSignatureAsync === "function" &&
+//                 htmlSizeKB < 100
+//             ) {
+//                 _diag.info(
+//                     "PATH A selected -> setSignatureAsync"
+//                 );
+
+//                 _diag.info(
+//                     "Calling setSignatureAsync"
+//                 );
+
+//                 await setSignature(wrappedHtml);
+
+//                 _diag.info(
+//                     "setSignatureAsync completed successfully"
+//                 );
+
+//                 try {
+//                     const verifyBody = await getBody();
+
+//                     _diag.info(
+//                         `Verification body length=${verifyBody.length}`
+//                     );
+
+//                     _diag.info(
+//                         `Marker found=${verifyBody.includes(MARKER_ATTR)}`
+//                     );
+//                 } catch (e) {
+//                     _diag.warn(
+//                         "Verification read failed: " +
+//                         (e?.message || e)
+//                     );
+//                 }
+
+//                 _diag.info("writeSignature END");
+
+//                 onDone(true);
+//                 return;
+//             }
+
+//             // ---------------------------------------------------------
+//             // PATH B
+//             // ---------------------------------------------------------
+//             _diag.info(
+//                 `PATH B selected -> ${htmlSizeKB >= 100
+//                     ? "large signature"
+//                     : "setSignatureAsync unavailable"
+//                 }`
+//             );
+
+//             // ---------------------------------------------------------
+//             // CLEAR SIGNATURE SLOT
+//             // ---------------------------------------------------------
+//             if (typeof item.body.setSignatureAsync === "function") {
+//                 try {
+//                     _diag.info(
+//                         "Clearing Outlook signature slot"
+//                     );
+
+//                     await setSignature("");
+
+//                     _diag.info(
+//                         "Signature slot cleared successfully"
+//                     );
+//                 } catch (e) {
+//                     _diag.warn(
+//                         "Failed clearing signature slot: " +
+//                         (e?.message || JSON.stringify(e))
+//                     );
+//                 }
+//             } else {
+//                 _diag.info(
+//                     "setSignatureAsync not available"
+//                 );
+//             }
+
+//             // ---------------------------------------------------------
+//             // READ BODY
+//             // ---------------------------------------------------------
+//             _diag.info(
+//                 "Reading existing compose body"
+//             );
+
+//             const existingBody = await getBody();
+
+//             _diag.info(
+//                 `Existing body length=${existingBody.length}`
+//             );
+
+//             _diag.info(
+//                 `Existing body contains marker=${existingBody.includes(MARKER_ATTR)}`
+//             );
+
+//             _diag.info(
+//                 `Existing body contains cardbyte-signature=${existingBody.indexOf("cardbyte-signature") >= 0}`
+//             );
+
+//             // ---------------------------------------------------------
+//             // DUPLICATE CHECK
+//             // ---------------------------------------------------------
+//             if (existingBody.includes(MARKER_ATTR)) {
+//                 _diag.info(
+//                     "Signature already exists. Skipping insertion."
+//                 );
+
+//                 onDone(true);
+//                 return;
+//             }
+
+//             // ---------------------------------------------------------
+//             // STRIP
+//             // ---------------------------------------------------------
+//             _diag.info(
+//                 "Removing Outlook/CardByte signatures from body"
+//             );
+
+//             const strippedBody =
+//                 typeof stripNativeOutlookSignature === "function"
+//                     ? stripNativeOutlookSignature(existingBody)
+//                     : existingBody;
+
+//             _diag.info(
+//                 `Stripped body length=${strippedBody.length}`
+//             );
+
+//             _diag.info(
+//                 `Characters removed=${existingBody.length - strippedBody.length}`
+//             );
+
+//             // ---------------------------------------------------------
+//             // BUILD FINAL BODY
+//             // ---------------------------------------------------------
+//             const candidateBody =
+//                 strippedBody + wrappedHtml;
+
+//             _diag.info(
+//                 `Candidate body length=${candidateBody.length}`
+//             );
+
+//             _diag.info(
+//                 `Candidate contains marker=${candidateBody.includes(MARKER_ATTR)}`
+//             );
+
+//             // ---------------------------------------------------------
+//             // INSERT
+//             // ---------------------------------------------------------
+//             _diag.info(
+//                 "Calling setSelectedDataAsync"
+//             );
+
+//             _diag.info(
+//                 `Payload length=${candidateBody.length}`
+//             );
+
+//             await setBody(candidateBody);
+
+//             _diag.info(
+//                 "setSelectedDataAsync completed successfully"
+//             );
+
+//             // ---------------------------------------------------------
+//             // VERIFY
+//             // ---------------------------------------------------------
+//             _diag.info(
+//                 "Verifying body after insertion"
+//             );
+
+//             const bodyAfterInsert = await getBody();
+
+//             _diag.info(
+//                 `Body after insert length=${bodyAfterInsert.length}`
+//             );
+
+//             _diag.info(
+//                 `Body delta=${bodyAfterInsert.length - existingBody.length}`
+//             );
+
+//             _diag.info(
+//                 `Marker found after insert=${bodyAfterInsert.includes(MARKER_ATTR)}`
+//             );
+
+//             _diag.info(
+//                 `CardByte signature found after insert=${bodyAfterInsert.indexOf("cardbyte-signature") >= 0}`
+//             );
+
+//             const markerPos =
+//                 bodyAfterInsert.indexOf(MARKER_ATTR);
+
+//             _diag.info(
+//                 `Marker position=${markerPos}`
+//             );
+
+//             if (markerPos >= 0) {
+//                 const snippet =
+//                     bodyAfterInsert.substring(
+//                         Math.max(0, markerPos - 200),
+//                         Math.min(
+//                             bodyAfterInsert.length,
+//                             markerPos + 1000
+//                         )
+//                     );
+
+//                 _diag.info(
+//                     "Marker snippet follows:"
+//                 );
+
+//                 _diag.info(snippet);
+//             } else {
+//                 _diag.warn(
+//                     "Marker NOT FOUND after insertion"
+//                 );
+//             }
+
+//             _diag.info(
+//                 "Large signature inserted successfully"
+//             );
+
+//             _diag.info(
+//                 "=================================================="
+//             );
+
+//             _diag.info(
+//                 "writeSignature END SUCCESS"
+//             );
+
+//             _diag.info(
+//                 "=================================================="
+//             );
+
+//             onDone(true);
+
+//         } catch (err) {
+
+//             _diag.error(
+//                 "writeSignature failed"
+//             );
+
+//             _diag.error(
+//                 err?.message ||
+//                 JSON.stringify(err)
+//             );
+
+//             if (err?.stack) {
+//                 _diag.error(err.stack);
+//             }
+
+//             onDone(false);
+//         }
+//     })();
+
+// }
+
+// ─── Chunked write path (JSRuntime safe — no async/await) ────────────────────
+
+var CHUNK_SIZE_KB = 150; // safe ceiling per setAsync call
+
+/**
+ * Splits HTML at top-level block boundaries so no chunk contains
+ * a broken tag. Returns an array of HTML strings.
+ */
+function splitHtmlAtBlockBoundaries(html, maxKB) {
+    var maxBytes = maxKB * 1024;
+    var chunks = [];
+    var current = "";
+
+    // Match self-closing or paired block elements at top level
+    var pattern = /(<(?:table|div|p|tr|td|img|br)[\s\S]*?(?:<\/(?:table|div|p|tr|td)>|\/?>))/gi;
+    var lastIndex = 0;
+    var match;
+
+    while ((match = pattern.exec(html)) !== null) {
+        var segment = html.slice(lastIndex, match.index + match[0].length);
+        var testSize = new Blob([current + segment]).size;
+
+        if (testSize > maxBytes && current !== "") {
+            chunks.push(current);
+            current = segment;
+        } else {
+            current += segment;
+        }
+        lastIndex = match.index + match[0].length;
+    }
+
+    // Remainder after last matched block
+    if (lastIndex < html.length) {
+        current += html.slice(lastIndex);
+    }
+    if (current) chunks.push(current);
+
+    // Fallback: if regex matched nothing, hard-split by byte boundary
+    if (chunks.length === 0) {
+        var i = 0;
+        while (i < html.length) {
+            chunks.push(html.slice(i, i + (maxKB * 1024)));
+            i += maxKB * 1024;
+        }
+    }
+
+    return chunks;
+}
+
+/**
+ * Iterates chunks one by one using setAsync (accumulates body per iteration).
+ * Pure callback — no async/await, safe in JSRuntime.
+ *
+ * @param {object}   item        - Office mailbox item
+ * @param {string}   baseBody    - Existing stripped body (prefix for all chunks)
+ * @param {string[]} chunks      - Signature HTML chunks to append sequentially
+ * @param {number}   index       - Current chunk index (start with 0)
+ * @param {string}   accumulated - Signature HTML built so far (start with "")
+ * @param {function} onDone      - onDone(success: boolean)
+ */
+function _insertChunksSequentially(item, baseBody, chunks, index, accumulated, onDone) {
+    if (index >= chunks.length) {
+        // All chunks written — done
+        _diag.info("_insertChunksSequentially: all " + chunks.length + " chunks written");
+        onDone(true);
+        return;
+    }
+
+    accumulated = accumulated + chunks[index];
+
+    var MARKER_ATTR = 'data-cardbyte-sig="1"';
+    var candidateBody = baseBody + '<div ' + MARKER_ATTR + '>' + accumulated + '</div>';
 
     _diag.info(
-        `Base64 image count=${(html.match(/data:image\//gi) || []).length
-        }`
+        "_insertChunksSequentially: writing chunk " + (index + 1) +
+        "/" + chunks.length +
+        " | candidate size=" + (new Blob([candidateBody]).size / 1024).toFixed(1) + "KB"
     );
 
-    imgs.forEach((img, i) => {
-        _diag.info(
-            `IMG ${i + 1}:size=${sizeKB.toFixed(1)} KB:  ${img.substring(0, 300)}`
-        );
-    });
-
-    // ==========================================
-    // Existing functions
-    // ==========================================
-
-    function getBody() {
-        return new Promise((resolve, reject) => {
-            if (typeof item.body.getAsync !== "function") {
-                reject(new Error("getAsync unavailable"));
+    item.body.setAsync(
+        candidateBody,
+        { coercionType: Office.CoercionType.Html },
+        function (result) {
+            if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                _diag.error(
+                    "_insertChunksSequentially: setAsync failed on chunk " +
+                    (index + 1) + " — " + JSON.stringify(result.error)
+                );
+                onDone(false);
                 return;
             }
 
-            item.body.getAsync(
-                Office.CoercionType.Html,
-                (result) => {
-                    if (result.status === Office.AsyncResultStatus.Succeeded) {
-                        resolve(result.value || "");
-                    } else {
-                        reject(result.error);
-                    }
-                }
-            );
-        });
-    }
+            _diag.info("Chunk " + (index + 1) + " written OK");
 
-    function setSignature(content) {
-        return new Promise((resolve, reject) => {
-            if (typeof item.body.setSignatureAsync !== "function") {
-                reject(new Error("setSignatureAsync unavailable"));
-                return;
-            }
-
-            item.body.setSignatureAsync(
-                content,
-                { coercionType: Office.CoercionType.Html },
-                (result) => {
-                    if (result.status === Office.AsyncResultStatus.Succeeded) {
-                        resolve();
-                    } else {
-                        reject(result.error);
-                    }
-                }
-            );
-        });
-    }
-
-    function setBody(content) {
-        return new Promise((resolve, reject) => {
-            if (typeof item.body.setAsync !== "function") {
-                reject(new Error("setAsync unavailable"));
-                return;
-            }
-
-            item.body.setAsync(
-                content,
-                { coercionType: Office.CoercionType.Html },
-                (result) => {
-                    if (result.status === Office.AsyncResultStatus.Succeeded) {
-                        resolve();
-                    } else {
-                        reject(result.error);
-                    }
-                }
-            );
-        });
-    }
-
-    (async () => {
-        try {
-            _diag.info("==================================================");
-            _diag.info("writeSignature START");
-            _diag.info("==================================================");
-
-            _diag.info(
-                `Signature size: ${htmlSizeKB.toFixed(1)}KB`
-            );
-
-            _diag.info(
-                `Raw signature length: ${html.length}`
-            );
-
-            _diag.info(
-                `Wrapped signature length: ${wrappedHtml.length}`
-            );
-
-            // ---------------------------------------------------------
-            // PATH A
-            // ---------------------------------------------------------
-            if (
-                typeof item.body.setSignatureAsync === "function" &&
-                htmlSizeKB < 100
-            ) {
-                _diag.info(
-                    "PATH A selected -> setSignatureAsync"
+            // Small breathing room for Outlook's DOM between chunks
+            setTimeout(function () {
+                _insertChunksSequentially(
+                    item,
+                    baseBody,
+                    chunks,
+                    index + 1,
+                    accumulated,
+                    onDone
                 );
-
-                _diag.info(
-                    "Calling setSignatureAsync"
-                );
-
-                await setSignature(wrappedHtml);
-
-                _diag.info(
-                    "setSignatureAsync completed successfully"
-                );
-
-                try {
-                    const verifyBody = await getBody();
-
-                    _diag.info(
-                        `Verification body length=${verifyBody.length}`
-                    );
-
-                    _diag.info(
-                        `Marker found=${verifyBody.includes(MARKER_ATTR)}`
-                    );
-                } catch (e) {
-                    _diag.warn(
-                        "Verification read failed: " +
-                        (e?.message || e)
-                    );
-                }
-
-                _diag.info("writeSignature END");
-
-                onDone(true);
-                return;
-            }
-
-            // ---------------------------------------------------------
-            // PATH B
-            // ---------------------------------------------------------
-            _diag.info(
-                `PATH B selected -> ${htmlSizeKB >= 100
-                    ? "large signature"
-                    : "setSignatureAsync unavailable"
-                }`
-            );
-
-            // ---------------------------------------------------------
-            // CLEAR SIGNATURE SLOT
-            // ---------------------------------------------------------
-            if (typeof item.body.setSignatureAsync === "function") {
-                try {
-                    _diag.info(
-                        "Clearing Outlook signature slot"
-                    );
-
-                    await setSignature("");
-
-                    _diag.info(
-                        "Signature slot cleared successfully"
-                    );
-                } catch (e) {
-                    _diag.warn(
-                        "Failed clearing signature slot: " +
-                        (e?.message || JSON.stringify(e))
-                    );
-                }
-            } else {
-                _diag.info(
-                    "setSignatureAsync not available"
-                );
-            }
-
-            // ---------------------------------------------------------
-            // READ BODY
-            // ---------------------------------------------------------
-            _diag.info(
-                "Reading existing compose body"
-            );
-
-            const existingBody = await getBody();
-
-            _diag.info(
-                `Existing body length=${existingBody.length}`
-            );
-
-            _diag.info(
-                `Existing body contains marker=${existingBody.includes(MARKER_ATTR)}`
-            );
-
-            _diag.info(
-                `Existing body contains cardbyte-signature=${existingBody.indexOf("cardbyte-signature") >= 0}`
-            );
-
-            // ---------------------------------------------------------
-            // DUPLICATE CHECK
-            // ---------------------------------------------------------
-            if (existingBody.includes(MARKER_ATTR)) {
-                _diag.info(
-                    "Signature already exists. Skipping insertion."
-                );
-
-                onDone(true);
-                return;
-            }
-
-            // ---------------------------------------------------------
-            // STRIP
-            // ---------------------------------------------------------
-            _diag.info(
-                "Removing Outlook/CardByte signatures from body"
-            );
-
-            const strippedBody =
-                typeof stripNativeOutlookSignature === "function"
-                    ? stripNativeOutlookSignature(existingBody)
-                    : existingBody;
-
-            _diag.info(
-                `Stripped body length=${strippedBody.length}`
-            );
-
-            _diag.info(
-                `Characters removed=${existingBody.length - strippedBody.length}`
-            );
-
-            // ---------------------------------------------------------
-            // BUILD FINAL BODY
-            // ---------------------------------------------------------
-            const candidateBody =
-                strippedBody + wrappedHtml;
-
-            _diag.info(
-                `Candidate body length=${candidateBody.length}`
-            );
-
-            _diag.info(
-                `Candidate contains marker=${candidateBody.includes(MARKER_ATTR)}`
-            );
-
-            // ---------------------------------------------------------
-            // INSERT
-            // ---------------------------------------------------------
-            _diag.info(
-                "Calling setSelectedDataAsync"
-            );
-
-            _diag.info(
-                `Payload length=${candidateBody.length}`
-            );
-
-            await setBody(candidateBody);
-
-            _diag.info(
-                "setSelectedDataAsync completed successfully"
-            );
-
-            // ---------------------------------------------------------
-            // VERIFY
-            // ---------------------------------------------------------
-            _diag.info(
-                "Verifying body after insertion"
-            );
-
-            const bodyAfterInsert = await getBody();
-
-            _diag.info(
-                `Body after insert length=${bodyAfterInsert.length}`
-            );
-
-            _diag.info(
-                `Body delta=${bodyAfterInsert.length - existingBody.length}`
-            );
-
-            _diag.info(
-                `Marker found after insert=${bodyAfterInsert.includes(MARKER_ATTR)}`
-            );
-
-            _diag.info(
-                `CardByte signature found after insert=${bodyAfterInsert.indexOf("cardbyte-signature") >= 0}`
-            );
-
-            const markerPos =
-                bodyAfterInsert.indexOf(MARKER_ATTR);
-
-            _diag.info(
-                `Marker position=${markerPos}`
-            );
-
-            if (markerPos >= 0) {
-                const snippet =
-                    bodyAfterInsert.substring(
-                        Math.max(0, markerPos - 200),
-                        Math.min(
-                            bodyAfterInsert.length,
-                            markerPos + 1000
-                        )
-                    );
-
-                _diag.info(
-                    "Marker snippet follows:"
-                );
-
-                _diag.info(snippet);
-            } else {
-                _diag.warn(
-                    "Marker NOT FOUND after insertion"
-                );
-            }
-
-            _diag.info(
-                "Large signature inserted successfully"
-            );
-
-            _diag.info(
-                "=================================================="
-            );
-
-            _diag.info(
-                "writeSignature END SUCCESS"
-            );
-
-            _diag.info(
-                "=================================================="
-            );
-
-            onDone(true);
-
-        } catch (err) {
-
-            _diag.error(
-                "writeSignature failed"
-            );
-
-            _diag.error(
-                err?.message ||
-                JSON.stringify(err)
-            );
-
-            if (err?.stack) {
-                _diag.error(err.stack);
-            }
-
-            onDone(false);
+            }, 80);
         }
-    })();
+    );
+}
 
+/**
+ * Writes a signature HTML block into the compose body.
+ * Tries setSignatureAsync (PATH A) for small sigs, chunked setAsync
+ * (PATH B) for large ones.
+ *
+ * Drop-in replacement for your existing writeSignature().
+ * Pure callbacks — no async/await — JSRuntime safe.
+ *
+ * @param {object}   item   - Office mailbox item
+ * @param {string}   html   - Signature HTML (pre-wrapped by _wrapSignature)
+ * @param {function} onDone - onDone(success: boolean)
+ */
+function writeSignature(item, html, onDone) {
+
+    var MARKER_ATTR = 'data-cardbyte-sig="1"';
+    var htmlSizeKB = new Blob([html]).size / 1024;
+
+    // ── Image diagnostics (preserved from your original) ─────────────────────
+    var imgs = html.match(/<img\b[^>]*src=["']([^"']+)["']/gi) || [];
+    _diag.info("Image count=" + imgs.length);
+    _diag.info("Base64 image count=" + (html.match(/data:image\//gi) || []).length);
+
+    _diag.info("==================================================");
+    _diag.info("writeSignature START");
+    _diag.info("==================================================");
+    _diag.info("Signature size: " + htmlSizeKB.toFixed(1) + "KB");
+    _diag.info("Raw html length: " + html.length);
+
+    // ── Helpers (callback style, matching your codebase) ─────────────────────
+
+    function setSignature(content, cb) {
+        if (typeof item.body.setSignatureAsync !== "function") {
+            cb({ status: "failed", error: { message: "setSignatureAsync unavailable" } });
+            return;
+        }
+        item.body.setSignatureAsync(
+            content,
+            { coercionType: Office.CoercionType.Html },
+            cb
+        );
+    }
+
+    function getBody(cb) {
+        if (typeof item.body.getAsync !== "function") {
+            cb(null, new Error("getAsync unavailable"));
+            return;
+        }
+        item.body.getAsync(Office.CoercionType.Html, function (result) {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+                cb(result.value || "", null);
+            } else {
+                cb(null, result.error);
+            }
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATH A — small signature + API available → single setSignatureAsync call
+    // ─────────────────────────────────────────────────────────────────────────
+    if (
+        typeof item.body.setSignatureAsync === "function" &&
+        htmlSizeKB < 100
+    ) {
+        _diag.info("PATH A selected -> setSignatureAsync");
+
+        var wrappedA = '<div ' + MARKER_ATTR + '>' + html + '</div>';
+
+        setSignature(wrappedA, function (result) {
+            if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                _diag.error("PATH A setSignatureAsync failed: " + JSON.stringify(result.error));
+                onDone(false);
+                return;
+            }
+
+            _diag.info("PATH A: setSignatureAsync succeeded");
+            _diag.info("writeSignature END");
+            onDone(true);
+        });
+
+        return;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATH B — large signature OR no setSignatureAsync → chunked setAsync
+    // ─────────────────────────────────────────────────────────────────────────
+    _diag.info(
+        "PATH B selected -> " +
+        (htmlSizeKB >= 100 ? "large signature (" + htmlSizeKB.toFixed(1) + "KB)" : "no setSignatureAsync") +
+        " -> chunked setAsync"
+    );
+
+    // Step 1: Clear native signature slot to prevent Outlook re-injecting it
+    function _step_clearSlot(next) {
+        if (typeof item.body.setSignatureAsync !== "function") {
+            _diag.info("No setSignatureAsync — skipping slot clear");
+            next();
+            return;
+        }
+        _diag.info("Clearing Outlook signature slot");
+        setSignature("", function (r) {
+            if (r.status !== Office.AsyncResultStatus.Succeeded) {
+                _diag.warn("Slot clear failed (non-fatal): " + JSON.stringify(r.error));
+            } else {
+                _diag.info("Signature slot cleared");
+            }
+            next();
+        });
+    }
+
+    // Step 2: Read existing body
+    function _step_readBody(next) {
+        _diag.info("Reading existing compose body");
+        getBody(function (body, err) {
+            if (err) {
+                _diag.error("getBody failed: " + JSON.stringify(err));
+                onDone(false);
+                return;
+            }
+            _diag.info("Existing body length=" + body.length);
+            _diag.info("Contains marker=" + body.includes(MARKER_ATTR));
+            next(body);
+        });
+    }
+
+    // Step 3: Dedup check → strip → split → insert chunks
+    function _step_insertChunks(existingBody) {
+        // Duplicate guard
+        if (existingBody.includes(MARKER_ATTR)) {
+            _diag.info("Signature already present — skipping");
+            onDone(true);
+            return;
+        }
+
+        var strippedBody = typeof stripNativeOutlookSignature === "function"
+            ? stripNativeOutlookSignature(existingBody)
+            : existingBody;
+
+        _diag.info("Stripped body length=" + strippedBody.length);
+        _diag.info("Characters removed=" + (existingBody.length - strippedBody.length));
+
+        // Split signature into safe chunks
+        var chunks = splitHtmlAtBlockBoundaries(html, CHUNK_SIZE_KB);
+
+        _diag.info(
+            "Signature split into " + chunks.length + " chunk(s)" +
+            " (max " + CHUNK_SIZE_KB + "KB each)"
+        );
+
+        chunks.forEach(function (c, i) {
+            _diag.info("  Chunk " + (i + 1) + ": " + (new Blob([c]).size / 1024).toFixed(1) + "KB");
+        });
+
+        // Kick off sequential chunk insertion
+        _insertChunksSequentially(
+            item,
+            strippedBody,
+            chunks,
+            0,    // start at index 0
+            "",   // nothing accumulated yet
+            function (success) {
+                if (!success) {
+                    _diag.error("Chunked insertion failed");
+                    onDone(false);
+                    return;
+                }
+
+                // Verification read
+                _diag.info("Verifying body after chunked insert");
+                getBody(function (bodyAfter, err) {
+                    if (err) {
+                        _diag.warn("Verification read failed: " + JSON.stringify(err));
+                        onDone(true); // write succeeded, verify is best-effort
+                        return;
+                    }
+                    _diag.info("Body after insert length=" + bodyAfter.length);
+                    _diag.info("Marker found=" + bodyAfter.includes(MARKER_ATTR));
+                    _diag.info("==================================================");
+                    _diag.info("writeSignature END SUCCESS");
+                    _diag.info("==================================================");
+                    onDone(true);
+                });
+            }
+        );
+    }
+
+    // ── Chain the steps ───────────────────────────────────────────────────────
+    _step_clearSlot(function () {
+        _step_readBody(function (existingBody) {
+            _step_insertChunks(existingBody);
+        });
+    });
 }
 
 /**
