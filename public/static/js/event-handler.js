@@ -361,6 +361,8 @@ async function bodySetSignatureAsync(item, html) {
 
     const existingBody = await getBody();
 
+    console.log("[CardByte] Existing body length:", existingBody.length, "characters", existingBody)
+
     // Dedupe guard — data-attribute survives OWA/Mac sanitization unlike HTML comments
     if (existingBody.includes(MARKER_ATTR)) {
         console.log("[CardByte] Signature already present — skipping");
