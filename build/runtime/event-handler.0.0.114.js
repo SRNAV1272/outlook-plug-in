@@ -509,14 +509,8 @@ function _notifySizeError(sizes) {
     const actual = sizes?.photoKb ?? 0;
     const overBy = sizes?.photoOverByKb ?? 0;
 
-    const nativeMsg =
-        `CardByte: Signature too large for Outlook. ` +
-        `Profile photo is ${actual} KB — limit is ${allowed} KB (${overBy} KB over).`;
+    Notify.sizeError(sizes); // ← uses showError through the Notify closure
 
-    // Native Office infobar (always fires)
-    showError(NOTIFY_KEYS.API_FAILURE, nativeMsg);
-
-    // Taskpane styled banner (fires if taskpane is open)
     if (typeof window.__cbSetNotification === "function") {
         window.__cbSetNotification({
             type: "error",
