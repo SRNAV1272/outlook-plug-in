@@ -291,8 +291,8 @@ async function bodySetSignatureAsync(item, html) {
     });
 
     const setBody = (content) => new Promise((resolve, reject) => {
-        if (typeof item.body.setAsync !== "function") { reject(new Error("setAsync not available")); return; }
-        item.body.setAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
+        if (typeof item.body.prependAsync !== "function") { reject(new Error("prependAsync not available")); return; }
+        item.body.prependAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
             r.status === "succeeded" ? resolve() : reject(r.error);
         });
     });
@@ -345,32 +345,6 @@ async function bodySetSignatureAsync(item, html) {
     }
 
     await setBody(candidate);
-}
-
-function moveCursorToTop(item) {
-    return new Promise((resolve) => {
-        try {
-            if (typeof item.body?.prependAsync !== "function") {
-                resolve();
-                return;
-            }
-
-            item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-                if (typeof item.body?.setSelectedDataAsync !== "function") {
-                    resolve();
-                    return;
-                }
-
-                item.body.setSelectedDataAsync(
-                    "",
-                    { coercionType: Office.CoercionType.Text },
-                    () => resolve()
-                );
-            });
-        } catch {
-            resolve();
-        }
-    });
 }
 
 // FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
@@ -462,14 +436,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     // await bodySetSignatureAsync(item, finalSignature);
     try {
         await bodySetSignatureAsync(item, finalSignature);
-        setTimeout(async () => {
-            await moveCursorToTop(item);
-
-            // second attempt
-            setTimeout(async () => {
-                await moveCursorToTop(item);
-            }, 500);
-        }, 2500);
     } catch (err) {
         const isOutOfRange =
             err?.code === 5009 ||
