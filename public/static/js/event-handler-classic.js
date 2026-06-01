@@ -7214,7 +7214,7 @@ function writeSignature(item, html, onDone) {
 
     imgs.forEach((img, i) => {
         _diag.info(
-            `IMG ${i + 1}: ${img.substring(0, 300)}`
+            `IMG ${i + 1}:size=${sizeKB.toFixed(1)} KB:  ${img.substring(0, 300)}`
         );
     });
 
