@@ -290,7 +290,7 @@ async function bodySetSignatureAsync(item, html) {
         });
     });
 
-    const setBody = (content) => new Promise((resolve, reject) => {
+    const setSelectedDataAsync = (content) => new Promise((resolve, reject) => {
         if (typeof item.body.setSelectedDataAsync !== "function") { reject(new Error("setSelectedDataAsync not available")); return; }
         item.body.setSelectedDataAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
             r.status === "succeeded" ? resolve() : reject(r.error);
@@ -344,7 +344,7 @@ async function bodySetSignatureAsync(item, html) {
     //     return;
     // }
 
-    await setBody(candidate);
+    await setSelectedDataAsync(candidate);
 }
 
 // FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
@@ -419,9 +419,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     let finalSignature = `
         <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
         <tr>
-            <td style="padding-top:40px; padding-bottom:40px;">
             ${fetched}
-            </td>
         </tr>
         </table>
         `;
