@@ -338,11 +338,11 @@ async function bodySetSignatureAsync(item, html) {
     const candidate = stripped + wrappedHtml;
 
     // Size guard for mobile
-    const maxSize = getMaxHtmlSize();
-    if (candidate.length > maxSize) {
-        console.warn(`[CardByte] Body too large for ${detectPlatform()} (${(candidate.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB) — skipping`);
-        return;
-    }
+    // const maxSize = getMaxHtmlSize();
+    // if (candidate.length > maxSize) {
+    //     console.warn(`[CardByte] Body too large for ${detectPlatform()} (${(candidate.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB) — skipping`);
+    //     return;
+    // }
 
     await setBody(candidate);
 }
