@@ -6716,7 +6716,7 @@ var CONFIG = {
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
 
     // Flip to true only during local development.
-    DIAG_ENABLED: false,
+    DIAG_ENABLED: true,
 
     // OfficeRuntime cache TTL (6 h).
     CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,
