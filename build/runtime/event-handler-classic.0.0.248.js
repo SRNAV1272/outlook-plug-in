@@ -7337,38 +7337,49 @@ function applySignature(event) {
  * The send-budget risk is managed by SEND_HANDLER_TIMEOUT_MS (2 s guard)
  * and by the cache hit path being purely synchronous after the first compose.
  */
+// function onSendHandler(event) {
+//     _diag.info("=== onSendHandler START ===");
+//     var guarded = makeGuardedEvent(event || { completed: function () { } },
+//         CONFIG.SEND_HANDLER_TIMEOUT_MS);
+//     // var item = _safeGetItem();
+//     // if (!item) {
+//     //     _diag.warn("onSendHandler: no item — allowing send");
+//     //     guarded.completed({ allowEvent: true });
+//     //     return;
+//     // }
+
+//     // cacheGet(function (cachedHtml) {
+//     //     if (!cachedHtml) {
+//     //         _diag.info("onSendHandler: no cached signature — passing through");
+//     //         writeDiagnostics(item, function () {
+//     //             guarded.completed({ allowEvent: true });
+//     //         });
+//     //         return;
+//     //     }
+
+//     //     _diag.info("onSendHandler: writing cached signature ("
+//     //         + cachedHtml.length + " chars) with forceReplace=true");
+
+//     //     // forceReplace=true — strip any native sig injected at send time,
+//     //     // then re-write the CardByte signature cleanly.
+//     //     writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
+//     //         if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+//     //         writeDiagnostics(item, function () {
+//     //             guarded.completed({ allowEvent: true });
+//     //         });
+//     //     }, true /* forceReplace */);
+//     // });
+// }
+
 function onSendHandler(event) {
     _diag.info("=== onSendHandler START ===");
-    var guarded = makeGuardedEvent(event || { completed: function () { } },
-        CONFIG.SEND_HANDLER_TIMEOUT_MS);
-    var item = _safeGetItem();
-    if (!item) {
-        _diag.warn("onSendHandler: no item — allowing send");
-        guarded.completed({ allowEvent: true });
-        return;
-    }
 
-    cacheGet(function (cachedHtml) {
-        if (!cachedHtml) {
-            _diag.info("onSendHandler: no cached signature — passing through");
-            writeDiagnostics(item, function () {
-                guarded.completed({ allowEvent: true });
-            });
-            return;
-        }
+    var guarded = makeGuardedEvent(
+        event || { completed: function () { } },
+        CONFIG.SEND_HANDLER_TIMEOUT_MS
+    );
 
-        _diag.info("onSendHandler: writing cached signature ("
-            + cachedHtml.length + " chars) with forceReplace=true");
-
-        // forceReplace=true — strip any native sig injected at send time,
-        // then re-write the CardByte signature cleanly.
-        writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
-            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-            writeDiagnostics(item, function () {
-                guarded.completed({ allowEvent: true });
-            });
-        }, true /* forceReplace */);
-    });
+    guarded.completed({ allowEvent: true });
 }
 
 /**
