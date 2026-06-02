@@ -279,17 +279,46 @@ function stripNativeOutlookSignature(html) {
         /<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi,
         ""
     );
-
     html = html.replace(
         /<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi,
         ""
     );
 
-    // CardByte signature
+    // Old V1 markers
     html = html.replace(
         /__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi,
         ""
     );
+
+    // ✅ CardByte CB_SIG: strip everything from the START token
+    // back to the nearest opening <table before it, through to the
+    // closing </table> after the END token.
+    // OWA restructures HTML so we can't rely on nesting — instead we
+    // find the last <table before the start token and the first </table>
+    // after the end token.
+    const startToken = "__CBSIG_START_7F2C9D4E__";
+    const endToken = "__CBSIG_END_7F2C9D4E__";
+
+    const startIdx = html.indexOf(startToken);
+    const endIdx = html.indexOf(endToken);
+
+    if (startIdx !== -1 && endIdx !== -1) {
+        // Walk backwards from startIdx to find the nearest <table
+        const beforeStart = html.lastIndexOf("<table", startIdx);
+        // Walk forwards from endIdx to find the nearest </table>
+        const afterEnd = html.indexOf("</table>", endIdx);
+
+        if (beforeStart !== -1 && afterEnd !== -1) {
+            html =
+                html.substring(0, beforeStart) +
+                html.substring(afterEnd + "</table>".length);
+        } else {
+            // Fallback: just cut between the tokens themselves
+            html =
+                html.substring(0, startIdx) +
+                html.substring(endIdx + endToken.length);
+        }
+    }
 
     return html;
 }
@@ -387,9 +416,7 @@ async function bodySetSignatureAsync(item, html, send = false) {
 
         const stripped = stripNativeOutlookSignature(existingBody);
 
-        const candidate =
-            (send ? "" : stripped) +
-            wrappedHtml;
+        const candidate = stripped + wrappedHtml;
 
         await setSelectedDataAsync(candidate);
         return;
