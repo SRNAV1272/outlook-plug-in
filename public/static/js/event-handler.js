@@ -271,7 +271,7 @@ function stripNativeOutlookSignature(html) {
     return bodyHtml;
 }
 
-async function bodySetSignatureAsync(item, html) {
+async function bodySetSignatureAsync(item, html, send = false) {
     const MARKER_ATTR = 'data-cardbyte-sig="1"';
     const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
     const htmlSizeKB = new Blob([html]).size / 1024;
@@ -335,7 +335,7 @@ async function bodySetSignatureAsync(item, html) {
 
     console.log("[CardByte] Existing body length:", existingBody.length, "characters", existingBody, stripped)
 
-    const candidate = wrappedHtml;
+    const candidate = (send ? "" : stripped) + wrappedHtml;
 
     // Size guard for mobile
     // const maxSize = getMaxHtmlSize();
@@ -349,7 +349,7 @@ async function bodySetSignatureAsync(item, html) {
 
 // FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
 // sessionStorage) can still read the signature cached by the compose iframe.
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}) {
+async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, send = false } = {}) {
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
 
@@ -430,7 +430,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     );
 
     try {
-        await bodySetSignatureAsync(item, finalSignature);
+        await bodySetSignatureAsync(item, finalSignature, send);
     } catch (err) {
         const isOutOfRange =
             err?.code === 5009 ||
@@ -555,7 +555,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
     try {
         if (!item) return;
         // compose iframe — normal session check applies
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: true, send: false });
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
     } finally {
@@ -572,7 +572,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         // FIX: skipSessionCheck:true because onSendHandler runs in a separate
         // iframe with its own fresh sessionStorage, so the session ID never
         // matches the one stored by applySignature — causing a false cache miss.
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true, send: true });
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
