@@ -345,7 +345,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
     try {
         // if (!item) return;
         // compose iframe — normal session check applies
-        // await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
     } finally {
@@ -362,7 +362,7 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         // FIX: skipSessionCheck:true because onSendHandler runs in a separate
         // iframe with its own fresh sessionStorage, so the session ID never
         // matches the one stored by applySignature — causing a false cache miss.
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
+        // await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
