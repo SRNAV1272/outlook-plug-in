@@ -1,15 +1,38 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// CardByte Outlook Signature Injector
+// Fixes:
+//   1. Strip cuts nested tables too early → use comment wrap boundaries
+//   2. Token leaks into OWA email snippets → display:none + visibility:hidden
+//   3. Duplicate signature on replace → exact comment-boundary strip
+//   4. Reply/Forward thread chain removed by setSelectedDataAsync full-rewrite
+//      → detect compose type and prepend-only for replies
+// ─────────────────────────────────────────────────────────────────────────────
+
 let CACHED_SIGNATURE_HTML = null;
 const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
+
+// ── Boundary tokens (kept for detection / backwards-compat strip) ─────────────
 const CB_SIG_START = "__CBSIG_START_7F2C9D4E__";
 const CB_SIG_END = "__CBSIG_END_7F2C9D4E__";
+
+// ── Comment wrap sentinels — immune to nested-table mis-parsing ───────────────
+const CB_WRAP_START = "<!--CBSIG-WRAP-START-7F2C9D4E-->";
+const CB_WRAP_END = "<!--CBSIG-WRAP-END-7F2C9D4E-->";
+
+// ── Encryption constants ──────────────────────────────────────────────────────
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-// ─── Session-based cache buster ───────────────────────────────────────────────
+
+// ── Session-based cache buster ────────────────────────────────────────────────
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION / CACHE HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
 
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
@@ -20,12 +43,12 @@ function getOrCreateSessionId() {
     return sid;
 }
 
-// FIX: Added skipSessionCheck option so onSendHandler (which runs in a separate
-// iframe/JS context with a fresh sessionStorage) can still read the cached
-// signature that was stored by applySignature in the compose iframe.
-
+/**
+ * FIX: Added skipSessionCheck option so onSendHandler (which runs in a separate
+ * iframe/JS context with a fresh sessionStorage) can still read the cached
+ * signature that was stored by applySignature in the compose iframe.
+ */
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-    // If skipping session check, just return whatever is in cache directly
     if (skipSessionCheck) {
         return localStorage.getItem(CACHE_KEY);
     }
@@ -64,10 +87,12 @@ function setCachedSignature(html) {
     } catch (_) { }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PLATFORM DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+
 const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
-const MOBILE_MAX_IMAGE_WIDTH = 200;
-const MOBILE_IMAGE_QUALITY = 0.5;
 
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
@@ -97,22 +122,19 @@ function detectPlatform() {
     return "desktop";
 }
 
-function isMobile() {
-    const p = detectPlatform();
-    return p === "mobile-ios" || p === "mobile-android";
-}
-
+function isMobile() { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; }
 function isOWA() { return detectPlatform() === "owa"; }
 function isMac() { return detectPlatform() === "mac"; }
-
-function getMaxHtmlSize() {
-    return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
-}
+function getMaxHtmlSize() { return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE; }
 
 Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
     console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CRYPTO HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
 
 function base64ToArrayBuffer(base64) {
     let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
@@ -182,6 +204,10 @@ async function encryptEmail(email = "") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SERVER FETCH
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function renderSignatureOnServer(user) {
     const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
@@ -218,6 +244,10 @@ async function renderSignatureOnServer(user) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IMAGE HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
 function extractBase64Images(html) {
     const images = [];
     let index = 0;
@@ -251,180 +281,420 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// STRIP HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Find the closing </table> that MATCHES the opening <table> at tableOpenIdx.
+ * Handles arbitrary nesting — fixes the bug where the old code would stop at
+ * the first </table> which belonged to an inner nested table, not the wrapper.
+ */
+function findMatchingTableClose(html, tableOpenIdx) {
+    let depth = 0;
+    let i = tableOpenIdx;
+
+    while (i < html.length) {
+        const openMatch = html.indexOf("<table", i);
+        const closeMatch = html.indexOf("</table>", i);
+
+        if (openMatch === -1 && closeMatch === -1) break;
+
+        const nextOpen = openMatch !== -1 ? openMatch : Infinity;
+        const nextClose = closeMatch !== -1 ? closeMatch : Infinity;
+
+        if (nextOpen < nextClose) {
+            depth++;
+            i = nextOpen + 6; // skip past "<table"
+        } else {
+            depth--;
+            i = nextClose + 8; // skip past "</table>"
+            if (depth === 0) return nextClose; // ← matched closing tag index
+        }
+    }
+    return -1;
+}
+
+/**
+ * Strip the CardByte signature block from an HTML string.
+ *
+ * Strategy (in priority order):
+ *   1. Comment wrap sentinels  <!--CBSIG-WRAP-START/END-->  (new, exact, nested-safe)
+ *   2. Token + nesting-aware table close                    (old fallback, now fixed)
+ *   3. Raw token cut                                        (last resort)
+ */
+function stripCbSigBlock(html) {
+    // ── Strategy 1: comment wrap boundaries (new format) ─────────────────────
+    const wrapStartIdx = html.indexOf(CB_WRAP_START);
+    const wrapEndIdx = html.indexOf(CB_WRAP_END);
+
+    if (wrapStartIdx !== -1 && wrapEndIdx !== -1) {
+        console.log("[CardByte] Strip: using comment-wrap boundaries");
+        return (
+            html.substring(0, wrapStartIdx) +
+            html.substring(wrapEndIdx + CB_WRAP_END.length)
+        );
+    }
+
+    // ── Strategy 2: token + nesting-aware table close (fixed old format) ─────
+    const startIdx = html.indexOf(CB_SIG_START);
+    const endIdx = html.indexOf(CB_SIG_END);
+
+    if (startIdx !== -1 && endIdx !== -1) {
+        console.log("[CardByte] Strip: using token + nesting-aware table close");
+        const tableOpenIdx = html.lastIndexOf("<table", startIdx);
+        const tableCloseIdx = tableOpenIdx !== -1
+            ? findMatchingTableClose(html, tableOpenIdx)
+            : -1;
+
+        if (tableOpenIdx !== -1 && tableCloseIdx !== -1) {
+            return (
+                html.substring(0, tableOpenIdx) +
+                html.substring(tableCloseIdx + "</table>".length)
+            );
+        }
+
+        // ── Strategy 3: raw token cut (last resort) ───────────────────────────
+        console.log("[CardByte] Strip: fallback raw token cut");
+        return (
+            html.substring(0, startIdx) +
+            html.substring(endIdx + CB_SIG_END.length)
+        );
+    }
+
+    return html; // nothing to strip
+}
+
+/**
+ * Master strip function — removes ALL known signature artifacts:
+ *   - Outlook native <div id="Signature"> and <div id="appendonsend">
+ *   - Old V1 CardByte markers
+ *   - Current CB_SIG wrapped block (via stripCbSigBlock)
+ */
 function stripNativeOutlookSignature(html) {
-    // Outlook native signatures
+    // Outlook native signature div
     html = html.replace(
         /<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi,
         ""
     );
+    // Outlook appendonsend div
     html = html.replace(
         /<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi,
         ""
     );
-
-    // Old V1 markers
+    // Old V1 CardByte markers
     html = html.replace(
         /__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi,
         ""
     );
-
-    // ✅ CardByte CB_SIG: strip everything from the START token
-    // back to the nearest opening <table before it, through to the
-    // closing </table> after the END token.
-    // OWA restructures HTML so we can't rely on nesting — instead we
-    // find the last <table before the start token and the first </table>
-    // after the end token.
-    const startToken = "__CBSIG_START_7F2C9D4E__";
-    const endToken = "__CBSIG_END_7F2C9D4E__";
-
-    const startIdx = html.indexOf(startToken);
-    const endIdx = html.indexOf(endToken);
-
-    if (startIdx !== -1 && endIdx !== -1) {
-        // Walk backwards from startIdx to find the nearest <table
-        const beforeStart = html.lastIndexOf("<table", startIdx);
-        // Walk forwards from endIdx to find the nearest </table>
-        const afterEnd = html.indexOf("</table>", endIdx);
-
-        if (beforeStart !== -1 && afterEnd !== -1) {
-            html =
-                html.substring(0, beforeStart) +
-                html.substring(afterEnd + "</table>".length);
-        } else {
-            // Fallback: just cut between the tokens themselves
-            html =
-                html.substring(0, startIdx) +
-                html.substring(endIdx + endToken.length);
-        }
-    }
+    // Current CardByte wrapped block
+    html = stripCbSigBlock(html);
 
     return html;
 }
 
-async function bodySetSignatureAsync(item, html, send = false) {
-    const MARKER_ATTR = 'data-cardbyte-sig="1"';
-    let wrappedHtml = `
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0">
-            <tr>
-                <td style="font-size:1px;color:#ffffff;line-height:1px;">
-                    ${CB_SIG_START}
-                </td>
-            </tr>
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPOSE TYPE DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
 
-            <tr>
-                <td>
-                    ${html}
-                </td>
-            </tr>
-
-            <tr>
-                <td style="font-size:1px;color:#ffffff;line-height:1px;">
-                    ${CB_SIG_END}
-                </td>
-            </tr>
-        </table>
-    `;
-
-    const htmlSizeKB = new Blob([html]).size / 1024;
-    const hasSetSig = typeof item.body.setSignatureAsync === "function";
-
-    const setSignature = (content) => new Promise((resolve, reject) => {
-        item.body.setSignatureAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
-            r.status === "succeeded" ? resolve() : reject(r.error);
+/**
+ * Returns true if the current compose window is a reply, replyAll, or forward.
+ * Uses getComposeTypeAsync when available (OWA / new Outlook).
+ * Falls back to false (assumes new email) when the API isn't available.
+ */
+function isReplyOrForward(item) {
+    return new Promise((resolve) => {
+        if (typeof item.getComposeTypeAsync !== "function") {
+            // API not available — classic Windows / mobile — assume new email
+            resolve(false);
+            return;
+        }
+        item.getComposeTypeAsync({}, (result) => {
+            if (result.status === "succeeded") {
+                const t = result.value?.composeType || "";
+                resolve(t === "reply" || t === "replyAll" || t === "forward");
+            } else {
+                console.warn("[CardByte] getComposeTypeAsync failed:", result.error);
+                resolve(false);
+            }
         });
     });
+}
 
-    const getBody = () => new Promise((resolve, reject) => {
-        if (typeof item.body.getAsync !== "function") { reject(new Error("getAsync not available")); return; }
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNATURE WRAPPER
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Wraps signature HTML in:
+ *   - Comment sentinels for exact strip (immune to nested tables)
+ *   - A presentation table with fully-hidden token cells
+ *
+ * The token cells use every available hiding technique so they don't leak
+ * into OWA email previews/snippets:
+ *   display:none           — hides from OWA snippet generator
+ *   visibility:hidden      — hides in WebKit renders
+ *   max-height:0 / overflow:hidden — collapses in most email clients
+ *   mso-hide:all           — hides in Outlook desktop rendering engine
+ *   font-size:0 / line-height:0    — zero space even if above fail
+ *   color:transparent      — last-resort colour hide
+ */
+function buildWrappedSignatureHtml(html) {
+    const hiddenStyle = [
+        "display:none",
+        "visibility:hidden",
+        "font-size:0",
+        "line-height:0",
+        "max-height:0",
+        "overflow:hidden",
+        "mso-hide:all",
+        "color:transparent",
+        "padding:0",
+        "margin:0",
+        "border:0",
+    ].join(";");
+
+    return `${CB_WRAP_START}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border:0;padding:0;margin:0;">
+    <tr>
+        <td style="${hiddenStyle}">
+            ${CB_SIG_START}
+        </td>
+    </tr>
+    <tr>
+        <td>
+            ${html}
+        </td>
+    </tr>
+    <tr>
+        <td style="${hiddenStyle}">
+            ${CB_SIG_END}
+        </td>
+    </tr>
+</table>
+${CB_WRAP_END}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OFFICE API PROMISE WRAPPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _setSignature(item, content) {
+    return new Promise((resolve, reject) => {
+        item.body.setSignatureAsync(
+            content,
+            { coercionType: Office.CoercionType.Html },
+            (r) => r.status === "succeeded" ? resolve() : reject(r.error)
+        );
+    });
+}
+
+function _getBody(item) {
+    return new Promise((resolve, reject) => {
+        if (typeof item.body.getAsync !== "function") {
+            reject(new Error("getAsync not available")); return;
+        }
         item.body.getAsync(Office.CoercionType.Html, (r) => {
             r.status === "succeeded" ? resolve(r.value || "") : reject(r.error);
         });
     });
+}
 
-    const setSelectedDataAsync = (content) => new Promise((resolve, reject) => {
-        if (typeof item.body.setSelectedDataAsync !== "function") { reject(new Error("setSelectedDataAsync not available")); return; }
-        item.body.setSelectedDataAsync(content, { coercionType: Office.CoercionType.Html }, (r) => {
-            r.status === "succeeded" ? resolve() : reject(r.error);
-        });
+function _setSelectedData(item, content) {
+    return new Promise((resolve, reject) => {
+        if (typeof item.body.setSelectedDataAsync !== "function") {
+            reject(new Error("setSelectedDataAsync not available")); return;
+        }
+        item.body.setSelectedDataAsync(
+            content,
+            { coercionType: Office.CoercionType.Html },
+            (r) => r.status === "succeeded" ? resolve() : reject(r.error)
+        );
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE SIGNATURE INJECTION
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * bodySetSignatureAsync — the main injection engine.
+ *
+ * PATH A  (small sig + setSignatureAsync available)
+ *   → write directly into Outlook's managed signature slot.
+ *   → thread-safe: Outlook keeps user content and signature slot separate.
+ *
+ * PATH B  (large sig OR no setSignatureAsync)
+ *   → must rewrite via getAsync → strip → setSelectedDataAsync.
+ *   → REPLY GUARD: for reply/replyAll/forward, never do a full-body rewrite
+ *     because getAsync may not include the quoted thread on all clients.
+ *     Instead, PREPEND the signature above the existing body so the thread
+ *     is always preserved.
+ */
+async function bodySetSignatureAsync(item, html, send = false) {
+    const wrappedHtml = buildWrappedSignatureHtml(html);
+    const htmlSizeKB = new Blob([html]).size / 1024;
+    const hasSetSig = typeof item.body.setSignatureAsync === "function";
 
     console.log(`[CardByte] Signature size: ${htmlSizeKB.toFixed(1)}KB | setSignatureAsync: ${hasSetSig}`);
 
     // ── PATH A: Small signature + API available ───────────────────────────────
-    // setSignatureAsync is reliable only under ~100KB — use it directly
+    // setSignatureAsync manages its own slot — fully thread-safe, no rewrite needed.
     if (hasSetSig && htmlSizeKB < 100) {
-        console.log("[CardByte] PATH A: direct setSignatureAsync");
-        await setSignature(wrappedHtml);
+        console.log("[CardByte] PATH A: setSignatureAsync (thread-safe)");
+        await _setSignature(item, wrappedHtml);
         return;
     }
 
     // ── PATH B: Large signature OR no setSignatureAsync ───────────────────────
-    // Large HTML silently fails/truncates in setSignatureAsync regardless of
-    // API availability — must go through body directly via getAsync → setAsync.
-    // Also the only path for classic Windows / mobile where API doesn't exist.
-    console.log(`[CardByte] PATH B: ${htmlSizeKB >= 100 ? "large signature" : "no setSignatureAsync"} → getAsync → strip → setAsync`);
+    console.log(`[CardByte] PATH B: ${htmlSizeKB >= 100 ? "large sig" : "no setSignatureAsync"} → body rewrite`);
 
-    // Clear the native signature slot first if API is available —
-    // prevents Outlook from re-injecting its default sig into the body
-    // after we write via setAsync
+    // Clear Outlook's native signature slot so it doesn't re-inject its default
+    // sig after we write via setSelectedDataAsync.
     if (hasSetSig) {
-        try { await setSignature(""); }
-        catch (e) { console.warn("[CardByte] Clear slot failed (non-fatal):", e); }
+        try { await _setSignature(item, ""); }
+        catch (e) { console.warn("[CardByte] Clear sig slot failed (non-fatal):", e); }
     }
 
-    const existingBody = await getBody();
+    const existingBody = await _getBody(item);
 
-    console.log(
-        "[CardByte] START TOKEN FOUND:",
-        existingBody.includes(CB_SIG_START)
-    );
+    const hasStart = existingBody.includes(CB_SIG_START) || existingBody.includes(CB_WRAP_START);
+    const hasEnd = existingBody.includes(CB_SIG_END) || existingBody.includes(CB_WRAP_END);
 
-    console.log(
-        "[CardByte] END TOKEN FOUND:",
-        existingBody.includes(CB_SIG_END)
-    );
+    console.log("[CardByte] Wrap-start found:", existingBody.includes(CB_WRAP_START));
+    console.log("[CardByte] Wrap-end found:", existingBody.includes(CB_WRAP_END));
+    console.log("[CardByte] Token-start found:", existingBody.includes(CB_SIG_START));
+    console.log("[CardByte] Token-end found:", existingBody.includes(CB_SIG_END));
 
+    // ── Detect reply/forward to guard the thread chain ────────────────────────
+    const isReply = await isReplyOrForward(item);
+    console.log(`[CardByte] isReply/Forward: ${isReply}`);
 
-    // Dedupe guard — data-attribute survives OWA/Mac sanitization unlike HTML comments
-    if (
-        existingBody.includes(CB_SIG_START) &&
-        existingBody.includes(CB_SIG_END)
-    ) {
-        console.log("[CardByte] Existing CardByte signature found");
+    if (isReply) {
+        // ── REPLY PATH ────────────────────────────────────────────────────────
+        // NEVER do a full-body rewrite in reply/forward — getAsync may not
+        // include the quoted thread on classic Windows / mobile, so rewriting
+        // would discard it permanently.
+        //
+        // Strategy:
+        //   • If CardByte sig already present → strip it from body, then prepend
+        //     fresh sig above the (possibly truncated) body.  The quoted thread
+        //     (if present in existingBody) is preserved after the sig.
+        //   • If no CardByte sig yet → just prepend above whatever body exists.
 
-        const stripped = stripNativeOutlookSignature(existingBody);
-
-        const candidate = stripped + wrappedHtml;
-
-        await setSelectedDataAsync(candidate);
+        if (hasStart && hasEnd) {
+            console.log("[CardByte] REPLY: replacing existing CardByte sig — strip then prepend");
+            const stripped = stripNativeOutlookSignature(existingBody);
+            await _setSelectedData(item, wrappedHtml + stripped);
+        } else {
+            console.log("[CardByte] REPLY: no existing sig — prepending above body");
+            const stripped = stripNativeOutlookSignature(existingBody); // remove any Outlook native sig
+            await _setSelectedData(item, wrappedHtml + stripped);
+        }
         return;
     }
 
-    // Strip known native Outlook sig wrappers before appending ours
+    // ── NEW EMAIL PATH ────────────────────────────────────────────────────────
+    // Full strip + append is safe — there is no thread to lose.
+
+    if (hasStart && hasEnd) {
+        console.log("[CardByte] NEW: replacing existing CardByte sig — strip then append");
+    } else {
+        console.log("[CardByte] NEW: no existing sig — stripping native sig and appending");
+    }
+
     const stripped = stripNativeOutlookSignature(existingBody);
-
-    console.log("[CardByte] Existing body length:", existingBody.length, "characters", existingBody, stripped)
-
     const candidate = stripped + wrappedHtml;
 
-    // Size guard for mobile
-    // const maxSize = getMaxHtmlSize();
-    // if (candidate.length > maxSize) {
-    //     console.warn(`[CardByte] Body too large for ${detectPlatform()} (${(candidate.length / 1024).toFixed(1)}KB > ${(maxSize / 1024).toFixed(0)}KB) — skipping`);
-    //     return;
-    // }
-
-    await setSelectedDataAsync(candidate);
+    await _setSelectedData(item, candidate);
 }
 
-// FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
-// sessionStorage) can still read the signature cached by the compose iframe.
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, send = false } = {}) {
+// ─────────────────────────────────────────────────────────────────────────────
+// PROFILE PHOTO / ERROR SIGNATURE HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const extractProfilePhotoSrc = (html) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const img = doc.querySelector('img[alt="Profile Photo"]');
+    return img ? img.src : null;
+};
+
+function buildSizeErrorSignatureHtml({ totalHtmlKb, profilePicKb, htmlWithoutImageKb, allowedProfilePicKb }) {
+    const limitColor = allowedProfilePicKb < 0 ? "#c0392b" : "#1a7a1a";
+    const limitNote = allowedProfilePicKb < 0 ? " ⛔ HTML alone exceeds 100 KB!" : "";
+
+    return `
+    <br/>
+    <table cellpadding="0" cellspacing="0" border="0" width="480"
+           style="font-family:Arial,sans-serif;font-size:12px;
+                  border:2px solid #e6a817;border-radius:6px;
+                  background:#fff8e1;margin-top:20px;">
+        <tr>
+            <td style="background:#e6a817;padding:8px 14px;border-radius:4px 4px 0 0;">
+                <strong style="color:#fff;font-size:13px;">⚠️ CardByte — Signature Too Large</strong>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:12px 14px;color:#5a3e00;">
+                <p style="margin:0 0 10px 0;">
+                    Your email signature could not be applied because its total size
+                    exceeds Outlook's <strong>100 KB</strong> limit
+                    (<code>ArgumentOutOfRangeException</code>).
+                </p>
+                <table cellpadding="4" cellspacing="0" border="0"
+                       style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <tr style="background:#fff3cd;">
+                        <td style="padding:4px 10px;">📄 Total HTML size</td>
+                        <td style="font-weight:bold;text-align:right;">${totalHtmlKb.toFixed(2)} KB</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:4px 10px;">🖼️ Profile photo size</td>
+                        <td style="font-weight:bold;text-align:right;">${profilePicKb.toFixed(2)} KB</td>
+                    </tr>
+                    <tr style="background:#fff3cd;">
+                        <td style="padding:4px 10px;">📝 HTML without profile photo</td>
+                        <td style="font-weight:bold;text-align:right;">${htmlWithoutImageKb.toFixed(2)} KB</td>
+                    </tr>
+                    <tr style="border-top:2px solid #e6a817;">
+                        <td style="padding:6px 10px;"><strong>✅ Max allowed profile photo size</strong></td>
+                        <td style="font-weight:bold;text-align:right;color:${limitColor};">
+                            ${allowedProfilePicKb.toFixed(2)} KB${limitNote}
+                        </td>
+                    </tr>
+                </table>
+                <p style="margin:10px 0 0 0;font-size:11px;color:#7a5800;">
+                    Formula: <strong>100 KB</strong> limit
+                    &minus; <strong>${htmlWithoutImageKb.toFixed(2)} KB</strong> (HTML without photo)
+                    = <strong style="color:${limitColor};">${allowedProfilePicKb.toFixed(2)} KB</strong>
+                    remaining for profile picture.
+                </p>
+            </td>
+        </tr>
+    </table>
+    <br/>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE APPLY LOGIC
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
+ * sessionStorage) can still read the signature cached by the compose iframe.
+ */
+async function _applySignatureCore(item, mailbox, {
+    fetchIfMissing = false,
+    skipTtl = false,
+    skipSessionCheck = false,
+    send = false,
+} = {}) {
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
 
     let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
 
+    // ── Fetch from server if cache is empty ───────────────────────────────────
     if (fetchIfMissing && userEmail && fetched == null) {
         const MAX_RETRIES = 2;
         let attempt = 0;
@@ -434,7 +704,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             try {
                 if (attempt > 0) {
                     console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, then 2s
+                    await new Promise(r => setTimeout(r, 1000 * attempt));
                 }
                 const result = await renderSignatureOnServer(userEmail);
                 if (result != null) {
@@ -451,24 +721,17 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             attempt++;
         }
 
-        if (fetched != null) {
-            CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);  // ← store compressed, not raw
-        }
-
         if (fetched == null) {
             console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
         }
     }
 
-    // FIX: If signature is still null (server down, cache miss, no email, etc.)
-    // fall back to a minimal identity signature instead of inserting "null".
-    // Fallback only if everything above — fresh fetch, retries — all came up empty
+    // ── Fallback chain if still null ──────────────────────────────────────────
     if (!fetched) {
-        // Last-ditch: try reading stale cache, bypassing both session and TTL checks
+        // Last-ditch: stale cache ignoring session and TTL
         const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (staleCache) {
-            console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
+            console.warn("[CardByte] Using stale cached signature as last resort.");
             fetched = staleCache;
         } else {
             console.warn("[CardByte] No signature available — using fallback identity signature.");
@@ -487,7 +750,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     }
 
     console.log("[CardByte] ════════════════════════════════════",
-        fetched ? "Applying signature" : "No cached signature, will fetch from server",
+        fetched ? "Applying signature" : "No cached signature",
         fetched, item?.body
     );
 
@@ -500,18 +763,12 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
                 err.message.toLowerCase().includes("argumentoutofrange"));
 
         if (isOutOfRange) {
-            console.warn("[CardByte] ArgumentOutOfRangeException — HTML too large. Diagnosing size...");
+            console.warn("[CardByte] ArgumentOutOfRangeException — HTML too large. Diagnosing...");
 
-            // 1. Extract profile photo src
             const profileSrc = extractProfilePhotoSrc(fetched);
-            const totalHtmlBytes = new TextEncoder().encode(finalSignature).length;
+            const totalHtmlBytes = new TextEncoder().encode(fetched).length;
+            const profileSrcBytes = profileSrc ? new TextEncoder().encode(profileSrc).length : 0;
 
-            let profileSrcBytes = 0;
-            if (profileSrc) {
-                profileSrcBytes = new TextEncoder().encode(profileSrc).length;
-            }
-
-            // 2. Calculate sizes
             const htmlWithoutImageBytes = totalHtmlBytes - profileSrcBytes;
             const LIMIT_KB = 100;
             const totalHtmlKb = totalHtmlBytes / 1024;
@@ -519,9 +776,8 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             const htmlWithoutImageKb = htmlWithoutImageBytes / 1024;
             const allowedProfilePicKb = LIMIT_KB - htmlWithoutImageKb;
 
-            console.warn(`[CardByte] ⚠️ Profile picture size limit: ${allowedProfilePicKb.toFixed(2)} KB`);
+            console.warn(`[CardByte] ⚠️ Allowed profile pic size: ${allowedProfilePicKb.toFixed(2)} KB`);
 
-            // 3. Build error signature HTML and inject it into the email body
             const errorSignatureHtml = buildSizeErrorSignatureHtml({
                 totalHtmlKb,
                 profilePicKb,
@@ -531,84 +787,19 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
 
             try {
                 await bodySetSignatureAsync(item, errorSignatureHtml);
-                console.log("[CardByte] Error diagnostic signature injected into email body.");
+                console.log("[CardByte] Error diagnostic signature injected.");
             } catch (innerErr) {
                 console.error("[CardByte] Failed to inject error signature:", innerErr);
             }
-
         } else {
             throw err;
         }
     }
 }
 
-// ─── Helper: extract profile photo src ────────────────────────────────────────
-const extractProfilePhotoSrc = (html) => {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, "text/html");
-    const img = doc.querySelector('img[alt="Profile Photo"]');
-    return img ? img.src : null;
-};
-
-function buildSizeErrorSignatureHtml({ totalHtmlKb, profilePicKb, htmlWithoutImageKb, allowedProfilePicKb }) {
-    const limitColor = allowedProfilePicKb < 0 ? "#c0392b" : "#1a7a1a";
-    const limitNote = allowedProfilePicKb < 0 ? " ⛔ HTML alone exceeds 100 KB!" : "";
-
-    return `
-    <br/>
-        <table cellpadding="0" cellspacing="0" border="0" width="480"
-               style="font-family:Arial,sans-serif; font-size:12px;
-                      border:2px solid #e6a817; border-radius:6px;
-                      background:#fff8e1; margin-top:20px;">
-            <tr>
-                <td style="background:#e6a817; padding:8px 14px; border-radius:4px 4px 0 0;">
-                    <strong style="color:#fff; font-size:13px;">
-                        ⚠️ CardByte — Signature Too Large
-                    </strong>
-                </td>
-            </tr>
-            <tr>
-                <td style="padding:12px 14px; color:#5a3e00;">
-                    <p style="margin:0 0 10px 0;">
-                        Your email signature could not be applied because its total size
-                        exceeds Outlook's <strong>100 KB</strong> limit
-                        (<code>ArgumentOutOfRangeException</code>).
-                    </p>
-                    <table cellpadding="4" cellspacing="0" border="0"
-                           style="width:100%; border-collapse:collapse; font-size:12px;">
-                        <tr style="background:#fff3cd;">
-                            <td style="padding:4px 10px;">📄 Total HTML size</td>
-                            <td style="font-weight:bold; text-align:right;">${totalHtmlKb.toFixed(2)} KB</td>
-                        </tr>
-                        <tr>
-                            <td style="padding:4px 10px;">🖼️ Profile photo size</td>
-                            <td style="font-weight:bold; text-align:right;">${profilePicKb.toFixed(2)} KB</td>
-                        </tr>
-                        <tr style="background:#fff3cd;">
-                            <td style="padding:4px 10px;">📝 HTML without profile photo</td>
-                            <td style="font-weight:bold; text-align:right;">${htmlWithoutImageKb.toFixed(2)} KB</td>
-                        </tr>
-                        <tr style="border-top:2px solid #e6a817;">
-                            <td style="padding:6px 10px;">
-                                <strong>✅ Max allowed profile photo size</strong>
-                            </td>
-                            <td style="font-weight:bold; text-align:right; color:${limitColor};">
-                                ${allowedProfilePicKb.toFixed(2)} KB${limitNote}
-                            </td>
-                        </tr>
-                    </table>
-                    <p style="margin:10px 0 0 0; font-size:11px; color:#7a5800;">
-                        Formula: <strong>100 KB</strong> limit
-                        &minus; <strong>${htmlWithoutImageKb.toFixed(2)} KB</strong> (HTML without photo)
-                        = <strong style="color:${limitColor};">${allowedProfilePicKb.toFixed(2)} KB</strong>
-                        remaining for profile picture.
-                    </p>
-                </td>
-            </tr>
-        </table>
-        <br/>
-    `;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC ENTRY POINTS
+// ─────────────────────────────────────────────────────────────────────────────
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
     const mailbox = Office?.context?.mailbox;
@@ -616,7 +807,6 @@ window.applySignature = async function (event = { completed: () => { } }, option
 
     try {
         if (!item) return;
-        // compose iframe — normal session check applies
         await _applySignatureCore(item, mailbox, { fetchIfMissing: true, send: false });
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
@@ -632,15 +822,24 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     try {
         if (!item) return;
         // FIX: skipSessionCheck:true because onSendHandler runs in a separate
-        // iframe with its own fresh sessionStorage, so the session ID never
-        // matches the one stored by applySignature — causing a false cache miss.
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true, send: true });
+        // iframe with its own fresh sessionStorage — session ID never matches
+        // the one stored by applySignature, causing a false cache miss.
+        await _applySignatureCore(item, mailbox, {
+            fetchIfMissing: false,
+            skipTtl: true,
+            skipSessionCheck: true,
+            send: true,
+        });
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
         event.completed({ allowEvent: true });
     }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OFFICE ACTIONS REGISTRATION
+// ─────────────────────────────────────────────────────────────────────────────
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("onSendHandler", onSendHandler);
