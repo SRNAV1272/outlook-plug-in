@@ -400,7 +400,7 @@ async function bodySetSignatureAsync(item, html, send = false) {
 
     console.log("[CardByte] Existing body length:", existingBody.length, "characters", existingBody, stripped)
 
-    const candidate = (send ? "" : stripped) + wrappedHtml;
+    const candidate = stripped + wrappedHtml;
 
     // Size guard for mobile
     // const maxSize = getMaxHtmlSize();
