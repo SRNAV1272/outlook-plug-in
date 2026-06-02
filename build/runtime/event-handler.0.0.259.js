@@ -273,7 +273,16 @@ function stripNativeOutlookSignature(html) {
 
 async function bodySetSignatureAsync(item, html, send = false) {
     const MARKER_ATTR = 'data-cardbyte-sig="1"';
-    const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
+    // const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
+    let wrappedHtml = `
+        <div ${MARKER_ATTR}>
+            <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                    ${html}
+                </tr>
+            </table>
+        </div>
+        `;
     const htmlSizeKB = new Blob([html]).size / 1024;
     const hasSetSig = typeof item.body.setSignatureAsync === "function";
 
@@ -416,21 +425,13 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    let finalSignature = `
-        <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
-        <tr>
-            ${fetched}
-        </tr>
-        </table>
-        `;
-
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
         finalSignature, item?.body
     );
 
     try {
-        await bodySetSignatureAsync(item, finalSignature, send);
+        await bodySetSignatureAsync(item, fetched, send);
     } catch (err) {
         const isOutOfRange =
             err?.code === 5009 ||
