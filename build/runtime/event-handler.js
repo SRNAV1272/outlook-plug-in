@@ -351,7 +351,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
                 }
                 const result = await renderSignatureOnServer(userEmail);
                 if (result != null) {
-                    fetched = compressImagesInHtml(result);
+                    fetched = result;
                     CACHED_SIGNATURE_HTML = fetched;
                     setCachedSignature(fetched);
                     break;
@@ -366,7 +366,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
 
         if (fetched != null) {
             // Compress immediately after fetch and store compressed version
-            // fetched = await compressImagesInHtml(fetched);
+            fetched = await compressImagesInHtml(fetched);
             CACHED_SIGNATURE_HTML = fetched;
             setCachedSignature(fetched);  // ← store compressed, not raw
         }
