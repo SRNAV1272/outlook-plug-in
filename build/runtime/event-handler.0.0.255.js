@@ -273,20 +273,7 @@ function stripNativeOutlookSignature(html) {
 
 async function bodySetSignatureAsync(item, html, send = false) {
     const MARKER_ATTR = 'data-cardbyte-sig="1"';
-    const wrappedHtml = `
-        <div ${MARKER_ATTR}>
-            <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
-                <tr>
-                    <td>
-                        <p>&ensp;</p>
-                    </td>
-                </tr> <!-- Spacer row for better separation -->
-                <tr>
-                    ${html}
-                </tr>
-            </table>
-        </div>
-        `;
+    const wrappedHtml = `<div ${MARKER_ATTR}>${html}</div>`;
     const htmlSizeKB = new Blob([html]).size / 1024;
     const hasSetSig = typeof item.body.setSignatureAsync === "function";
 
@@ -348,18 +335,7 @@ async function bodySetSignatureAsync(item, html, send = false) {
 
     console.log("[CardByte] Existing body length:", existingBody.length, "characters", existingBody, stripped)
 
-    const candidate = (send ?
-        `
-            <table id="cardbyte-signature" role="presentation" cellpadding="0" cellspacing="0" border="0">
-                <tr>
-                    <td>
-                        <p>&ensp;</p>
-                    </td>
-                </tr>
-            </table>
-
-        `
-        : stripped) + wrappedHtml;
+    const candidate = (send ? "" : stripped) + wrappedHtml;
 
     // Size guard for mobile
     // const maxSize = getMaxHtmlSize();
