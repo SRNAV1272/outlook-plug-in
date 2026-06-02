@@ -6879,13 +6879,58 @@ function cacheClear(cb) {
 // The annotated HTML is what gets cached and written to the compose body.
 
 function injectSigMarkers(html) {
-    if (!html) return html;
-    // Stamp every <td ...> and <tr ...> (self-contained tags, never nested like <table>).
-    html = html.replace(/<td(\s|>)/gi, '<td data-cb="sig"$1');
-    html = html.replace(/<tr(\s|>)/gi, '<tr data-cb="sig"$1');
-    // Also stamp the root-level table(s) in the signature for belt-and-suspenders.
-    html = html.replace(/<table(\s|>)/gi, '<table data-cb="sig"$1');
-    return html;
+    if (!html) {
+        _diag.warn("injectSigMarkers: received empty/null html — skipping");
+        return html;
+    }
+
+    _diag.info("=== injectSigMarkers START ===");
+    _diag.info("injectSigMarkers: input length=" + html.length);
+
+    if (CONFIG.DIAG_ENABLED) {
+        _diag.info("injectSigMarkers: input preview=" + html.substring(0, 120).replace(/\n/g, " "));
+    }
+
+    // Count how many elements we are about to stamp so we can verify after.
+    var tdCount = (html.match(/<td(\s|>)/gi) || []).length;
+    var trCount = (html.match(/<tr(\s|>)/gi) || []).length;
+    var tableCount = (html.match(/<table(\s|>)/gi) || []).length;
+
+    _diag.info("injectSigMarkers: elements found — <td>=" + tdCount
+        + " <tr>=" + trCount + " <table>=" + tableCount);
+
+    if (tdCount === 0 && trCount === 0 && tableCount === 0) {
+        _diag.warn("injectSigMarkers: no table elements found in signature HTML."
+            + " Backend may have changed its structure. Markers NOT injected.");
+        return html;
+    }
+
+    // Stamp every <td>, <tr>, <table>.
+    var out = html;
+    out = out.replace(/<td(\s|>)/gi, '<td data-cb="sig"$1');
+    out = out.replace(/<tr(\s|>)/gi, '<tr data-cb="sig"$1');
+    out = out.replace(/<table(\s|>)/gi, '<table data-cb="sig"$1');
+
+    // Verify the markers are actually present in the output.
+    var markerCount = (out.match(/data-cb="sig"/g) || []).length;
+    _diag.info("injectSigMarkers: markers stamped=" + markerCount
+        + " (expected ~" + (tdCount + trCount + tableCount) + ")");
+
+    if (markerCount === 0) {
+        _diag.error("injectSigMarkers: ZERO markers in output — regex replacement failed."
+            + " Stripping will not work for this signature.");
+    } else if (markerCount < tdCount + trCount + tableCount) {
+        _diag.warn("injectSigMarkers: marker count (" + markerCount
+            + ") lower than element count (" + (tdCount + trCount + tableCount)
+            + ") — some elements may have already carried the attribute.");
+    }
+
+    if (CONFIG.DIAG_ENABLED) {
+        _diag.info("injectSigMarkers: output preview=" + out.substring(0, 120).replace(/\n/g, " "));
+    }
+
+    _diag.info("=== injectSigMarkers END | lengthDelta=" + (out.length - html.length) + " ===");
+    return out;
 }
 
 // ─── Signature stripping ──────────────────────────────────────────────────────
@@ -6904,62 +6949,87 @@ function injectSigMarkers(html) {
 //   • data-cardbyte-sig="1" wrapper divs
 //   • Trailing <br> runs and empty <div>/<p> shells
 
+
 function stripSignatures(html) {
-    if (!html) return "";
+    if (!html) {
+        _diag.warn("stripSignatures: received empty/null html — nothing to strip");
+        return "";
+    }
+
+    _diag.info("=== stripSignatures START ===");
+    _diag.info("stripSignatures: input length=" + html.length);
+
+    if (CONFIG.DIAG_ENABLED) {
+        _diag.info("stripSignatures: input preview=" + html.substring(0, 150).replace(/\n/g, " "));
+    }
+
+    // Pre-flight: check whether our marker is actually present.
+    var markerCountBefore = (html.match(/data-cb="sig"/g) || []).length;
+    var legacyMarkerBefore = (html.match(/data-cardbyte-sig="1"/g) || []).length;
+    var cbIdBefore = /id=["'][^"']*cardbyte-signature["']/i.test(html);
+    var nativeSigBefore = /id=["']Signature["']/i.test(html);
+
+    _diag.info("stripSignatures: pre-flight markers —"
+        + " data-cb-sig=" + markerCountBefore
+        + " legacy-marker=" + legacyMarkerBefore
+        + " cb-id=" + cbIdBefore
+        + " native-sig=" + nativeSigBefore);
+
+    if (markerCountBefore === 0 && legacyMarkerBefore === 0 && !cbIdBefore && !nativeSigBefore) {
+        _diag.warn("stripSignatures: NO known markers found in body."
+            + " injectSigMarkers may not have run, or OWA stripped all attributes."
+            + " Stripping will have no effect — signature may remain in body.");
+    }
 
     // ── 1. Flat div-based signatures (native Outlook, PATH A wrapper) ─────────
-    // These are NOT nested like tables so a single regex is safe here.
+    var beforeLen = html.length;
     html = html.replace(/<div[^>]*\bid=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    if (html.length !== beforeLen)
+        _diag.info("stripSignatures: div#Signature removed (" + (beforeLen - html.length) + " chars)");
+    else if (nativeSigBefore)
+        _diag.warn("stripSignatures: div#Signature regex matched 0 — check nesting depth");
+
+    beforeLen = html.length;
     html = html.replace(/<div[^>]*\bid=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    if (html.length !== beforeLen)
+        _diag.info("stripSignatures: div#appendonsend removed (" + (beforeLen - html.length) + " chars)");
+
+    beforeLen = html.length;
     html = html.replace(/<div[^>]*\bdata-cardbyte-sig=["']1["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    if (html.length !== beforeLen)
+        _diag.info("stripSignatures: data-cardbyte-sig div removed (" + (beforeLen - html.length) + " chars)");
 
     // ── 2. Table-based signatures — depth-walk (JSRuntime safe, no DOMParser) ──
-    //
-    // Algorithm:
-    //   Walk `html` left-to-right looking for <table tokens.
-    //   When found, count depth as we encounter further <table and </table> tokens.
-    //   When depth returns to 0 we have the full outermost table span.
-    //   If that span contains our marker OR legacy CardByte ids → drop it.
-    //   Otherwise keep it verbatim.
-    //
-    // Finding the next <table or </table> token: we locate it by scanning from
-    // the current position with indexOf-based search (no regex on the full body),
-    // which is safe in JSRuntime and handles arbitrary nesting depth.
-
     var out = "";
     var i = 0;
-    var lower = html.toLowerCase(); // pre-lowered once for all indexOf calls
+    var lower = html.toLowerCase();
     var n = html.length;
+    var tableIndex = 0;   // sequential number for log readability
+    var droppedCount = 0;
+    var keptCount = 0;
 
     while (i < n) {
-        // Find next opening table tag from current position.
         var tableStart = lower.indexOf("<table", i);
         if (tableStart === -1) {
-            // No more tables — append the rest verbatim.
             out += html.slice(i);
             break;
         }
 
-        // Append everything before this table.
         out += html.slice(i, tableStart);
 
-        // Walk forward counting open/close <table> tags to find the matching </table>.
         var depth = 0;
         var pos = tableStart;
-        var endPos = n; // fallback: take to end if unclosed
+        var endPos = n;
 
         while (pos < n) {
             var nextOpen = lower.indexOf("<table", pos);
             var nextClose = lower.indexOf("</table", pos);
 
             if (nextOpen !== -1 && (nextClose === -1 || nextOpen < nextClose)) {
-                // Another opening <table — increase depth and jump past it.
                 depth++;
-                // Jump past the '<table' token (6 chars) to avoid re-matching.
                 pos = nextOpen + 6;
             } else if (nextClose !== -1) {
                 depth--;
-                // Find the '>' that closes this </table> tag.
                 var closeEnd = lower.indexOf(">", nextClose);
                 if (closeEnd === -1) closeEnd = n - 1;
                 if (depth === 0) {
@@ -6968,29 +7038,57 @@ function stripSignatures(html) {
                 }
                 pos = closeEnd + 1;
             } else {
-                // No more table tags — unclosed table, take to end.
+                _diag.warn("stripSignatures: table[" + tableIndex + "] unclosed"
+                    + " at pos=" + pos + " — taking to end of body");
                 endPos = n;
                 break;
             }
         }
 
         var tableHtml = html.slice(tableStart, endPos);
+        tableIndex++;
 
-        // Decide whether to strip this table block.
-        var shouldStrip = (
-            tableHtml.indexOf('data-cb="sig"') !== -1 ||  // our injected marker
-            tableHtml.indexOf('data-cardbyte-sig="1"') !== -1 ||  // legacy outer marker
-            // Legacy CardByte wrapper id (exact or OWA-prefixed).
-            /id=["'][^"']*cardbyte-signature["']/i.test(tableHtml)
-        );
+        // Determine strip reason for logging.
+        var stripReason = "";
+        if (tableHtml.indexOf('data-cb="sig"') !== -1) stripReason = "data-cb-sig marker";
+        else if (tableHtml.indexOf('data-cardbyte-sig="1"') !== -1) stripReason = "legacy-cardbyte-marker";
+        else if (/id=["'][^"']*cardbyte-signature["']/i.test(tableHtml)) stripReason = "cardbyte-id";
+
+        var shouldStrip = stripReason !== "";
 
         if (shouldStrip) {
-            _diag.info("stripSignatures: dropped table (" + tableHtml.length + " chars)");
+            droppedCount++;
+            _diag.info("stripSignatures: table[" + tableIndex + "] DROPPED"
+                + " | reason=" + stripReason
+                + " | size=" + tableHtml.length + " chars"
+                + " | depth-resolved-at-pos=" + endPos);
+            if (CONFIG.DIAG_ENABLED) {
+                _diag.info("stripSignatures: table[" + tableIndex + "] preview="
+                    + tableHtml.substring(0, 100).replace(/\n/g, " "));
+            }
         } else {
+            keptCount++;
+            _diag.info("stripSignatures: table[" + tableIndex + "] KEPT"
+                + " | size=" + tableHtml.length + " chars");
+            if (CONFIG.DIAG_ENABLED) {
+                _diag.info("stripSignatures: table[" + tableIndex + "] preview="
+                    + tableHtml.substring(0, 80).replace(/\n/g, " "));
+            }
             out += tableHtml;
         }
 
         i = endPos;
+    }
+
+    _diag.info("stripSignatures: depth-walk done"
+        + " | tables-found=" + tableIndex
+        + " | dropped=" + droppedCount
+        + " | kept=" + keptCount);
+
+    if (droppedCount === 0 && markerCountBefore > 0) {
+        _diag.error("stripSignatures: markers were present (" + markerCountBefore
+            + ") but ZERO tables were dropped — depth-walk may have a bug."
+            + " Signature likely still in body.");
     }
 
     // ── 3. Cosmetic clean-up ──────────────────────────────────────────────────
@@ -6998,6 +7096,14 @@ function stripSignatures(html) {
     out = out.replace(/<div>\s*<\/div>/gi, "");
     out = out.replace(/<p>\s*<\/p>/gi, "");
 
+    _diag.info("stripSignatures: output length=" + out.length
+        + " | removed=" + (html.length - out.length) + " chars");
+
+    if (CONFIG.DIAG_ENABLED) {
+        _diag.info("stripSignatures: output preview=" + out.substring(0, 150).replace(/\n/g, " "));
+    }
+
+    _diag.info("=== stripSignatures END ===");
     return out;
 }
 
