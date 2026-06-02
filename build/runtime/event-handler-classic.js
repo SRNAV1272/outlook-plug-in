@@ -6713,7 +6713,7 @@ var CONFIG = {
     SEND_HANDLER_TIMEOUT_MS: 2000,
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
 
-    DIAG_ENABLED: true,
+    DIAG_ENABLED: false,
 
     CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,
 
@@ -6876,7 +6876,7 @@ function _wrapSignature(html) {
     return (
         "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\">"
         + "<tr>"
-        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
+        + "<td style=\"font-size:1px;color:transparent;line-height:0px;mso-line-height-rule:exactly;\">"
         + CONFIG.CB_SIG_START
         + "</td>"
         + "</tr>"
@@ -6887,7 +6887,7 @@ function _wrapSignature(html) {
         + "</td>"
         + "</tr>"
         + "<tr>"
-        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
+        + "<td style=\"font-size:1px;color:transparent;line-height:0px;mso-line-height-rule:exactly;\">"
         + CONFIG.CB_SIG_END
         + "</td>"
         + "</tr>"

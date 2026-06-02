@@ -251,28 +251,6 @@ function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
     });
 }
 
-// function stripNativeOutlookSignature(html) {
-//     // Classic Windows: <div id="Signature"> or <div id="appendonsend">
-//     html = html.replace(/<div[^>]*id=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
-//     html = html.replace(/<div[^>]*id=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "");
-
-//     // CardByte signature: <table id="cardbyte-signature"> or OWA-prefixed variants
-//     const parser = new DOMParser();
-//     const doc = parser.parseFromString(html, "text/html");
-
-//     const sigTables = doc.querySelectorAll(
-//         'table[id="cardbyte-signature"], table[id$="_cardbyte-signature"]'
-//     );
-
-//     sigTables.forEach(table => table.remove());
-
-//     // Remove all trailing <br> tags left behind after signature removal
-//     let bodyHtml = doc.body.innerHTML;
-//     bodyHtml = bodyHtml.replace(/(?:\s*<br\s*\/?>\s*)+$/gi, "");
-
-//     return bodyHtml;
-// }
-
 function stripNativeOutlookSignature(html) {
     // Outlook native signatures
     html = html.replace(
@@ -328,7 +306,7 @@ async function bodySetSignatureAsync(item, html, send = false) {
     let wrappedHtml = `
         <table role="presentation" cellpadding="0" cellspacing="0" border="0">
             <tr>
-                <td style="font-size:1px;color:#ffffff;line-height:1px;">
+                <td style="font-size:1px;color:transparent;line-height:0px;mso-line-height-rule:exactly;">
                     ${CB_SIG_START}
                 </td>
             </tr>
@@ -340,7 +318,7 @@ async function bodySetSignatureAsync(item, html, send = false) {
             </tr>
 
             <tr>
-                <td style="font-size:1px;color:#ffffff;line-height:1px;">
+                <td style="font-size:1px;color:transparent;line-height:0px;mso-line-height-rule:exactly;">
                     ${CB_SIG_END}
                 </td>
             </tr>
