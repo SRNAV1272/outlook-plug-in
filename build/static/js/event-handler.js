@@ -306,7 +306,7 @@ async function bodySetSignatureAsync(item, html, send = false) {
     let wrappedHtml = `
         <table role="presentation" cellpadding="0" cellspacing="0" border="0">
             <tr>
-                <td style="font-size:1px;color:transparent;line-height:0px;mso-line-height-rule:exactly;">
+                <td style="font-size:1px;color:#ffffff;line-height:1px;">
                     ${CB_SIG_START}
                 </td>
             </tr>
@@ -318,7 +318,7 @@ async function bodySetSignatureAsync(item, html, send = false) {
             </tr>
 
             <tr>
-                <td style="font-size:1px;color:transparent;line-height:0px;mso-line-height-rule:exactly;">
+                <td style="font-size:1px;color:#ffffff;line-height:1px;">
                     ${CB_SIG_END}
                 </td>
             </tr>

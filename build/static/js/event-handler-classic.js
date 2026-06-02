@@ -6876,7 +6876,7 @@ function _wrapSignature(html) {
     return (
         "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\">"
         + "<tr>"
-        + "<td style=\"font-size:1px;color:transparent;line-height:0px;mso-line-height-rule:exactly;\">"
+        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
         + CONFIG.CB_SIG_START
         + "</td>"
         + "</tr>"
@@ -6887,7 +6887,7 @@ function _wrapSignature(html) {
         + "</td>"
         + "</tr>"
         + "<tr>"
-        + "<td style=\"font-size:1px;color:transparent;line-height:0px;mso-line-height-rule:exactly;\">"
+        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
         + CONFIG.CB_SIG_END
         + "</td>"
         + "</tr>"
