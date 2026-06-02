@@ -6870,42 +6870,135 @@ function cacheClear(cb) {
     } catch (e) { _diag.warn("cacheClear threw: " + e.message); if (cb) cb(); }
 }
 
-// ─── Signature stripping ──────────────────────────────────────────────────────
+// ─── Signature marker injection ───────────────────────────────────────────────
+//
+// Called ONCE on the raw HTML from the backend, before it is cached or written.
+// Stamps data-cb="sig" onto every <td> and <tr> inside the signature so the
+// marker survives OWA attribute rewriting on the outer wrapper table/div.
+//
+// The annotated HTML is what gets cached and written to the compose body.
 
-/**
- * Removes all known signature artifacts from an HTML body string.
- *
- * Patterns removed:
- *   • Native Outlook:  <div id="Signature">…</div>
- *                      <div id="appendonsend">…</div>
- *   • CardByte (exact):   <table id="cardbyte-signature">…</table>
- *   • CardByte (OWA-prefixed): <table id="*_cardbyte-signature">…</table>
- *   • data-cardbyte-sig="1" wrapper div
- *   • Trailing lone <br> tags
- *   • Empty <div> / <p> shells
- */
+function injectSigMarkers(html) {
+    if (!html) return html;
+    // Stamp every <td ...> and <tr ...> (self-contained tags, never nested like <table>).
+    html = html.replace(/<td(\s|>)/gi, '<td data-cb="sig"$1');
+    html = html.replace(/<tr(\s|>)/gi, '<tr data-cb="sig"$1');
+    // Also stamp the root-level table(s) in the signature for belt-and-suspenders.
+    html = html.replace(/<table(\s|>)/gi, '<table data-cb="sig"$1');
+    return html;
+}
+
+// ─── Signature stripping ──────────────────────────────────────────────────────
+//
+// Removes ALL signature artifacts from a body HTML string using a depth-walk
+// rather than regex, because <table> elements are deeply nested (6+ levels in
+// CardByte signatures) and cannot be matched reliably by a single regex.
+//
+// REMOVAL CRITERIA — a top-level <table> block is stripped when it contains:
+//   1. data-cb="sig"  (marker injected by injectSigMarkers — primary signal)
+//   2. id="Signature" or id="appendonsend" (native Outlook sig divs handled separately)
+//
+// Additionally removes:
+//   • <div id="Signature">…</div>
+//   • <div id="appendonsend">…</div>
+//   • data-cardbyte-sig="1" wrapper divs
+//   • Trailing <br> runs and empty <div>/<p> shells
+
 function stripSignatures(html) {
     if (!html) return "";
 
-    // Native Outlook signature divs.
+    // ── 1. Flat div-based signatures (native Outlook, PATH A wrapper) ─────────
+    // These are NOT nested like tables so a single regex is safe here.
     html = html.replace(/<div[^>]*\bid=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
     html = html.replace(/<div[^>]*\bid=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "");
-
-    // CardByte marker div (written by writeSignature PATH A/B).
     html = html.replace(/<div[^>]*\bdata-cardbyte-sig=["']1["'][^>]*>[\s\S]*?<\/div>/gi, "");
 
-    // CardByte wrapper table — exact id.
-    html = html.replace(/<table[^>]*\bid=["']cardbyte-signature["'][^>]*>[\s\S]*?<\/table>/gi, "");
+    // ── 2. Table-based signatures — depth-walk (JSRuntime safe, no DOMParser) ──
+    //
+    // Algorithm:
+    //   Walk `html` left-to-right looking for <table tokens.
+    //   When found, count depth as we encounter further <table and </table> tokens.
+    //   When depth returns to 0 we have the full outermost table span.
+    //   If that span contains our marker OR legacy CardByte ids → drop it.
+    //   Otherwise keep it verbatim.
+    //
+    // Finding the next <table or </table> token: we locate it by scanning from
+    // the current position with indexOf-based search (no regex on the full body),
+    // which is safe in JSRuntime and handles arbitrary nesting depth.
 
-    // CardByte wrapper table — OWA-prefixed id (e.g. "OWA123_cardbyte-signature").
-    html = html.replace(/<table[^>]*\bid=["'][^"']*_cardbyte-signature["'][^>]*>[\s\S]*?<\/table>/gi, "");
+    var out = "";
+    var i = 0;
+    var lower = html.toLowerCase(); // pre-lowered once for all indexOf calls
+    var n = html.length;
 
-    // Cosmetic clean-up.
-    html = html.replace(/(?:\s*<br\s*\/?>)+\s*$/gi, "");
-    html = html.replace(/<div>\s*<\/div>/gi, "");
-    html = html.replace(/<p>\s*<\/p>/gi, "");
+    while (i < n) {
+        // Find next opening table tag from current position.
+        var tableStart = lower.indexOf("<table", i);
+        if (tableStart === -1) {
+            // No more tables — append the rest verbatim.
+            out += html.slice(i);
+            break;
+        }
 
-    return html;
+        // Append everything before this table.
+        out += html.slice(i, tableStart);
+
+        // Walk forward counting open/close <table> tags to find the matching </table>.
+        var depth = 0;
+        var pos = tableStart;
+        var endPos = n; // fallback: take to end if unclosed
+
+        while (pos < n) {
+            var nextOpen = lower.indexOf("<table", pos);
+            var nextClose = lower.indexOf("</table", pos);
+
+            if (nextOpen !== -1 && (nextClose === -1 || nextOpen < nextClose)) {
+                // Another opening <table — increase depth and jump past it.
+                depth++;
+                // Jump past the '<table' token (6 chars) to avoid re-matching.
+                pos = nextOpen + 6;
+            } else if (nextClose !== -1) {
+                depth--;
+                // Find the '>' that closes this </table> tag.
+                var closeEnd = lower.indexOf(">", nextClose);
+                if (closeEnd === -1) closeEnd = n - 1;
+                if (depth === 0) {
+                    endPos = closeEnd + 1;
+                    break;
+                }
+                pos = closeEnd + 1;
+            } else {
+                // No more table tags — unclosed table, take to end.
+                endPos = n;
+                break;
+            }
+        }
+
+        var tableHtml = html.slice(tableStart, endPos);
+
+        // Decide whether to strip this table block.
+        var shouldStrip = (
+            tableHtml.indexOf('data-cb="sig"') !== -1 ||  // our injected marker
+            tableHtml.indexOf('data-cardbyte-sig="1"') !== -1 ||  // legacy outer marker
+            // Legacy CardByte wrapper id (exact or OWA-prefixed).
+            /id=["'][^"']*cardbyte-signature["']/i.test(tableHtml)
+        );
+
+        if (shouldStrip) {
+            _diag.info("stripSignatures: dropped table (" + tableHtml.length + " chars)");
+        } else {
+            out += tableHtml;
+        }
+
+        i = endPos;
+    }
+
+    // ── 3. Cosmetic clean-up ──────────────────────────────────────────────────
+    out = out.replace(/(?:\s*<br\s*\/?>)+\s*$/gi, "");
+    out = out.replace(/<div>\s*<\/div>/gi, "");
+    out = out.replace(/<p>\s*<\/p>/gi, "");
+
+    return out;
 }
 
 // ─── Signature wrapping ───────────────────────────────────────────────────────
@@ -7242,6 +7335,11 @@ function applySignatureCore(item, guardedEvent, forceReplace) {
 
     fetchSignature(
         function (html) {
+            // Inject data-cb="sig" markers onto every <td>/<tr> in the raw
+            // backend HTML so the markers survive OWA attribute rewriting.
+            // The annotated HTML is cached so all subsequent writes (compose,
+            // send, from-changed) use the pre-marked version.
+            html = injectSigMarkers(html);
             cacheSet(html, function () {
                 writeSignature(item, _wrapSignature(html), function (ok) {
                     if (!ok) _diag.warn("writeSignature (fresh) failed");
@@ -7337,49 +7435,38 @@ function applySignature(event) {
  * The send-budget risk is managed by SEND_HANDLER_TIMEOUT_MS (2 s guard)
  * and by the cache hit path being purely synchronous after the first compose.
  */
-// function onSendHandler(event) {
-//     _diag.info("=== onSendHandler START ===");
-//     var guarded = makeGuardedEvent(event || { completed: function () { } },
-//         CONFIG.SEND_HANDLER_TIMEOUT_MS);
-//     // var item = _safeGetItem();
-//     // if (!item) {
-//     //     _diag.warn("onSendHandler: no item — allowing send");
-//     //     guarded.completed({ allowEvent: true });
-//     //     return;
-//     // }
-
-//     // cacheGet(function (cachedHtml) {
-//     //     if (!cachedHtml) {
-//     //         _diag.info("onSendHandler: no cached signature — passing through");
-//     //         writeDiagnostics(item, function () {
-//     //             guarded.completed({ allowEvent: true });
-//     //         });
-//     //         return;
-//     //     }
-
-//     //     _diag.info("onSendHandler: writing cached signature ("
-//     //         + cachedHtml.length + " chars) with forceReplace=true");
-
-//     //     // forceReplace=true — strip any native sig injected at send time,
-//     //     // then re-write the CardByte signature cleanly.
-//     //     writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
-//     //         if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-//     //         writeDiagnostics(item, function () {
-//     //             guarded.completed({ allowEvent: true });
-//     //         });
-//     //     }, true /* forceReplace */);
-//     // });
-// }
-
 function onSendHandler(event) {
     _diag.info("=== onSendHandler START ===");
+    var guarded = makeGuardedEvent(event || { completed: function () { } },
+        CONFIG.SEND_HANDLER_TIMEOUT_MS);
+    var item = _safeGetItem();
+    if (!item) {
+        _diag.warn("onSendHandler: no item — allowing send");
+        guarded.completed({ allowEvent: true });
+        return;
+    }
 
-    var guarded = makeGuardedEvent(
-        event || { completed: function () { } },
-        CONFIG.SEND_HANDLER_TIMEOUT_MS
-    );
+    cacheGet(function (cachedHtml) {
+        if (!cachedHtml) {
+            _diag.info("onSendHandler: no cached signature — passing through");
+            writeDiagnostics(item, function () {
+                guarded.completed({ allowEvent: true });
+            });
+            return;
+        }
 
-    guarded.completed({ allowEvent: true });
+        _diag.info("onSendHandler: writing cached signature ("
+            + cachedHtml.length + " chars) with forceReplace=true");
+
+        // forceReplace=true — strip any native sig injected at send time,
+        // then re-write the CardByte signature cleanly.
+        writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
+            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+            writeDiagnostics(item, function () {
+                guarded.completed({ allowEvent: true });
+            });
+        }, true /* forceReplace */);
+    });
 }
 
 /**
