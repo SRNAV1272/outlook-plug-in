@@ -268,6 +268,11 @@ function stripNativeOutlookSignature(html) {
         ""
     );
 
+    html = html.replace(
+        /<div[^>]*>\s*__CBSIG_START_7F2C9D4E__\s*<\/div>[\s\S]*?<div[^>]*>\s*__CBSIG_END_7F2C9D4E__\s*<\/div>/gi,
+        ""
+    );
+
     // Old V1 markers
     html = html.replace(
         /__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi,
@@ -287,20 +292,18 @@ function stripNativeOutlookSignature(html) {
     const endIdx = html.indexOf(endToken);
 
     if (startIdx !== -1 && endIdx !== -1) {
-        // Walk backwards from startIdx to find the nearest <table
-        const beforeStart = html.lastIndexOf("<table", startIdx);
-        // Walk forwards from endIdx to find the nearest </table>
-        const afterEnd = html.indexOf("</table>", endIdx);
+        // Find the DIV Outlook creates around the START token
+        const divBeforeStart = html.lastIndexOf("<div", startIdx);
 
-        if (beforeStart !== -1 && afterEnd !== -1) {
+        // Find the closing DIV Outlook creates around END token
+        const divAfterEnd = html.indexOf("</div>", endIdx);
+
+        if (divBeforeStart !== -1 && divAfterEnd !== -1) {
             html =
-                html.substring(0, beforeStart) +
-                html.substring(afterEnd + "</table>".length);
-        } else {
-            // Fallback: just cut between the tokens themselves
-            html =
-                html.substring(0, startIdx) +
-                html.substring(endIdx + endToken.length);
+                html.substring(0, divBeforeStart) +
+                html.substring(divAfterEnd + 6);
+
+            console.log("[CardByte] Removed signature using div markers");
         }
     }
 
