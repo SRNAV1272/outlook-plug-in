@@ -427,7 +427,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
-        finalSignature, item?.body
+        fetched, item?.body
     );
 
     try {
