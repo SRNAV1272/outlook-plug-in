@@ -7234,8 +7234,6 @@ function writeSignature(item, html, onDone, forceReplace) {
             + " | chainLen=" + chainArea.length);
 
         // ── Dedup guard — compose area only ──────────────────────────────────────
-        // Tokens found only in chainArea mean a previous CardByte sig exists in
-        // the quoted thread, NOT that the current compose session has a signature.
         var sigInComposeArea =
             composeArea.indexOf(CONFIG.CB_SIG_START) !== -1 &&
             composeArea.indexOf(CONFIG.CB_SIG_END) !== -1;
@@ -7247,32 +7245,16 @@ function writeSignature(item, html, onDone, forceReplace) {
             return;
         }
 
-        // ── Strip all previous signatures from full body ──────────────────────────
-        // Runs on full body so stale sentinel tokens in the quoted chain are also
-        // cleaned up and don't accumulate across reply threads.
-        var cleanBody = stripSignatures(existingBody);
+        // ── Strip previous signatures from COMPOSE AREA only ─────────────────────
+        // chainArea is intentionally left untouched — signatures in the quoted
+        // reply chain belong to the original sender and must be preserved.
+        var cleanCompose = stripSignatures(composeArea);
 
-        _diag.info("step_stripAndInsert: cleanBody=" + cleanBody.length
-            + " chars (was " + existingBody.length + ")");
+        _diag.info("step_stripAndInsert: cleanCompose=" + cleanCompose.length
+            + " chars (was " + composeArea.length + ")");
 
-        // ── Re-split after strip (indices shifted) ────────────────────────────────
-        var cleanCompose = cleanBody;
-        var cleanChain = "";
-
-        for (var pi2 = 0; pi2 < REPLY_PATTERNS.length; pi2++) {
-            var m2 = REPLY_PATTERNS[pi2].exec(cleanBody);
-            if (m2) {
-                cleanCompose = cleanBody.substring(0, m2.index);
-                cleanChain = cleanBody.substring(m2.index);
-                _diag.info("step_stripAndInsert: post-strip split"
-                    + " | cleanCompose=" + cleanCompose.length
-                    + " | cleanChain=" + cleanChain.length);
-                break;
-            }
-        }
-
-        // ── Assemble: composeArea + wrapped signature + quoted chain ──────────────
-        var combined = cleanCompose + html + cleanChain;
+        // ── Assemble: cleanCompose + wrapped signature + untouched chain ──────────
+        var combined = cleanCompose + html + chainArea;
         var combinedKB = byteKB(combined).toFixed(1);
         _diag.info("step_stripAndInsert: writing combined body+sig | " + combinedKB + " KB");
 
