@@ -11,25 +11,13 @@ const SESSION_KEY = "cardbyte_session_id";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // CB_SIG sentinel tokens — embedded as HTML comments.
-// HTML comments are preserved through OWA's sanitizer and Classic Outlook's
-// Trident round-trip but are NEVER rendered as visible text.
+// HTML comments are preserved through OWA's sanitizer.
 // Used for tampering detection in onSendHandler.
 const CB_SIG_START = "<!--CBSIG_START_7F2C9D4E-->";
 const CB_SIG_END = "<!--CBSIG_END_7F2C9D4E-->";
 
-// Reply-chain boundary patterns — Classic Outlook only (PATH B Classic).
-// Ordered most-specific → least-specific.
-const REPLY_PATTERNS = [
-    /(<div>\s*<div[^>]+border-top\s*:\s*solid[^>]*>)/i,
-    /(<div[^>]+style\s*=\s*["'][^"']*border-top\s*:\s*solid[^"']*["'][^>]*>)/i,
-    /(<div[^>]+\bid=["']divRplyFwdMsg["'][^>]*>)/i,
-    /(<div[^>]+\bid=["']divTaggedContent["'][^>]*>)/i,
-    /(<blockquote[^>]*>)/i,
-];
-
 // Per-compose-item insertion tracker. Prevents double-insertion when
 // applySignature fires more than once for the same item in a session.
-// Keyed by item.itemId so reply/forward windows always get a fresh insert.
 const _insertedItems = new Set();
 
 // ─── Platform ─────────────────────────────────────────────────────────────────
@@ -56,13 +44,8 @@ function detectPlatform() {
         return "mac";
 
     if (p === "officeonline" || p === "web" || p === "") return "owa";
-    return "desktop"; // Classic Outlook on Windows
+    return "desktop"; // retained for detectPlatform callers, but no longer routed to Classic path
 }
-
-// Chain reassembly is only needed on Classic Outlook (Trident/Word engine)
-// where setSelectedDataAsync replaces the full body from cursor position.
-// OWA / modern Outlook / Mac preserve the existing body natively.
-function isClassicOutlook() { return detectPlatform() === "desktop"; }
 
 // ─── Session cache ────────────────────────────────────────────────────────────
 
@@ -159,7 +142,6 @@ async function decryptResponse(cipherB64) {
         const dec = await crypto.subtle.decrypt({ name: "AES-CBC", iv: _b64ToBuffer(AES_IV) }, key, buf);
         return new TextDecoder().decode(dec);
     } catch (err) {
-        // Fallback: return raw (handles unencrypted legacy responses)
         console.warn("[CardByte] decryptResponse failed — using raw:", err.message);
         return cipherB64;
     }
@@ -168,14 +150,10 @@ async function decryptResponse(cipherB64) {
 // ─── Signature wrapping / stripping ──────────────────────────────────────────
 
 function _wrapSignature(html) {
-    // Sentinels are HTML comments — never rendered, survive OWA sanitizer and
-    // Trident round-trip. No hidden TD rows, no padding gap.
     return `${CB_SIG_START}${html}${CB_SIG_END}`;
 }
 
 // Removes ALL CardByte and native Outlook signature artifacts from an HTML string.
-// Uses token-position walk — Classic Outlook's Trident rewrites table nesting
-// unpredictably, making regex/DOMParser unreliable.
 function stripSignatures(html) {
     if (!html) return "";
 
@@ -187,20 +165,16 @@ function stripSignatures(html) {
     html = html.replace(/__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi, "");
 
     // CB_SIG comment-sentinel walk — loop handles double-insert edge case.
-    // Sentinels are now HTML comments: <!--CBSIG_START_...-->...<!--CBSIG_END_...-->
-    // We strip everything from the START comment to the END comment (inclusive).
     for (let i = 0; i < 10; i++) {
         const si = html.indexOf(CB_SIG_START);
         const ei = html.indexOf(CB_SIG_END);
         if (si === -1 && ei === -1) break;
 
         if (si === -1 || ei === -1) {
-            // Orphan sentinel — strip whichever survived
             html = html.replace(CB_SIG_START, "").replace(CB_SIG_END, "");
             break;
         }
 
-        // Remove from start of CB_SIG_START comment to end of CB_SIG_END comment
         html = html.slice(0, si) + html.slice(ei + CB_SIG_END.length);
     }
 
@@ -241,20 +215,17 @@ function _setSelectedData(item, html) {
 
 // ─── Write signature ──────────────────────────────────────────────────────────
 //
-// Three paths — chosen in order:
+// Two paths — chosen in order:
 //
 // PATH A  setSignatureAsync + sig < 100 KB
 //   Outlook manages its own signature slot. Fast, reliable, no body read needed.
 //   A no-op setSelectedDataAsync("") moves the cursor to the top afterwards.
 //
-// PATH B  OWA / modern Outlook / Mac (non-Classic)
-//   setSelectedDataAsync inserts at cursor position; Outlook owns the quoting.
-//   We just move the cursor to the top with prependAsync("") then insert.
-//   No body read, no chain reassembly — Outlook handles it.
-//
-// PATH B Classic  Classic Outlook on Windows (Trident / Word engine)
-//   setSelectedDataAsync from position 0 replaces the full body, so we must
-//   manually read → split at reply boundary → strip old sig → reassemble → write.
+// PATH B  OWA / modern Outlook / Mac
+//   Read body → strip any existing CardByte sig → prepend new sig → write.
+//   Outlook owns the quoted thread structure; no chain reassembly needed.
+//   On forceReplace (onSendHandler), same strip-then-write logic applies,
+//   guaranteeing the output is exactly: [user draft] + [new signature].
 
 async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
     const sizeKB = new Blob([wrappedHtml]).size / 1024;
@@ -293,74 +264,39 @@ async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
     }
 
     // ── PATH B  OWA / modern Outlook / Mac ────────────────────────────────────
-    // Read body → strip old CardByte sig → prepend new sig.
-    // No chain reassembly — Outlook owns the quoted thread structure.
-    if (!isClassicOutlook()) {
-        if (!forceReplace && _insertedItems.has(itemId)) {
-            console.log("[CardByte] PATH B: already inserted — skipping");
-            return true;
-        }
-
-        // Read current body so we can strip any existing CardByte signature.
-        // On a fresh compose this will be empty or just user text — safe to strip.
-        let currentBody = "";
-        try { currentBody = await _getBodyAsync(item); } catch (_) { /* ignore — treat as empty */ }
-
-        const cleanBody = stripSignatures(currentBody);
-
-        // Reassemble: new signature first, then existing (cleaned) body content.
-        // prependAsync("") is not needed — we write the full combined string.
-        const combined = wrappedHtml + cleanBody;
-
-        // Move cursor to position 0 first so setSelectedDataAsync inserts at top.
-        await _prependEmpty(item);
-        const ok = await _setSelectedData(item, combined);
-        if (ok) _insertedItems.add(itemId);
-
-        console.log(`[CardByte] PATH B: ${ok ? "succeeded" : "failed"}`);
-        return ok;
-    }
-
-    // ── PATH B Classic  Windows Outlook (Trident) ─────────────────────────────
+    // Always read the live body so we can strip any existing CardByte signature
+    // before writing. This is the critical step that prevents duplication on
+    // forceReplace (onSendHandler): old sig is removed, new sig is appended,
+    // leaving exactly [clean user draft] + [new signature].
     if (!forceReplace && _insertedItems.has(itemId)) {
-        console.log("[CardByte] PATH B Classic: already inserted — skipping");
+        console.log("[CardByte] PATH B: already inserted — skipping");
         return true;
     }
 
-    let existingBody;
-    try { existingBody = await _getBodyAsync(item); }
-    catch (err) { console.error("[CardByte] PATH B Classic: getAsync failed", err); return false; }
-
-    // Split at reply-chain boundary
-    let composeArea = existingBody, chainArea = "", patternUsed = "none";
-    for (let i = 0; i < REPLY_PATTERNS.length; i++) {
-        const m = REPLY_PATTERNS[i].exec(existingBody);
-        if (m) {
-            composeArea = existingBody.slice(0, m.index);
-            chainArea = existingBody.slice(m.index);
-            patternUsed = `pattern[${i}]`;
-            break;
-        }
+    let currentBody = "";
+    try {
+        currentBody = await _getBodyAsync(item);
+    } catch (_) {
+        console.warn("[CardByte] PATH B: getAsync failed — treating body as empty");
     }
-    console.log(`[CardByte] PATH B Classic: boundary=${patternUsed} | composeLen=${composeArea.length} | chainLen=${chainArea.length}`);
 
-    const cleanCompose = stripSignatures(composeArea);
-    const combined = cleanCompose + wrappedHtml + chainArea;
+    // Strip old CardByte sig (and any native Outlook sig) from the live body.
+    // On a fresh compose this is a no-op. On forceReplace it removes the old
+    // signature so the new one won't be appended on top of it.
+    const cleanBody = stripSignatures(currentBody);
 
+    // Reassemble: clean user draft first, then new wrapped signature at the end.
+    // Signature goes at the END so the user's text appears above it naturally.
+    const combined = cleanBody + wrappedHtml;
+
+    // prependAsync("") moves the internal cursor to position 0 so
+    // setSelectedDataAsync replaces from the very beginning of the body.
     await _prependEmpty(item);
     const ok = await _setSelectedData(item, combined);
+    if (ok) _insertedItems.add(itemId);
 
-    // Verify tokens survived the write
-    try {
-        const after = await _getBodyAsync(item);
-        const intact = after.includes(CB_SIG_START) && after.includes(CB_SIG_END);
-        console.log(`[CardByte] PATH B Classic: verification | intact=${intact} | bodyLen=${after.length}`);
-        if (intact) _insertedItems.add(itemId);
-        return intact;
-    } catch (_) {
-        if (ok) _insertedItems.add(itemId);
-        return ok;
-    }
+    console.log(`[CardByte] PATH B: ${ok ? "succeeded" : "failed"}`);
+    return ok;
 }
 
 // ─── Backend fetch ────────────────────────────────────────────────────────────
@@ -399,9 +335,6 @@ async function renderSignatureOnServer(email) {
 }
 
 // ─── Tampering detection ──────────────────────────────────────────────────────
-// Returns true if both CB_SIG tokens are present in the body (signature intact),
-// false if either is missing. Fails open (returns true) on read error so a
-// getAsync failure never blocks the send.
 
 async function isSignatureIntact(item) {
     try {
@@ -416,11 +349,6 @@ async function isSignatureIntact(item) {
 }
 
 // ─── Core apply flow ──────────────────────────────────────────────────────────
-// 1. Try cache first (respects session + TTL).
-// 2. If cache miss, fetch from backend with up to 2 retries.
-// 3. Wrap raw HTML in CB_SIG sentinel table, cache the wrapped version.
-// 4. Fallback chain: stale cache → minimal identity signature.
-// 5. Delegate writing to writeSignatureAsync.
 
 async function _applySignatureCore(item, mailbox, {
     fetchIfMissing = false,
@@ -490,8 +418,6 @@ Office.onReady(() => {
 
 // ─── Event handlers ───────────────────────────────────────────────────────────
 
-// Fires on NewMail / Reply / ReplyAll / Forward.
-// forceReplace=false — dedup guard prevents double-insertion on the same item.
 window.applySignature = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     try {
@@ -503,8 +429,6 @@ window.applySignature = async function (event = { completed: () => { } }) {
     }
 };
 
-// Fires just before send. Checks for tampering; re-applies if needed.
-// Always calls event.completed({ allowEvent: true }) — never blocks the send.
 window.onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
@@ -512,20 +436,17 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         if (!item) return;
 
         // skipSessionCheck=true: onSendHandler may run in a separate iframe
-        // (modern Outlook) with fresh sessionStorage that won't match the
-        // compose iframe's session ID.
+        // (modern Outlook) with fresh sessionStorage — won't match compose iframe's SID.
         const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (!cached) {
             console.log("[CardByte] onSendHandler: no cached signature — passing through");
             return;
         }
 
-        // if (await isSignatureIntact(item)) {
-        //     console.log("[CardByte] onSendHandler: signature intact");
-        //     return;
-        // }
-
-        console.warn("[CardByte] onSendHandler: signature tampered — re-applying");
+        // Always re-apply on send with forceReplace=true.
+        // writeSignatureAsync will: read body → stripSignatures (removes old sig)
+        // → write cleanBody + new sig. No duplication possible.
+        console.log("[CardByte] onSendHandler: re-applying signature to ensure integrity");
         await writeSignatureAsync(item, cached, true /* forceReplace */);
 
     } catch (err) {
