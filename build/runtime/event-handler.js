@@ -8,6 +8,8 @@ const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const CB_SIG_START = "__CBSIG_START_7F2C9D4E__";
+const CB_SIG_END = "__CBSIG_END_7F2C9D4E__";
 
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
@@ -213,7 +215,7 @@ function _wrapSignature(html) {
         "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:0;border-collapse:collapse;\">"
         + "<tr>"
         + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
-        + CONFIG.CB_SIG_START
+        + CB_SIG_START
         + "</td>"
         + "</tr>"
         + "<tr>"
@@ -224,7 +226,7 @@ function _wrapSignature(html) {
         + "</tr>"
         + "<tr>"
         + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
-        + CONFIG.CB_SIG_END
+        + CB_SIG_END
         + "</td>"
         + "</tr>"
         + "</table>"
