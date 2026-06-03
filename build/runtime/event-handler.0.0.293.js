@@ -30,11 +30,11 @@ const CONFIG = {
     // Must match the tokens used in event-handler-classic.js so both files
     // share one stripping strategy.
     CB_SIG_START: "__CBSIG_START_7F2C9D4E__",
-    CB_SIG_END: "__CBSIG_END_7F2C9D4E__",
-    // ─── Size constants ───────────────────────────────────────────────────────────
-    // setSignatureAsync hard limit (Microsoft-documented): 131 072 bytes (128 KB).
-    SET_SIGNATURE_ASYNC_MAX_BYTES = 131072
+    CB_SIG_END: "__CBSIG_END_7F2C9D4E__"
 };
+
+// setSignatureAsync hard limit (Microsoft-documented): 131 072 bytes (128 KB).
+const SET_SIGNATURE_ASYNC_MAX_BYTES = 131072;
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
 
@@ -550,18 +550,19 @@ function _prepBody(existingBody, forceReplace) {
 // Wrapping happens only in PATH B where a single setAsync call carries
 // the entire body — the tokens survive Trident and OWA's round-trip there.
 //
-// PATH A — setSignatureAsync available (OWA / New Outlook / Mac), ANY size.
-//   OWA's setAsync silently strips base64 images when the combined body
-//   exceeds ~200 KB, so we MUST use setSignatureAsync for the sig part.
+// PATH A — setSignatureAsync available (OWA / New Outlook / Mac), sig <= 128 KB.
 //   Sequence:
 //     1. Read body, split at reply boundary, strip old CB_SIG from compose.
-//     2. setAsync(cleanCompose + chainArea) — body without sig, preserves
-//        chain images completely.
-//     3. setSignatureAsync(rawHtml) — Outlook appends sig below body using
-//        its own rendering pipeline, which preserves all images regardless
-//        of size and does not interfere with the compose/chain content.
+//     2. setAsync(cleanCompose + chainArea) — body without sig.
+//     3. setSignatureAsync(rawHtml) — image-safe pipeline.
 //     4. prependAsync("") to snap cursor to top.
-//   No CB_SIG tokens needed — Outlook manages the sig slot boundary.
+//
+// PATH A→B — setSignatureAsync available but sig exceeds 128 KB limit.
+//   Sequence:
+//     1-2. Same read/strip/split as PATH A.
+//     3. Wrap rawHtml with CB_SIG sentinel tokens.
+//     4. setAsync(cleanCompose + wrappedSig + chainArea) — single call.
+//     5. prependAsync("") + verify tokens survived.
 //
 // PATH B — setSignatureAsync unavailable (Classic Outlook 2016/2019 Trident).
 //   Sequence:
@@ -582,6 +583,7 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
     if (typeof item.body.setSignatureAsync === "function") {
         _diag.info("PATH A: two-call split (setAsync body + setSignatureAsync sig)");
 
+        // Step 1 — Read existing body
         let existingBody;
         try {
             existingBody = await _getBody(item);
@@ -591,12 +593,14 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
             return false;
         }
 
+        // Step 2 — Split, coerce, dedup, strip
         const { cleanCompose, chainArea, skip } = _prepBody(existingBody, forceReplace);
         if (skip) {
             _diag.info("=== writeSignature END | success=true (PATH A skipped) ===");
             return true;
         }
 
+        // Step 3 — Write body WITHOUT sig
         const bodyOnly = cleanCompose + chainArea;
         _diag.info("PATH A step_setBody: writing body-only | " + byteKB(bodyOnly).toFixed(1) + " KB");
         try {
@@ -607,11 +611,11 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
             return false;
         }
 
-        // ── Try setSignatureAsync; fall through on size rejection ────────────
+        // Step 4 — Try setSignatureAsync; fall through to PATH A→B if oversized
         const sigBytes = new Blob([rawHtml]).size;
         _diag.info("PATH A step_setSig: " + htmlKB.toFixed(1) + " KB (" + sigBytes + " bytes)");
 
-        if (sigBytes <= CONFIG.SET_SIGNATURE_ASYNC_MAX_BYTES) {
+        if (sigBytes <= SET_SIGNATURE_ASYNC_MAX_BYTES) {
             try {
                 await _setSignatureSlot(item, rawHtml);
                 _diag.info("PATH A step_setSig: OK");
@@ -624,7 +628,7 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
             }
         } else {
             _diag.warn("PATH A step_setSig: " + sigBytes + " bytes exceeds "
-                + CONFIG.SET_SIGNATURE_ASYNC_MAX_BYTES + " limit — falling through to PATH A→B");
+                + SET_SIGNATURE_ASYNC_MAX_BYTES + " limit — falling through to PATH A→B");
         }
 
         // ── PATH A→B: oversized sig — rewrite body+sig+chain as one setAsync ─
@@ -968,7 +972,6 @@ async function onSendHandler(event) {
     _diag.info("onSendHandler: writing cached signature ("
         + cachedHtml.length + " chars) | forceReplace=true");
 
-    // cachedHtml is already _wrapSignature()'d — write directly.
     const ok = await writeSignature(item, cachedHtml, true /* forceReplace */);
     if (!ok) _diag.warn("onSendHandler: writeSignature failed");
 
