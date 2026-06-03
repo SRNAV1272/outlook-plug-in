@@ -233,6 +233,11 @@ function _wrapSignature(html) {
     );
 }
 
+// ← add here
+function _hasExistingCBSig(bodyHtml) {
+    return bodyHtml.includes(CB_SIG_START) && bodyHtml.includes(CB_SIG_END);
+}
+
 function clearDefaultSignature(item) {
     return new Promise((resolve) => {
         if (typeof item.body?.setSignatureAsync !== "function") {
