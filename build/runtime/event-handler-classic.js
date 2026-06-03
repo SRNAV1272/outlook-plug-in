@@ -7169,10 +7169,19 @@ function writeSignature(item, html, onDone, forceReplace) {
             }
         }
 
-        // Diagnostic: log the first 500 chars of cleanBody so we can see what
-        // structure Classic Outlook is actually emitting if pattern=none.
-        _diag.info("step_stripAndInsert: cleanBody[0:500]="
-            + cleanBody.substring(0, 500).replace(/\n/g, "↵"));
+        // Diagnostic: find the first "From:" occurrence (reply chain header)
+        // and log 300 chars of context before it — this reveals the exact HTML
+        // marker Classic Outlook emits as the compose/chain boundary.
+        var fromIdx = cleanBody.indexOf("From:");
+        if (fromIdx === -1) fromIdx = cleanBody.indexOf("from:");
+        if (fromIdx !== -1) {
+            var diagStart = Math.max(0, fromIdx - 300);
+            var diagEnd   = Math.min(cleanBody.length, fromIdx + 100);
+            _diag.info("step_stripAndInsert: context around From: [" + diagStart + ":" + diagEnd + "]="
+                + cleanBody.substring(diagStart, diagEnd).replace(/\n/g, "↵").replace(/\r/g, ""));
+        } else {
+            _diag.warn("step_stripAndInsert: 'From:' not found in cleanBody — new compose?");
+        }
 
         _diag.info("step_stripAndInsert: reply boundary"
             + " | pattern=" + patternUsed
