@@ -6710,7 +6710,7 @@ var CONFIG = {
     WRAP_TOP_PX: 40,
     WRAP_BOTTOM_PX: 40,
 
-    SEND_HANDLER_TIMEOUT_MS: 8000,
+    SEND_HANDLER_TIMEOUT_MS: 2000,
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
 
     DIAG_ENABLED: false,
@@ -6868,18 +6868,20 @@ function cacheClear(cb) {
 //     survives both renderers intact, is detectable with a simple indexOf,
 //     and never appears in the user-visible email body.
 
+// Sentinel cell style: width:0 + overflow:hidden + max-height:0 ensures the
+// token text is fully suppressed even on Trident/Word, which ignores font-size:1px
+// and color:#ffffff alone. The token still survives the HTML round-trip as a
+// text node and is detectable with indexOf.
+var SENTINEL_TD_STYLE =
+    "font-size:0px;color:#ffffff;line-height:0;max-height:0;"
+    + "overflow:hidden;mso-hide:all;display:none;width:0;";
+
 function _wrapSignature(html) {
     return (
-        "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\">"
+        "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:0;border-collapse:collapse;\">"
         + "<tr>"
-        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
+        + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
         + CONFIG.CB_SIG_START
-        + "</td>"
-        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
-        + "<p>&ensp;</p>"
-        + "</td>"
-        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
-        + "<p>&ensp;</p>"
         + "</td>"
         + "</tr>"
         + "<tr>"
@@ -6889,7 +6891,7 @@ function _wrapSignature(html) {
         + "</td>"
         + "</tr>"
         + "<tr>"
-        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
+        + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
         + CONFIG.CB_SIG_END
         + "</td>"
         + "</tr>"
@@ -7013,44 +7015,11 @@ function _setBody(item, html, cb) {
     });
 }
 
-// ─── Single-shot insertion ────────────────────────────────────────────────────
-//
-// Replaces the old _insertChunks() approach. Classic Outlook's Trident engine
-// handles setSelectedDataAsync in one call reliably for signatures up to ~500 KB;
-// chunking introduced ordering races and blank-body edge cases. One write = one
-// cursor reset = predictable result.
-
-function _insertSignature(item, html, onDone) {
-    if (typeof item.body.setSelectedDataAsync !== "function") {
-        _diag.error("_insertSignature: setSelectedDataAsync unavailable");
-        onDone(false);
-        return;
-    }
-
-    var sizeKB = byteKB(html).toFixed(1);
-    _diag.info("_insertSignature: single-shot | " + sizeKB + " KB");
-
-    item.body.setSelectedDataAsync(
-        html,
-        { coercionType: Office.CoercionType.Html },
-        function (r) {
-            if (r.status !== Office.AsyncResultStatus.Succeeded) {
-                _diag.error("_insertSignature: setSelectedDataAsync failed: "
-                    + JSON.stringify(r.error));
-                onDone(false);
-                return;
-            }
-            _diag.info("_insertSignature: OK (" + sizeKB + " KB inserted)");
-            onDone(true);
-        }
-    );
-}
+// _insertSignature removed — see writeSignature PATH B comment for rationale.
 
 // ─── Core write path ──────────────────────────────────────────────────────────
 //
 // writeSignature(item, html, onDone, forceReplace)
-//
-// Aligned with the modern event-handler's two-path strategy:
 //
 // PATH A — small sig (<100 KB) + setSignatureAsync available.
 //   Calls setSignatureAsync directly; Outlook manages the signature slot.
@@ -7060,10 +7029,16 @@ function _insertSignature(item, html, onDone) {
 //   1. Optionally clear native signature slot.
 //   2. Read existing body.
 //   3. Dedup guard — skip if tokens already present (unless forceReplace).
-//   4. Strip all previous signatures.
-//   5. Write stripped body via setAsync (resets cursor to end).
-//   6. Append new wrapped signature in ONE setSelectedDataAsync call.
+//   4. Strip all previous signatures from the existing body.
+//   5. Concatenate stripped body + wrapped signature into one string.
+//   6. Write the combined string in ONE setAsync call (no cursor juggling).
 //   7. Verify token presence in body after write.
+//
+// Why one setAsync instead of setAsync + setSelectedDataAsync?
+//   setAsync resets the cursor to position 0 (top of body). A subsequent
+//   setSelectedDataAsync therefore inserts at the TOP, prepending the
+//   signature instead of appending it. Combining into one setAsync call
+//   eliminates the cursor entirely and guarantees correct append order.
 
 function writeSignature(item, html, onDone, forceReplace) {
     var htmlKB = byteKB(html);
@@ -7096,7 +7071,7 @@ function writeSignature(item, html, onDone, forceReplace) {
     }
 
     // ── PATH B ────────────────────────────────────────────────────────────────
-    _diag.info("PATH B: single-shot setSelectedDataAsync ("
+    _diag.info("PATH B: combined setAsync body+sig ("
         + htmlKB.toFixed(1) + " KB)");
 
     function step_clearSlot(next) {
@@ -7148,39 +7123,40 @@ function writeSignature(item, html, onDone, forceReplace) {
         _diag.info("step_stripAndInsert: cleanBody=" + cleanBody.length
             + " chars (was " + existingBody.length + ")");
 
-        // ── Write stripped body first (resets cursor to end) ──────────────────
-        _setBody(item, cleanBody, function (err) {
+        // ── Combine stripped body + wrapped signature, write in ONE setAsync ──
+        // Root cause of the prepend bug: setAsync resets the Word/Trident cursor
+        // to position 0 (document top). Any subsequent setSelectedDataAsync then
+        // inserts at the TOP, not the bottom. By concatenating body + signature
+        // before the single setAsync call, we eliminate cursor state entirely
+        // and guarantee the signature always lands at the bottom.
+        var combined = cleanBody + html;
+        var combinedKB = byteKB(combined).toFixed(1);
+        _diag.info("step_stripAndInsert: writing combined body+sig | " + combinedKB + " KB");
+
+        _setBody(item, combined, function (err) {
             if (err) {
-                _diag.error("step_stripAndInsert: setBody failed: " + JSON.stringify(err));
+                _diag.error("step_stripAndInsert: setBody (combined) failed: "
+                    + JSON.stringify(err));
                 onDone(false);
                 return;
             }
-            _diag.info("step_stripAndInsert: setBody OK — appending signature");
+            _diag.info("step_stripAndInsert: setBody OK");
 
-            // ── Single-shot signature insert ──────────────────────────────────
-            _insertSignature(item, html, function (success) {
-                if (!success) {
-                    _diag.error("step_stripAndInsert: insertSignature failed");
-                    onDone(false);
+            // ── Verify tokens survived the write ─────────────────────────────
+            _getBody(item, function (bodyAfter, err2) {
+                if (err2) {
+                    _diag.warn("step_stripAndInsert: verification read failed — assuming success");
+                    onDone(true);
                     return;
                 }
-
-                // ── Verify tokens survived the write ─────────────────────────
-                _getBody(item, function (bodyAfter, err2) {
-                    if (err2) {
-                        _diag.warn("step_stripAndInsert: verification read failed — assuming success");
-                        onDone(true);
-                        return;
-                    }
-                    var startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
-                    var endOk = bodyAfter.indexOf(CONFIG.CB_SIG_END) !== -1;
-                    _diag.info("step_stripAndInsert: post-insert"
-                        + " | bodyLen=" + bodyAfter.length
-                        + " | CB_SIG_START=" + startOk
-                        + " | CB_SIG_END=" + endOk);
-                    _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " ===");
-                    onDone(startOk && endOk);
-                });
+                var startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
+                var endOk = bodyAfter.indexOf(CONFIG.CB_SIG_END) !== -1;
+                _diag.info("step_stripAndInsert: post-write verification"
+                    + " | bodyLen=" + bodyAfter.length
+                    + " | CB_SIG_START=" + startOk
+                    + " | CB_SIG_END=" + endOk);
+                _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " ===");
+                onDone(startOk && endOk);
             });
         });
     }
@@ -7380,51 +7356,29 @@ function onSendHandler(event) {
         return;
     }
 
-    // Check if signature is already present in the body.
-    // If yes — allow send immediately, no rewrite needed.
-    // The signature was already applied by applySignature at compose time.
-    _getBody(item, function (body, err) {
-        if (err) {
-            _diag.warn("onSendHandler: body read failed — allowing send anyway");
-            guarded.completed({ allowEvent: true });
-            return;
-        }
-
-        var sigPresent =
-            body.indexOf(CONFIG.CB_SIG_START) !== -1 &&
-            body.indexOf(CONFIG.CB_SIG_END) !== -1;
-
-        if (sigPresent) {
-            _diag.info("onSendHandler: signature tokens present — allowing send");
+    // onSendHandler runs in the same Trident context as applySignature in
+    // Classic Outlook (no separate iframe), so OfficeRuntime.storage is shared.
+    cacheGet(function (cachedHtml) {
+        if (!cachedHtml) {
+            _diag.info("onSendHandler: no cached signature — passing through");
             writeDiagnostics(item, function () {
                 guarded.completed({ allowEvent: true });
             });
             return;
         }
 
-        // Signature missing (user deleted it, or applySignature failed).
-        // Attempt one write from cache, but bump the timeout guard to survive
-        // the full PATH B async chain.
-        _diag.warn("onSendHandler: signature missing — attempting cache write");
-        cacheGet(function (cachedHtml) {
-            if (!cachedHtml) {
-                _diag.warn("onSendHandler: no cache — allowing send without signature");
-                writeDiagnostics(item, function () {
-                    guarded.completed({ allowEvent: true });
-                });
-                return;
-            }
+        _diag.info("onSendHandler: writing cached signature ("
+            + cachedHtml.length + " chars) | forceReplace=true");
 
-            _diag.info("onSendHandler: writing from cache ("
-                + cachedHtml.length + " chars) | forceReplace=true");
-
-            writeSignature(item, cachedHtml, function (ok) {
-                if (!ok) _diag.warn("onSendHandler: writeSignature failed — allowing send anyway");
-                writeDiagnostics(item, function () {
-                    guarded.completed({ allowEvent: true });
-                });
-            }, true);
-        });
+        // forceReplace=true — unconditionally replace any stale / native sig
+        // that Outlook re-injected between compose and send.
+        // cachedHtml is already _wrapSignature()'d.
+        writeSignature(item, cachedHtml, function (ok) {
+            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+            writeDiagnostics(item, function () {
+                guarded.completed({ allowEvent: true });
+            });
+        }, true /* forceReplace */);
     });
 }
 
