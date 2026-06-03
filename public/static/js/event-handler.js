@@ -586,6 +586,56 @@ async function _resolveSignatureHtml(mailbox) {
 
 // ─── onSend core ──────────────────────────────────────────────────────────────
 
+// ─── Size-aware signature insertion ──────────────────────────────────────────
+// setSignatureAsync hard limit is ~100KB enforced by Outlook.
+// For larger signatures we fall back to setAsync on the full body,
+// doing a surgical strip+inject so only the compose-area sig is replaced.
+// cid: refs in the quoted chain pass through verbatim — OWA rewires them
+// correctly because the strings are byte-for-byte identical to what getAsync
+// returned.
+
+const SIGNATURE_ASYNC_LIMIT_BYTES = 100 * 1024; // 100 KB
+
+function _sizeOf(str) {
+    return new Blob([str]).size;
+}
+
+// Inserts signature via setSignatureAsync if under the limit.
+// Returns true if it succeeded, false if the signature is too large.
+function _trySetSignatureAsync(item, html) {
+    return new Promise((resolve) => {
+        if (
+            _sizeOf(html) > SIGNATURE_ASYNC_LIMIT_BYTES ||
+            typeof item.body.setSignatureAsync !== "function"
+        ) {
+            resolve(false);
+            return;
+        }
+        item.body.setSignatureAsync(
+            html,
+            { coercionType: Office.CoercionType.Html },
+            (r) => {
+                if (r.status === Office.AsyncResultStatus.Succeeded) {
+                    resolve(true);
+                } else {
+                    console.warn("[CardByte] setSignatureAsync failed:", r.error);
+                    resolve(false);
+                }
+            }
+        );
+    });
+}
+
+// Full-body surgical replacement — works for any signature size.
+// Strips the existing compose-area CB signature and injects the fresh one.
+// Everything else in the body (including cid: refs) is passed through verbatim.
+async function _setBodySurgical(item, bodyHtml, freshWrappedSig) {
+    const patchedBody = _stripAndInjectComposeSignature(bodyHtml, freshWrappedSig);
+    await _setBodyAsync(item, patchedBody);
+}
+
+// ─── onSend core ──────────────────────────────────────────────────────────────
+
 async function _applySignatureOnSend(item, mailbox) {
     let bodyHtml;
     try {
@@ -595,50 +645,85 @@ async function _applySignatureOnSend(item, mailbox) {
         return;
     }
 
-    console.log(`[CardByte] onSend: body length=${bodyHtml.length}, hasCBSig=${bodyHtml.indexOf(CB_SIG_START) !== -1}, hasCid=${_hasCidImages(bodyHtml)}`);
+    const platform = detectPlatform();
+    const hasExistingCBSig = _hasExistingCBSig(bodyHtml);
+    const hasCid = _hasCidImages(bodyHtml);
 
-    const hasExistingCBSig = bodyHtml.indexOf(CB_SIG_START) !== -1;
+    console.log(
+        `[CardByte] onSend: platform=${platform}, bodySize=${_sizeOf(bodyHtml)}, ` +
+        `hasCBSig=${hasExistingCBSig}, hasCid=${hasCid}`
+    );
 
-    if (!hasExistingCBSig) {
-        console.warn("[CardByte] onSend: no CB signature — injecting via setSignatureAsync.");
-        const sigHtml = await _resolveSignatureHtml(mailbox);
+    const sigHtml = await _resolveSignatureHtml(mailbox);
+    const freshWrapped = _wrapSignature(sigHtml);
+    const sigSize = _sizeOf(freshWrapped);
+    const isLarge = sigSize > SIGNATURE_ASYNC_LIMIT_BYTES;
+
+    console.log(`[CardByte] onSend: sigSize=${sigSize} bytes, isLarge=${isLarge}`);
+
+    // ── Path A: signature fits in setSignatureAsync AND no existing CB sig ─────
+    // Safest path — setSignatureAsync only touches the compose-area signature
+    // zone, never the quoted chain, never the cid: MIME wiring.
+    if (!isLarge && !hasExistingCBSig) {
+        console.log("[CardByte] onSend: no existing CB sig, small sig → setSignatureAsync.");
         try {
-            await bodySetSignatureAsync(item, _wrapSignature(sigHtml));
-            console.log("[CardByte] onSend: setSignatureAsync complete.");
+            const ok = await _trySetSignatureAsync(item, freshWrapped);
+            if (ok) { console.log("[CardByte] onSend: setSignatureAsync complete."); return; }
         } catch (err) {
-            console.error("[CardByte] onSend: setSignatureAsync failed:", err);
+            console.warn("[CardByte] onSend: setSignatureAsync threw:", err);
         }
-        return;
     }
 
-    // Resolve cid: images if present
-    if (_hasCidImages(bodyHtml)) {
-        console.log("[CardByte] onSend: cid: images detected — resolving to base64 before setAsync.");
+    // ── Path B: signature fits AND existing CB sig is present ─────────────────
+    // setSignatureAsync replaces the signature zone which holds the CB sig —
+    // clean replacement, no duplication, no chain impact.
+    if (!isLarge && hasExistingCBSig) {
+        console.log("[CardByte] onSend: existing CB sig present, small sig → setSignatureAsync.");
+        try {
+            const ok = await _trySetSignatureAsync(item, freshWrapped);
+            if (ok) { console.log("[CardByte] onSend: setSignatureAsync complete."); return; }
+            // If setSignatureAsync failed fall through to surgical setAsync
+            console.warn("[CardByte] onSend: setSignatureAsync failed — falling through to surgical setAsync.");
+        } catch (err) {
+            console.warn("[CardByte] onSend: setSignatureAsync threw:", err);
+        }
+    }
+
+    // ── Path C: large signature — must use setAsync ────────────────────────────
+    // For OWA: cid: refs in the quoted chain pass through verbatim because
+    // _stripAndInjectComposeSignature leaves everything outside the CB wrapper
+    // table byte-for-byte identical to what getAsync returned. OWA rewires
+    // those cid: refs correctly on send because the strings are unchanged.
+    //
+    // For Mac/desktop: resolve attachment-backed cid: refs to base64 first.
+    // Reply-chain cid: refs with no matching attachment are left as-is —
+    // they're quoted content, not user-composed images.
+
+    if (hasCid && platform !== "owa") {
+        console.log("[CardByte] onSend: non-OWA cid: images — resolving to base64.");
         try {
             bodyHtml = await _resolveCidImages(bodyHtml, item);
         } catch (err) {
-            console.warn("[CardByte] onSend: _resolveCidImages threw — skipping replacement.", err);
+            console.warn("[CardByte] onSend: cid resolution failed — aborting setAsync.", err);
             return;
         }
 
-        // Only abort if attachments existed AND some still couldn't be resolved.
-        // Reply-chain cid: refs (no matching attachment) are fine to leave as-is.
         const attachmentCount = (item.attachments || []).length;
         if (attachmentCount > 0) {
-            const unresolvedCount = (bodyHtml.match(/src=["']cid:/gi) || []).length;
-            if (unresolvedCount > 0) {
-                console.warn(`[CardByte] onSend: ${unresolvedCount} attachment-backed cid: ref(s) still unresolved — skipping setAsync.`);
+            const stillUnresolved = (bodyHtml.match(/src=["']cid:/gi) || []).length;
+            if (stillUnresolved > 0) {
+                console.warn(`[CardByte] onSend: ${stillUnresolved} cid: ref(s) still unresolved — aborting setAsync.`);
                 return;
             }
         }
     }
 
-    const sigHtml = await _resolveSignatureHtml(mailbox);
-    const patchedBody = _stripAndInjectComposeSignature(bodyHtml, _wrapSignature(sigHtml));
-
+    // OWA large sig: cid: refs in quoted chain are passed through verbatim —
+    // no resolution needed, setAsync is safe for the chain content.
+    console.log(`[CardByte] onSend: surgical setAsync (${platform}, sigSize=${sigSize} bytes).`);
     try {
-        await _setBodyAsync(item, patchedBody);
-        console.log("[CardByte] onSend: surgical replacement complete.");
+        await _setBodySurgical(item, bodyHtml, freshWrapped);
+        console.log("[CardByte] onSend: surgical setAsync complete.");
     } catch (err) {
         console.error("[CardByte] onSend: setAsync failed:", err);
     }
