@@ -6723,7 +6723,7 @@ var CONFIG = {
     // Must match the tokens used in event-handler.js so both files share one
     // stripping strategy.
     CB_SIG_START: "__CBSIG_START_7F2C9D4E__",
-    CB_SIG_END: "__CBSIG_END_7F2C9D4E__"
+    CB_SIG_END:   "__CBSIG_END_7F2C9D4E__"
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
@@ -6755,10 +6755,10 @@ var _diag = (function () {
     }
 
     return {
-        info: function (m) { push("INFO", m); },
-        warn: function (m) { push("WARN", m); },
+        info:  function (m) { push("INFO",  m); },
+        warn:  function (m) { push("WARN",  m); },
         error: function (m) { push("ERROR", m); },
-        html: buildHtmlBlock
+        html:  buildHtmlBlock
     };
 })();
 
@@ -6775,7 +6775,7 @@ function encryptEmail(email) {
     if (typeof CryptoJS === "undefined") { _diag.error("encryptEmail: CryptoJS not loaded"); return ""; }
     try {
         var key = CryptoJS.enc.Base64.parse(CONFIG.AES_KEY_B64);
-        var iv = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
+        var iv  = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
         return CryptoJS.AES.encrypt(email, key, {
             iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
         }).toString();
@@ -6787,7 +6787,7 @@ function decryptResponse(cipherB64) {
     if (typeof CryptoJS === "undefined") { _diag.error("decryptResponse: CryptoJS not loaded"); return ""; }
     try {
         var key = CryptoJS.enc.Base64.parse(CONFIG.AES_KEY_B64);
-        var iv = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
+        var iv  = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
         return CryptoJS.AES.decrypt(cipherB64, key, {
             iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
         }).toString(CryptoJS.enc.Utf8);
@@ -6839,7 +6839,7 @@ function cacheSet(html, cb) {
         var entry = { html: html, ts: Date.now(), hash: CryptoJS.SHA256(html).toString() };
         _memCache[CONFIG.CACHE_KEY] = entry;
         OfficeRuntime.storage.setItem(CONFIG.CACHE_KEY, JSON.stringify(entry)).then(
-            function () { _diag.info("cacheSet: saved"); if (cb) cb(true); },
+            function ()    { _diag.info("cacheSet: saved"); if (cb) cb(true); },
             function (err) { _diag.warn("cacheSet failed: " + err); if (cb) cb(false); }
         );
     } catch (e) { _diag.warn("cacheSet threw: " + e.message); if (cb) cb(false); }
@@ -6849,7 +6849,7 @@ function cacheClear(cb) {
     delete _memCache[CONFIG.CACHE_KEY];
     try {
         OfficeRuntime.storage.removeItem(CONFIG.CACHE_KEY).then(
-            function () { _diag.info("cacheClear: done"); if (cb) cb(); },
+            function ()    { _diag.info("cacheClear: done"); if (cb) cb(); },
             function (err) { _diag.warn("cacheClear failed: " + err); if (cb) cb(); }
         );
     } catch (e) { _diag.warn("cacheClear threw: " + e.message); if (cb) cb(); }
@@ -6946,19 +6946,19 @@ function stripSignatures(html) {
 
     while (iterations++ < MAX_ITER) {
         var startIdx = html.indexOf(CONFIG.CB_SIG_START);
-        var endIdx = html.indexOf(CONFIG.CB_SIG_END);
+        var endIdx   = html.indexOf(CONFIG.CB_SIG_END);
 
         if (startIdx === -1 || endIdx === -1) {
             if (startIdx !== -1 || endIdx !== -1) {
                 _diag.warn("stripSignatures: orphan token detected — trimming");
                 html = html
                     .replace(CONFIG.CB_SIG_START, "")
-                    .replace(CONFIG.CB_SIG_END, "");
+                    .replace(CONFIG.CB_SIG_END,   "");
             }
             break;
         }
 
-        var tableOpen = html.lastIndexOf("<table", startIdx);
+        var tableOpen  = html.lastIndexOf("<table", startIdx);
         var tableClose = html.indexOf("</table>", endIdx);
 
         if (tableOpen !== -1 && tableClose !== -1) {
@@ -6969,7 +6969,7 @@ function stripSignatures(html) {
                 + " | removed=" + removed + " chars");
 
             html = html.substring(0, tableOpen)
-                + html.substring(tableClose + "</table>".length);
+                 + html.substring(tableClose + "</table>".length);
         } else {
             _diag.warn("stripSignatures: table boundary not found"
                 + " | tableOpen=" + tableOpen
@@ -6977,7 +6977,7 @@ function stripSignatures(html) {
                 + " — falling back to token-span cut");
 
             html = html.substring(0, startIdx)
-                + html.substring(endIdx + CONFIG.CB_SIG_END.length);
+                 + html.substring(endIdx + CONFIG.CB_SIG_END.length);
         }
     }
 
@@ -7100,7 +7100,7 @@ function writeSignature(item, html, onDone, forceReplace) {
             }
             _diag.info("step_readBody: length=" + body.length
                 + " | CB_SIG_START=" + (body.indexOf(CONFIG.CB_SIG_START) !== -1)
-                + " | CB_SIG_END=" + (body.indexOf(CONFIG.CB_SIG_END) !== -1));
+                + " | CB_SIG_END="   + (body.indexOf(CONFIG.CB_SIG_END)   !== -1));
             next(body);
         });
     }
@@ -7109,7 +7109,7 @@ function writeSignature(item, html, onDone, forceReplace) {
         // ── Dedup guard ───────────────────────────────────────────────────────
         var sigPresent =
             existingBody.indexOf(CONFIG.CB_SIG_START) !== -1 &&
-            existingBody.indexOf(CONFIG.CB_SIG_END) !== -1;
+            existingBody.indexOf(CONFIG.CB_SIG_END)   !== -1;
 
         if (!forceReplace && sigPresent) {
             _diag.info("step_stripAndInsert: signature already present"
@@ -7123,14 +7123,49 @@ function writeSignature(item, html, onDone, forceReplace) {
         _diag.info("step_stripAndInsert: cleanBody=" + cleanBody.length
             + " chars (was " + existingBody.length + ")");
 
-        // ── Combine stripped body + wrapped signature, write in ONE setAsync ──
-        // Root cause of the prepend bug: setAsync resets the Word/Trident cursor
-        // to position 0 (document top). Any subsequent setSelectedDataAsync then
-        // inserts at the TOP, not the bottom. By concatenating body + signature
-        // before the single setAsync call, we eliminate cursor state entirely
-        // and guarantee the signature always lands at the bottom.
-        var combined = cleanBody + html;
-        var combinedKB = byteKB(combined).toFixed(1);
+        // ── Locate reply chain boundary ───────────────────────────────────────
+        // In a reply/forward, Classic Outlook wraps the quoted chain in a
+        // <div id="divRplyFwdMsg"> block. The signature must be inserted
+        // BEFORE that block (after the compose area), not at the end of the
+        // full body string.  For new compose there is no such block, so we
+        // fall back to appending at the end.
+        //
+        // Boundary candidates (checked in priority order):
+        //   1. <div id="divRplyFwdMsg"   — Classic Outlook / OWA reply block
+        //   2. <div id="divTaggedContent" — some OWA variants
+        //   3. <blockquote               — plain-text / edge-case fallback
+        var REPLY_PATTERNS = [
+            /(<div[^>]+\bid=["']divRplyFwdMsg["'][^>]*>)/i,
+            /(<div[^>]+\bid=["']divTaggedContent["'][^>]*>)/i,
+            /(<blockquote[^>]*>)/i
+        ];
+
+        var composeArea  = cleanBody;
+        var chainArea    = "";
+        var patternUsed  = "none";
+
+        for (var pi = 0; pi < REPLY_PATTERNS.length; pi++) {
+            var m = REPLY_PATTERNS[pi].exec(cleanBody);
+            if (m) {
+                // Split just before the opening tag so the tag itself stays
+                // with the quoted chain, not the compose area.
+                var splitAt = m.index;
+                composeArea = cleanBody.substring(0, splitAt);
+                chainArea   = cleanBody.substring(splitAt);
+                patternUsed = REPLY_PATTERNS[pi].toString();
+                break;
+            }
+        }
+
+        _diag.info("step_stripAndInsert: reply boundary"
+            + " | pattern=" + patternUsed
+            + " | composeLen=" + composeArea.length
+            + " | chainLen=" + chainArea.length);
+
+        // ── Assemble: composeArea + signature + quoted chain ──────────────────
+        // One setAsync call — no cursor state to reason about.
+        var combined    = composeArea + html + chainArea;
+        var combinedKB  = byteKB(combined).toFixed(1);
         _diag.info("step_stripAndInsert: writing combined body+sig | " + combinedKB + " KB");
 
         _setBody(item, combined, function (err) {
@@ -7150,7 +7185,7 @@ function writeSignature(item, html, onDone, forceReplace) {
                     return;
                 }
                 var startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
-                var endOk = bodyAfter.indexOf(CONFIG.CB_SIG_END) !== -1;
+                var endOk   = bodyAfter.indexOf(CONFIG.CB_SIG_END)   !== -1;
                 _diag.info("step_stripAndInsert: post-write verification"
                     + " | bodyLen=" + bodyAfter.length
                     + " | CB_SIG_START=" + startOk
@@ -7184,7 +7219,7 @@ function writeDiagnostics(item, onDone) {
 // ─── Backend fetch ────────────────────────────────────────────────────────────
 
 function resolveContext() {
-    var email = "";
+    var email    = "";
     var platform = "WINDOWS";
     try {
         email = (Office.context.mailbox.userProfile.emailAddress || "").trim();
@@ -7212,7 +7247,7 @@ function fetchSignature(onSuccess, onError) {
     try {
         xhr.open("GET", CONFIG.XHR_URL, true);
         xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
-        xhr.setRequestHeader("username", encrypted);
+        xhr.setRequestHeader("username",   encrypted);
         xhr.setRequestHeader("X-Platform", ctx.platform);
     } catch (e) { _diag.error("XHR setup: " + e.message); onError("xhr-setup-error"); return; }
 
@@ -7298,7 +7333,7 @@ function applySignatureCore(item, guardedEvent, forceReplace) {
 // ─── Guarded event wrapper ────────────────────────────────────────────────────
 
 function makeGuardedEvent(event, timeoutMs) {
-    var done = false;
+    var done  = false;
     var timer = setTimeout(function () {
         if (done) return;
         _diag.warn("makeGuardedEvent: timeout (" + timeoutMs + "ms) — forcing complete");
@@ -7405,8 +7440,8 @@ function onFromChangedHandler(event) {
         return;
     }
     try {
-        Office.actions.associate("applySignature", applySignature);
-        Office.actions.associate("onSendHandler", onSendHandler);
+        Office.actions.associate("applySignature",       applySignature);
+        Office.actions.associate("onSendHandler",        onSendHandler);
         Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
         _diag.info("registerHandlers: all handlers registered"
             + " | CryptoJS=" + (typeof CryptoJS !== "undefined"));
