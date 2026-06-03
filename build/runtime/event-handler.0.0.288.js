@@ -179,17 +179,50 @@ async function sha256Hex(str) {
         .join("");
 }
 
-// ─── Cache (OfficeRuntime.storage) ────────────────────────────────────────────
+// ─── Storage abstraction ──────────────────────────────────────────────────────
 //
-// Mirrors the classic handler exactly:
+// Prefers OfficeRuntime.storage (shared across compose + send iframes in
+// Classic Outlook / New Outlook). Falls back to localStorage for OWA, where
+// OfficeRuntime is undefined — OWA runs both compose and onSend in the same
+// origin so localStorage IS shared between the two event iframe contexts.
+//
+// The abstraction exposes three async methods that mirror the OfficeRuntime
+// Promise API: storageGet(key), storageSet(key, val), storageRemove(key).
+
+const _storage = (() => {
+    function hasOfficeRuntime() {
+        try { return typeof OfficeRuntime !== "undefined" && !!OfficeRuntime.storage; }
+        catch (_) { return false; }
+    }
+
+    return {
+        async get(key) {
+            if (hasOfficeRuntime()) {
+                return OfficeRuntime.storage.getItem(key);
+            }
+            try { return localStorage.getItem(key); } catch (_) { return null; }
+        },
+        async set(key, val) {
+            if (hasOfficeRuntime()) {
+                return OfficeRuntime.storage.setItem(key, val);
+            }
+            try { localStorage.setItem(key, val); } catch (_) { }
+        },
+        async remove(key) {
+            if (hasOfficeRuntime()) {
+                return OfficeRuntime.storage.removeItem(key);
+            }
+            try { localStorage.removeItem(key); } catch (_) { }
+        }
+    };
+})();
+
+// ─── Cache ────────────────────────────────────────────────────────────────────
+//
 //   - Memory cache layer (per-iframe, fast path)
-//   - OfficeRuntime.storage (shared across compose + send iframes)
+//   - Persistent layer via _storage (OfficeRuntime or localStorage)
 //   - SHA-256 integrity check on every read
 //   - 6-hour TTL
-//
-// OfficeRuntime.storage is accessible from both the compose iframe and the
-// onSend iframe, solving the session-isolation problem that forced the
-// original event-handler.js to comment out onSendHandler.
 
 const _memCache = {};
 
@@ -205,9 +238,9 @@ async function cacheGet() {
         _diag.warn("cacheGet: memory hash mismatch — falling through");
     }
 
-    // Persistent path: OfficeRuntime.storage
+    // Persistent path
     try {
-        const raw = await OfficeRuntime.storage.getItem(CONFIG.CACHE_KEY);
+        const raw = await _storage.get(CONFIG.CACHE_KEY);
         if (!raw) { _diag.warn("cacheGet: storage miss"); return null; }
 
         let entry;
@@ -238,7 +271,7 @@ async function cacheSet(html) {
     try {
         const entry = { html, ts: Date.now(), hash: await sha256Hex(html) };
         _memCache[CONFIG.CACHE_KEY] = entry;
-        await OfficeRuntime.storage.setItem(CONFIG.CACHE_KEY, JSON.stringify(entry));
+        await _storage.set(CONFIG.CACHE_KEY, JSON.stringify(entry));
         _diag.info("cacheSet: saved");
         return true;
     } catch (e) {
@@ -250,7 +283,7 @@ async function cacheSet(html) {
 async function cacheClear() {
     delete _memCache[CONFIG.CACHE_KEY];
     try {
-        await OfficeRuntime.storage.removeItem(CONFIG.CACHE_KEY);
+        await _storage.remove(CONFIG.CACHE_KEY);
         _diag.info("cacheClear: done");
     } catch (e) {
         _diag.warn("cacheClear threw: " + e.message);
@@ -426,6 +459,17 @@ function _setSignatureSlot(item, html) {
     });
 }
 
+// _moveCursorToTop — after setAsync the insertion point ends up at the bottom
+// of the compose area on some OWA / New Outlook builds, so the user would
+// start typing below the signature. A zero-length prependAsync nudges Outlook
+// into placing the cursor at the very top of the compose area.
+function _moveCursorToTop(item) {
+    return new Promise((resolve) => {
+        if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
+        item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, () => resolve());
+    });
+}
+
 // ─── Core write path ──────────────────────────────────────────────────────────
 //
 // writeSignature(item, html, forceReplace)
@@ -526,10 +570,22 @@ async function writeSignature(item, html, forceReplace = false) {
         }
     }
 
+    // ── Reply-chain coerce ────────────────────────────────────────────────────
+    // When a reply/forward chain is detected (chainArea non-empty), any CB_SIG
+    // tokens in composeArea may be from a prior session's body that Outlook
+    // pre-populated — NOT from a signature we wrote this session. Treat that as
+    // stale and always replace, regardless of the forceReplace argument.
+    const isReply = chainArea.length > 0;
+    if (isReply && !forceReplace) {
+        _diag.info("step_boundary: reply/forward detected — coercing forceReplace=true");
+        forceReplace = true;
+    }
+
     _diag.info("step_boundary"
         + " | pattern=" + patternUsed
         + " | composeLen=" + composeArea.length
-        + " | chainLen=" + chainArea.length);
+        + " | chainLen=" + chainArea.length
+        + " | effectiveForceReplace=" + forceReplace);
 
     // Step 4 — Dedup guard (compose area only)
     const sigInComposeArea =
@@ -561,7 +617,15 @@ async function writeSignature(item, html, forceReplace = false) {
         return false;
     }
 
-    // Step 7 — Verify tokens survived the write
+    // Step 7 — Snap cursor to top of compose area.
+    // setAsync resets the insertion point to position 0 on some OWA / New
+    // Outlook builds, which can land the cursor BELOW the signature. A
+    // zero-length prependAsync forces it back to the top so the user types
+    // above the signature as expected.
+    await _moveCursorToTop(item);
+    _diag.info("step_cursor: snapped to top");
+
+    // Step 8 — Verify tokens survived the write
     try {
         const bodyAfter = await _getBody(item);
         const startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
