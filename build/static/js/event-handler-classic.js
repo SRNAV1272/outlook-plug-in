@@ -6710,7 +6710,7 @@ var CONFIG = {
     WRAP_TOP_PX: 40,
     WRAP_BOTTOM_PX: 40,
 
-    SEND_HANDLER_TIMEOUT_MS: 2000,
+    SEND_HANDLER_TIMEOUT_MS: 8000,
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
 
     DIAG_ENABLED: false,
@@ -7380,29 +7380,51 @@ function onSendHandler(event) {
         return;
     }
 
-    // onSendHandler runs in the same Trident context as applySignature in
-    // Classic Outlook (no separate iframe), so OfficeRuntime.storage is shared.
-    cacheGet(function (cachedHtml) {
-        if (!cachedHtml) {
-            _diag.info("onSendHandler: no cached signature — passing through");
+    // Check if signature is already present in the body.
+    // If yes — allow send immediately, no rewrite needed.
+    // The signature was already applied by applySignature at compose time.
+    _getBody(item, function (body, err) {
+        if (err) {
+            _diag.warn("onSendHandler: body read failed — allowing send anyway");
+            guarded.completed({ allowEvent: true });
+            return;
+        }
+
+        var sigPresent =
+            body.indexOf(CONFIG.CB_SIG_START) !== -1 &&
+            body.indexOf(CONFIG.CB_SIG_END) !== -1;
+
+        if (sigPresent) {
+            _diag.info("onSendHandler: signature tokens present — allowing send");
             writeDiagnostics(item, function () {
                 guarded.completed({ allowEvent: true });
             });
             return;
         }
 
-        _diag.info("onSendHandler: writing cached signature ("
-            + cachedHtml.length + " chars) | forceReplace=true");
+        // Signature missing (user deleted it, or applySignature failed).
+        // Attempt one write from cache, but bump the timeout guard to survive
+        // the full PATH B async chain.
+        _diag.warn("onSendHandler: signature missing — attempting cache write");
+        cacheGet(function (cachedHtml) {
+            if (!cachedHtml) {
+                _diag.warn("onSendHandler: no cache — allowing send without signature");
+                writeDiagnostics(item, function () {
+                    guarded.completed({ allowEvent: true });
+                });
+                return;
+            }
 
-        // forceReplace=true — unconditionally replace any stale / native sig
-        // that Outlook re-injected between compose and send.
-        // cachedHtml is already _wrapSignature()'d.
-        writeSignature(item, cachedHtml, function (ok) {
-            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-            writeDiagnostics(item, function () {
-                guarded.completed({ allowEvent: true });
-            });
-        }, true /* forceReplace */);
+            _diag.info("onSendHandler: writing from cache ("
+                + cachedHtml.length + " chars) | forceReplace=true");
+
+            writeSignature(item, cachedHtml, function (ok) {
+                if (!ok) _diag.warn("onSendHandler: writeSignature failed — allowing send anyway");
+                writeDiagnostics(item, function () {
+                    guarded.completed({ allowEvent: true });
+                });
+            }, true);
+        });
     });
 }
 
