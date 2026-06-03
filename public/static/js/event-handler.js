@@ -470,30 +470,7 @@ function _moveCursorToTop(item) {
     });
 }
 
-// ─── Core write path ──────────────────────────────────────────────────────────
-//
-// writeSignature(item, html, forceReplace)
-//
-// PATH A — small sig (<100 KB) + setSignatureAsync available (OWA / New Outlook).
-//   Calls setSignatureAsync directly; Outlook manages the signature slot.
-//
-// PATH B — large sig OR setSignatureAsync unavailable (Classic Outlook always
-//   lands here because setSignatureAsync is not present in Trident runtime).
-//
-//   Reply-chain boundary is found FIRST, before dedup and strip:
-//     • We split at the first reply-chain marker so signatures already in the
-//       quoted chain (from the original sender) are never touched.
-//     • Dedup guard checks compose area only — if CB_SIG tokens are already
-//       present there and forceReplace=false, we skip the insert.
-//     • stripSignatures runs on compose area only.
-//     • Final write: cleanCompose + wrapped sig + untouched chainArea — ONE
-//       setAsync call (no cursor juggling; avoids prepend-to-top bug).
-//
-// Why one setAsync instead of setAsync + setSelectedDataAsync?
-//   setAsync resets the cursor to position 0 (top of body). A subsequent
-//   setSelectedDataAsync therefore inserts at the TOP, prepending the
-//   signature instead of appending it. Combining into one setAsync call
-//   eliminates the cursor entirely and guarantees correct append order.
+// ─── Reply-chain boundary patterns ───────────────────────────────────────────
 
 const REPLY_PATTERNS = [
     // Classic Outlook 2016/2019 — outer div wrapping the border-top separator
@@ -507,55 +484,15 @@ const REPLY_PATTERNS = [
     /(<blockquote[^>]*>)/i
 ];
 
-async function writeSignature(item, html, forceReplace = false) {
-    const htmlKB = byteKB(html);
+// ─── Shared body-prep: split, coerce, dedup, strip ───────────────────────────
+//
+// Used by both PATH A and PATH B so the boundary/dedup/strip logic is not
+// duplicated.  Returns { composeArea, chainArea, skip } where skip=true means
+// the dedup guard fired and the caller should abort without writing.
 
-    _diag.info("=== writeSignature START | " + htmlKB.toFixed(1) + " KB"
-        + " | forceReplace=" + forceReplace + " ===");
+function _prepBody(existingBody, forceReplace) {
 
-    // ── PATH A ────────────────────────────────────────────────────────────────
-    if (typeof item.body.setSignatureAsync === "function" && htmlKB < 100) {
-        _diag.info("PATH A: setSignatureAsync (" + htmlKB.toFixed(1) + " KB)");
-        try {
-            await _setSignatureSlot(item, html);
-            _diag.info("PATH A succeeded");
-            _diag.info("=== writeSignature END | success=true ===");
-            return true;
-        } catch (e) {
-            _diag.error("PATH A failed: " + (e?.message || JSON.stringify(e)));
-            return false;
-        }
-    }
-
-    // ── PATH B ────────────────────────────────────────────────────────────────
-    _diag.info("PATH B: combined setAsync body+sig (" + htmlKB.toFixed(1) + " KB)");
-
-    // Step 1 — Clear native signature slot (best-effort)
-    if (typeof item.body.setSignatureAsync === "function") {
-        _diag.info("step_clearSlot: clearing native signature slot");
-        try {
-            await _setSignatureSlot(item, "");
-            _diag.info("step_clearSlot: cleared");
-        } catch (e) {
-            _diag.warn("step_clearSlot non-fatal: " + (e?.message || JSON.stringify(e)));
-        }
-    } else {
-        _diag.info("step_clearSlot: setSignatureAsync unavailable — skipping");
-    }
-
-    // Step 2 — Read existing body
-    let existingBody;
-    try {
-        existingBody = await _getBody(item);
-        _diag.info("step_readBody: length=" + existingBody.length
-            + " | CB_SIG_START=" + (existingBody.indexOf(CONFIG.CB_SIG_START) !== -1)
-            + " | CB_SIG_END=" + (existingBody.indexOf(CONFIG.CB_SIG_END) !== -1));
-    } catch (e) {
-        _diag.error("step_readBody failed: " + (e?.message || JSON.stringify(e)));
-        return false;
-    }
-
-    // Step 3 — Locate reply-chain boundary FIRST
+    // 1. Locate reply-chain boundary FIRST so chainArea is never touched
     let composeArea = existingBody;
     let chainArea = "";
     let patternUsed = "none";
@@ -570,73 +507,179 @@ async function writeSignature(item, html, forceReplace = false) {
         }
     }
 
-    // ── Reply-chain coerce ────────────────────────────────────────────────────
-    // When a reply/forward chain is detected (chainArea non-empty), any CB_SIG
-    // tokens in composeArea may be from a prior session's body that Outlook
-    // pre-populated — NOT from a signature we wrote this session. Treat that as
-    // stale and always replace, regardless of the forceReplace argument.
+    // 2. On reply/forward always replace — any CB_SIG tokens in composeArea
+    //    may have been pre-populated by Outlook from a previous session's draft
+    //    and are not guaranteed to be from the current user's active signature.
     const isReply = chainArea.length > 0;
     if (isReply && !forceReplace) {
-        _diag.info("step_boundary: reply/forward detected — coercing forceReplace=true");
+        _diag.info("_prepBody: reply/forward — coercing forceReplace=true");
         forceReplace = true;
     }
 
-    _diag.info("step_boundary"
+    _diag.info("_prepBody"
         + " | pattern=" + patternUsed
         + " | composeLen=" + composeArea.length
         + " | chainLen=" + chainArea.length
         + " | effectiveForceReplace=" + forceReplace);
 
-    // Step 4 — Dedup guard (compose area only)
-    const sigInComposeArea =
+    // 3. Dedup guard on compose area only
+    const sigInCompose =
         composeArea.indexOf(CONFIG.CB_SIG_START) !== -1 &&
         composeArea.indexOf(CONFIG.CB_SIG_END) !== -1;
 
-    if (!forceReplace && sigInComposeArea) {
-        _diag.info("step_dedup: signature already present in compose area"
-            + " + forceReplace=false — skipping insert");
-        _diag.info("=== writeSignature END | success=true (skipped) ===");
+    if (!forceReplace && sigInCompose) {
+        _diag.info("_prepBody: sig already in compose area + forceReplace=false → skip");
+        return { composeArea, chainArea, cleanCompose: composeArea, skip: true };
+    }
+
+    // 4. Strip old signatures from compose area only
+    const cleanCompose = stripSignatures(composeArea);
+    _diag.info("_prepBody: stripped compose " + composeArea.length + " → " + cleanCompose.length);
+
+    return { composeArea, chainArea, cleanCompose, skip: false };
+}
+
+// ─── Core write path ──────────────────────────────────────────────────────────
+//
+// writeSignature(item, rawHtml, forceReplace)
+//
+// rawHtml is always the UNWRAPPED backend HTML (no CB_SIG tokens).
+// Wrapping happens only in PATH B where a single setAsync call carries
+// the entire body — the tokens survive Trident and OWA's round-trip there.
+//
+// PATH A — setSignatureAsync available (OWA / New Outlook / Mac), ANY size.
+//   OWA's setAsync silently strips base64 images when the combined body
+//   exceeds ~200 KB, so we MUST use setSignatureAsync for the sig part.
+//   Sequence:
+//     1. Read body, split at reply boundary, strip old CB_SIG from compose.
+//     2. setAsync(cleanCompose + chainArea) — body without sig, preserves
+//        chain images completely.
+//     3. setSignatureAsync(rawHtml) — Outlook appends sig below body using
+//        its own rendering pipeline, which preserves all images regardless
+//        of size and does not interfere with the compose/chain content.
+//     4. prependAsync("") to snap cursor to top.
+//   No CB_SIG tokens needed — Outlook manages the sig slot boundary.
+//
+// PATH B — setSignatureAsync unavailable (Classic Outlook 2016/2019 Trident).
+//   Sequence:
+//     1. Read body, split, strip as above.
+//     2. Wrap rawHtml with CB_SIG sentinel tokens.
+//     3. setAsync(cleanCompose + wrappedSig + chainArea) — single call.
+//     4. prependAsync("") to snap cursor to top.
+//     5. Verify tokens survived.
+
+async function writeSignature(item, rawHtml, forceReplace = false) {
+    const htmlKB = byteKB(rawHtml);
+
+    _diag.info("=== writeSignature START | " + htmlKB.toFixed(1) + " KB"
+        + " | setSignatureAsync=" + (typeof item.body.setSignatureAsync === "function")
+        + " | forceReplace=" + forceReplace + " ===");
+
+    // ── PATH A — setSignatureAsync available (OWA / New Outlook / Mac) ────────
+    if (typeof item.body.setSignatureAsync === "function") {
+        _diag.info("PATH A: two-call split (setAsync body + setSignatureAsync sig)");
+
+        // Step 1 — Read existing body
+        let existingBody;
+        try {
+            existingBody = await _getBody(item);
+            _diag.info("step_readBody: length=" + existingBody.length);
+        } catch (e) {
+            _diag.error("step_readBody failed: " + (e?.message || JSON.stringify(e)));
+            return false;
+        }
+
+        // Step 2 — Split, coerce, dedup, strip
+        const { cleanCompose, chainArea, skip } = _prepBody(existingBody, forceReplace);
+        if (skip) {
+            _diag.info("=== writeSignature END | success=true (PATH A skipped) ===");
+            return true;
+        }
+
+        // Step 3 — Write body WITHOUT sig so setSignatureAsync has a clean slot.
+        //   cleanCompose + chainArea preserves the full reply chain with its images.
+        const bodyOnly = cleanCompose + chainArea;
+        const bodyOnlyKB = byteKB(bodyOnly).toFixed(1);
+        _diag.info("PATH A step_setBody: writing body-only | " + bodyOnlyKB + " KB");
+        try {
+            await _setBody(item, bodyOnly);
+            _diag.info("PATH A step_setBody: OK");
+        } catch (e) {
+            _diag.error("PATH A step_setBody failed: " + (e?.message || JSON.stringify(e)));
+            return false;
+        }
+
+        // Step 4 — Append sig via setSignatureAsync (Outlook's image-safe pipeline)
+        _diag.info("PATH A step_setSig: " + htmlKB.toFixed(1) + " KB");
+        try {
+            await _setSignatureSlot(item, rawHtml);
+            _diag.info("PATH A step_setSig: OK");
+        } catch (e) {
+            _diag.error("PATH A step_setSig failed: " + (e?.message || JSON.stringify(e)));
+            return false;
+        }
+
+        // Step 5 — Snap cursor to top
+        await _moveCursorToTop(item);
+        _diag.info("PATH A step_cursor: snapped to top");
+        _diag.info("=== writeSignature END | success=true (PATH A) ===");
         return true;
     }
 
-    // Step 5 — Strip previous signatures from compose area only
-    const cleanCompose = stripSignatures(composeArea);
-    _diag.info("step_strip: cleanCompose=" + cleanCompose.length
-        + " chars (was " + composeArea.length + ")");
+    // ── PATH B — setSignatureAsync unavailable (Classic Outlook Trident) ──────
+    _diag.info("PATH B: single setAsync with CB_SIG tokens");
 
-    // Step 6 — Assemble and write in ONE setAsync call
-    const combined = cleanCompose + html + chainArea;
-    const combinedKB = byteKB(combined).toFixed(1);
-    _diag.info("step_write: writing combined body+sig | " + combinedKB + " KB");
-
+    // Step 1 — Read existing body
+    let existingBody;
     try {
-        await _setBody(item, combined);
-        _diag.info("step_write: setBody OK");
+        existingBody = await _getBody(item);
+        _diag.info("step_readBody: length=" + existingBody.length
+            + " | CB_SIG_START=" + (existingBody.indexOf(CONFIG.CB_SIG_START) !== -1)
+            + " | CB_SIG_END=" + (existingBody.indexOf(CONFIG.CB_SIG_END) !== -1));
     } catch (e) {
-        _diag.error("step_write: setBody failed: " + (e?.message || JSON.stringify(e)));
+        _diag.error("step_readBody failed: " + (e?.message || JSON.stringify(e)));
         return false;
     }
 
-    // Step 7 — Snap cursor to top of compose area.
-    // setAsync resets the insertion point to position 0 on some OWA / New
-    // Outlook builds, which can land the cursor BELOW the signature. A
-    // zero-length prependAsync forces it back to the top so the user types
-    // above the signature as expected.
-    await _moveCursorToTop(item);
-    _diag.info("step_cursor: snapped to top");
+    // Step 2 — Split, coerce, dedup, strip
+    const { cleanCompose, chainArea, skip } = _prepBody(existingBody, forceReplace);
+    if (skip) {
+        _diag.info("=== writeSignature END | success=true (PATH B skipped) ===");
+        return true;
+    }
 
-    // Step 8 — Verify tokens survived the write
+    // Step 3 — Wrap sig with CB_SIG sentinel tokens (needed for future strip)
+    const wrappedSig = _wrapSignature(rawHtml);
+
+    // Step 4 — Assemble and write in ONE setAsync call
+    const combined = cleanCompose + wrappedSig + chainArea;
+    const combinedKB = byteKB(combined).toFixed(1);
+    _diag.info("PATH B step_write: " + combinedKB + " KB");
+
+    try {
+        await _setBody(item, combined);
+        _diag.info("PATH B step_write: setBody OK");
+    } catch (e) {
+        _diag.error("PATH B step_write failed: " + (e?.message || JSON.stringify(e)));
+        return false;
+    }
+
+    // Step 5 — Snap cursor to top
+    await _moveCursorToTop(item);
+    _diag.info("PATH B step_cursor: snapped to top");
+
+    // Step 6 — Verify tokens survived the write
     try {
         const bodyAfter = await _getBody(item);
         const startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
         const endOk = bodyAfter.indexOf(CONFIG.CB_SIG_END) !== -1;
-        _diag.info("step_verify: bodyLen=" + bodyAfter.length
+        _diag.info("PATH B step_verify: bodyLen=" + bodyAfter.length
             + " | CB_SIG_START=" + startOk
             + " | CB_SIG_END=" + endOk);
-        _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " ===");
+        _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " (PATH B) ===");
         return startOk && endOk;
     } catch (e) {
-        _diag.warn("step_verify: read failed — assuming success");
+        _diag.warn("PATH B step_verify: read failed — assuming success");
         return true;
     }
 }
@@ -729,13 +772,15 @@ function fetchSignature() {
 
 // ─── Apply signature flow ─────────────────────────────────────────────────────
 //
-// Mirrors the classic handler's applySignatureCore exactly:
 //   1. Fetch fresh from backend (with retries).
-//   2. Wrap with CB_SIG tokens, cache, then write.
+//   2. Cache raw HTML, then write (writeSignature wraps for PATH B internally).
 //   3. On backend failure, fall back to cache.
-//   4. On both failures, use identity fallback, log and complete.
+//   4. On both failures, use identity fallback.
 //
-// forceReplace semantics (same as classic):
+// Cache stores RAW (unwrapped) HTML so both PATH A (setSignatureAsync) and
+// PATH B (single-setAsync with CB_SIG tokens) get the correct input.
+//
+// forceReplace semantics:
 //   applySignature (onNewMessageCompose)  → forceReplace=false  (dedup guard on)
 //   onSendHandler                         → forceReplace=true   (always refresh)
 //   onFromChangedHandler                  → forceReplace=true   (sender changed)
@@ -760,11 +805,10 @@ async function applySignatureCore(item, guardedEvent, forceReplace = false) {
         }
     }
 
-    // ── 2. If fetch succeeded — wrap, cache, write ────────────────────────────
+    // ── 2. Fetch succeeded — cache raw HTML and write ─────────────────────────
     if (rawHtml) {
-        const wrapped = _wrapSignature(rawHtml);
-        await cacheSet(wrapped);
-        const ok = await writeSignature(item, wrapped, forceReplace);
+        await cacheSet(rawHtml);
+        const ok = await writeSignature(item, rawHtml, forceReplace);
         if (!ok) _diag.warn("applySignatureCore: writeSignature (fresh) failed");
         await writeDiagnostics(item);
         guardedEvent.completed();
@@ -790,7 +834,8 @@ async function applySignatureCore(item, guardedEvent, forceReplace = false) {
     let userProfile = {};
     try { userProfile = Office.context.mailbox.userProfile || {}; } catch (_) { }
 
-    const fallbackHtml = _wrapSignature(`
+    // Fallback is plain HTML — writeSignature wraps it for the correct path
+    const fallbackHtml = `
         <table cellpadding="0" cellspacing="0" border="0" width="400">
           <tr>
             <td style="font-family:Arial,sans-serif;font-size:12px;">
@@ -800,7 +845,7 @@ async function applySignatureCore(item, guardedEvent, forceReplace = false) {
             </td>
           </tr>
         </table>
-    `);
+    `;
 
     const ok = await writeSignature(item, fallbackHtml, forceReplace);
     if (!ok) _diag.warn("applySignatureCore: writeSignature (fallback) failed");
