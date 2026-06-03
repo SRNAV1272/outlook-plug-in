@@ -30,7 +30,7 @@ const CONFIG = {
     // Must match the tokens used in event-handler-classic.js so both files
     // share one stripping strategy.
     CB_SIG_START: "__CBSIG_START_7F2C9D4E__",
-    CB_SIG_END: "__CBSIG_END_7F2C9D4E__"
+    CB_SIG_END:   "__CBSIG_END_7F2C9D4E__"
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
@@ -62,10 +62,10 @@ const _diag = (() => {
     }
 
     return {
-        info: (m) => push("INFO", m),
-        warn: (m) => push("WARN", m),
+        info:  (m) => push("INFO",  m),
+        warn:  (m) => push("WARN",  m),
         error: (m) => push("ERROR", m),
-        html: buildHtmlBlock
+        html:  buildHtmlBlock
     };
 })();
 
@@ -128,7 +128,7 @@ async function encryptEmail(email) {
     if (!email || !email.trim()) { _diag.warn("encryptEmail: empty email"); return ""; }
     try {
         const keyBuffer = base64ToArrayBuffer(CONFIG.AES_KEY_B64);
-        const ivBuffer = base64ToArrayBuffer(CONFIG.AES_IV_B64);
+        const ivBuffer  = base64ToArrayBuffer(CONFIG.AES_IV_B64);
         const key = await crypto.subtle.importKey(
             "raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]
         );
@@ -148,7 +148,7 @@ async function decryptResponse(cipherB64) {
     if (!cipherB64) { _diag.warn("decryptResponse: empty input"); return ""; }
     try {
         const keyBuffer = base64ToArrayBuffer(CONFIG.AES_KEY_B64);
-        const ivBuffer = base64ToArrayBuffer(CONFIG.AES_IV_B64);
+        const ivBuffer  = base64ToArrayBuffer(CONFIG.AES_IV_B64);
         const key = await crypto.subtle.importKey(
             "raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]
         );
@@ -371,19 +371,19 @@ function stripSignatures(html) {
 
     while (iterations++ < MAX_ITER) {
         const startIdx = html.indexOf(CONFIG.CB_SIG_START);
-        const endIdx = html.indexOf(CONFIG.CB_SIG_END);
+        const endIdx   = html.indexOf(CONFIG.CB_SIG_END);
 
         if (startIdx === -1 || endIdx === -1) {
             if (startIdx !== -1 || endIdx !== -1) {
                 _diag.warn("stripSignatures: orphan token detected — trimming");
                 html = html
                     .replace(CONFIG.CB_SIG_START, "")
-                    .replace(CONFIG.CB_SIG_END, "");
+                    .replace(CONFIG.CB_SIG_END,   "");
             }
             break;
         }
 
-        const tableOpen = html.lastIndexOf("<table", startIdx);
+        const tableOpen  = html.lastIndexOf("<table", startIdx);
         const tableClose = html.indexOf("</table>", endIdx);
 
         if (tableOpen !== -1 && tableClose !== -1) {
@@ -393,14 +393,14 @@ function stripSignatures(html) {
                 + " | tableClose=" + tableClose
                 + " | removed=" + removed + " chars");
             html = html.substring(0, tableOpen)
-                + html.substring(tableClose + "</table>".length);
+                 + html.substring(tableClose + "</table>".length);
         } else {
             _diag.warn("stripSignatures: table boundary not found"
                 + " | tableOpen=" + tableOpen
                 + " | tableClose=" + tableClose
                 + " — falling back to token-span cut");
             html = html.substring(0, startIdx)
-                + html.substring(endIdx + CONFIG.CB_SIG_END.length);
+                 + html.substring(endIdx + CONFIG.CB_SIG_END.length);
         }
     }
 
@@ -470,137 +470,77 @@ function _moveCursorToTop(item) {
     });
 }
 
-// ─── Reply-chain boundary patterns ───────────────────────────────────────────
-
-const REPLY_PATTERNS = [
-    // Classic Outlook 2016/2019 — outer div wrapping the border-top separator
-    /(<div>\s*<div[^>]+border-top\s*:\s*solid[^>]*>)/i,
-    // Broader fallback: any div whose style contains border-top:solid
-    /(<div[^>]+style\s*=\s*["'][^"']*border-top\s*:\s*solid[^"']*["'][^>]*>)/i,
-    // OWA / modern Outlook reply wrapper divs
-    /(<div[^>]+\bid=["']divRplyFwdMsg["'][^>]*>)/i,
-    /(<div[^>]+\bid=["']divTaggedContent["'][^>]*>)/i,
-    // Generic blockquote last resort
-    /(<blockquote[^>]*>)/i
-];
-
-// ─── Shared body-prep: split, coerce, dedup, strip ───────────────────────────
-//
-// Used by both PATH A and PATH B so the boundary/dedup/strip logic is not
-// duplicated.  Returns { composeArea, chainArea, skip } where skip=true means
-// the dedup guard fired and the caller should abort without writing.
-
-function _prepBody(existingBody, forceReplace) {
-
-    // 1. Locate reply-chain boundary FIRST so chainArea is never touched
-    let composeArea = existingBody;
-    let chainArea = "";
-    let patternUsed = "none";
-
-    for (let pi = 0; pi < REPLY_PATTERNS.length; pi++) {
-        const m = REPLY_PATTERNS[pi].exec(existingBody);
-        if (m) {
-            composeArea = existingBody.substring(0, m.index);
-            chainArea = existingBody.substring(m.index);
-            patternUsed = "pattern[" + pi + "]";
-            break;
-        }
-    }
-
-    // 2. On reply/forward always replace — any CB_SIG tokens in composeArea
-    //    may have been pre-populated by Outlook from a previous session's draft
-    //    and are not guaranteed to be from the current user's active signature.
-    const isReply = chainArea.length > 0;
-    if (isReply && !forceReplace) {
-        _diag.info("_prepBody: reply/forward — coercing forceReplace=true");
-        forceReplace = true;
-    }
-
-    _diag.info("_prepBody"
-        + " | pattern=" + patternUsed
-        + " | composeLen=" + composeArea.length
-        + " | chainLen=" + chainArea.length
-        + " | effectiveForceReplace=" + forceReplace);
-
-    // 3. Dedup guard on compose area only
-    const sigInCompose =
-        composeArea.indexOf(CONFIG.CB_SIG_START) !== -1 &&
-        composeArea.indexOf(CONFIG.CB_SIG_END) !== -1;
-
-    if (!forceReplace && sigInCompose) {
-        _diag.info("_prepBody: sig already in compose area + forceReplace=false → skip");
-        return { composeArea, chainArea, cleanCompose: composeArea, skip: true };
-    }
-
-    // 4. Strip old signatures from compose area only
-    const cleanCompose = stripSignatures(composeArea);
-    _diag.info("_prepBody: stripped compose " + composeArea.length + " → " + cleanCompose.length);
-
-    return { composeArea, chainArea, cleanCompose, skip: false };
-}
-
 // ─── Core write path ──────────────────────────────────────────────────────────
 //
 // writeSignature(item, rawHtml, forceReplace)
 //
 // rawHtml is always the UNWRAPPED backend HTML (no CB_SIG tokens).
-// Wrapping happens only in PATH B where a single setAsync call carries
-// the entire body — the tokens survive Trident and OWA's round-trip there.
 //
-// PATH A — setSignatureAsync available (OWA / New Outlook / Mac), ANY size.
+// PATH A — setSignatureAsync available AND sig fits within its size limit.
 //   OWA's setAsync silently strips base64 images when the combined body
-//   exceeds ~200 KB, so we MUST use setSignatureAsync for the sig part.
+//   exceeds ~200 KB.  setSignatureAsync uses Outlook's own image-safe
+//   rendering pipeline and has no such restriction — but Microsoft imposes
+//   a hard 131 072-byte (128 KB) limit on the data argument.
 //   Sequence:
-//     1. Read body, split at reply boundary, strip old CB_SIG from compose.
-//     2. setAsync(cleanCompose + chainArea) — body without sig, preserves
-//        chain images completely.
-//     3. setSignatureAsync(rawHtml) — Outlook appends sig below body using
-//        its own rendering pipeline, which preserves all images regardless
-//        of size and does not interfere with the compose/chain content.
-//     4. prependAsync("") to snap cursor to top.
-//   No CB_SIG tokens needed — Outlook manages the sig slot boundary.
+//     1. Read body → split → dedup → strip compose area.
+//     2. setAsync(cleanCompose + chainArea)  — body without sig; small payload,
+//        chain images fully preserved.
+//     3. setSignatureAsync(rawHtml)          — sig appended by Outlook, images intact.
+//     4. prependAsync("") to snap cursor.
 //
-// PATH B — setSignatureAsync unavailable (Classic Outlook 2016/2019 Trident).
+// PATH B — setSignatureAsync unavailable (Classic Outlook Trident) OR sig
+//   exceeds the 128 KB setSignatureAsync limit (fallback for OWA/New Outlook).
+//   Wraps rawHtml with CB_SIG sentinel tokens so future runs can strip it,
+//   then writes cleanCompose + wrappedSig + chainArea in ONE setAsync call.
 //   Sequence:
-//     1. Read body, split, strip as above.
-//     2. Wrap rawHtml with CB_SIG sentinel tokens.
-//     3. setAsync(cleanCompose + wrappedSig + chainArea) — single call.
-//     4. prependAsync("") to snap cursor to top.
-//     5. Verify tokens survived.
+//     1. Read body → split → dedup → strip compose area.
+//     2. setAsync(cleanCompose + _wrapSignature(rawHtml) + chainArea).
+//     3. Verify CB_SIG tokens survived.
+//     4. prependAsync("") to snap cursor.
+
+// Microsoft's documented setSignatureAsync data-size limit (bytes).
+const SETSIG_MAX_BYTES = 131072; // 128 KB
 
 async function writeSignature(item, rawHtml, forceReplace = false) {
-    const htmlKB = byteKB(rawHtml);
+    const rawBytes = new Blob([rawHtml]).size;
+    const htmlKB   = rawBytes / 1024;
+
+    const canUseSigSlot =
+        typeof item.body.setSignatureAsync === "function" &&
+        rawBytes <= SETSIG_MAX_BYTES;
 
     _diag.info("=== writeSignature START | " + htmlKB.toFixed(1) + " KB"
         + " | setSignatureAsync=" + (typeof item.body.setSignatureAsync === "function")
+        + " | rawBytes=" + rawBytes
+        + " | canUseSigSlot=" + canUseSigSlot
         + " | forceReplace=" + forceReplace + " ===");
 
-    // ── PATH A — setSignatureAsync available (OWA / New Outlook / Mac) ────────
-    if (typeof item.body.setSignatureAsync === "function") {
-        _diag.info("PATH A: two-call split (setAsync body + setSignatureAsync sig)");
+    // ── Shared prep (used by both paths) ──────────────────────────────────────
+    let existingBody;
+    try {
+        existingBody = await _getBody(item);
+        _diag.info("step_readBody: length=" + existingBody.length
+            + " | CB_SIG_START=" + (existingBody.indexOf(CONFIG.CB_SIG_START) !== -1)
+            + " | CB_SIG_END="   + (existingBody.indexOf(CONFIG.CB_SIG_END)   !== -1));
+    } catch (e) {
+        _diag.error("step_readBody failed: " + (e?.message || JSON.stringify(e)));
+        return false;
+    }
 
-        // Step 1 — Read existing body
-        let existingBody;
-        try {
-            existingBody = await _getBody(item);
-            _diag.info("step_readBody: length=" + existingBody.length);
-        } catch (e) {
-            _diag.error("step_readBody failed: " + (e?.message || JSON.stringify(e)));
-            return false;
-        }
+    const { cleanCompose, chainArea, skip } = _prepBody(existingBody, forceReplace);
+    if (skip) {
+        _diag.info("=== writeSignature END | success=true (skipped) ===");
+        return true;
+    }
 
-        // Step 2 — Split, coerce, dedup, strip
-        const { cleanCompose, chainArea, skip } = _prepBody(existingBody, forceReplace);
-        if (skip) {
-            _diag.info("=== writeSignature END | success=true (PATH A skipped) ===");
-            return true;
-        }
+    // ── PATH A — two-call split ────────────────────────────────────────────────
+    if (canUseSigSlot) {
+        _diag.info("PATH A: setAsync body-only + setSignatureAsync sig");
 
-        // Step 3 — Write body WITHOUT sig so setSignatureAsync has a clean slot.
-        //   cleanCompose + chainArea preserves the full reply chain with its images.
-        const bodyOnly = cleanCompose + chainArea;
+        // Step 1 — Write body WITHOUT sig (small payload, preserves chain images)
+        const bodyOnly   = cleanCompose + chainArea;
         const bodyOnlyKB = byteKB(bodyOnly).toFixed(1);
-        _diag.info("PATH A step_setBody: writing body-only | " + bodyOnlyKB + " KB");
+        _diag.info("PATH A step_setBody: " + bodyOnlyKB + " KB");
         try {
             await _setBody(item, bodyOnly);
             _diag.info("PATH A step_setBody: OK");
@@ -609,7 +549,7 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
             return false;
         }
 
-        // Step 4 — Append sig via setSignatureAsync (Outlook's image-safe pipeline)
+        // Step 2 — Append sig via Outlook's image-safe pipeline
         _diag.info("PATH A step_setSig: " + htmlKB.toFixed(1) + " KB");
         try {
             await _setSignatureSlot(item, rawHtml);
@@ -619,40 +559,27 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
             return false;
         }
 
-        // Step 5 — Snap cursor to top
+        // Step 3 — Snap cursor to top
         await _moveCursorToTop(item);
-        _diag.info("PATH A step_cursor: snapped to top");
-        _diag.info("=== writeSignature END | success=true (PATH A) ===");
+        _diag.info("PATH A step_cursor: snapped | === writeSignature END | success=true (PATH A) ===");
         return true;
     }
 
-    // ── PATH B — setSignatureAsync unavailable (Classic Outlook Trident) ──────
-    _diag.info("PATH B: single setAsync with CB_SIG tokens");
-
-    // Step 1 — Read existing body
-    let existingBody;
-    try {
-        existingBody = await _getBody(item);
-        _diag.info("step_readBody: length=" + existingBody.length
-            + " | CB_SIG_START=" + (existingBody.indexOf(CONFIG.CB_SIG_START) !== -1)
-            + " | CB_SIG_END=" + (existingBody.indexOf(CONFIG.CB_SIG_END) !== -1));
-    } catch (e) {
-        _diag.error("step_readBody failed: " + (e?.message || JSON.stringify(e)));
-        return false;
+    // ── PATH B — single setAsync with CB_SIG tokens ────────────────────────────
+    // Covers: Classic Outlook (no setSignatureAsync) AND OWA/New Outlook when
+    // sig exceeds the 128 KB setSignatureAsync limit.
+    if (typeof item.body.setSignatureAsync === "function") {
+        _diag.info("PATH B: sig too large for setSignatureAsync ("
+            + htmlKB.toFixed(1) + " KB > " + (SETSIG_MAX_BYTES / 1024).toFixed(0) + " KB limit)"
+            + " — falling back to single setAsync with CB_SIG tokens");
+    } else {
+        _diag.info("PATH B: setSignatureAsync unavailable — single setAsync with CB_SIG tokens");
     }
 
-    // Step 2 — Split, coerce, dedup, strip
-    const { cleanCompose, chainArea, skip } = _prepBody(existingBody, forceReplace);
-    if (skip) {
-        _diag.info("=== writeSignature END | success=true (PATH B skipped) ===");
-        return true;
-    }
-
-    // Step 3 — Wrap sig with CB_SIG sentinel tokens (needed for future strip)
+    // Wrap sig with CB_SIG sentinel tokens (needed for dedup + future strip)
     const wrappedSig = _wrapSignature(rawHtml);
 
-    // Step 4 — Assemble and write in ONE setAsync call
-    const combined = cleanCompose + wrappedSig + chainArea;
+    const combined   = cleanCompose + wrappedSig + chainArea;
     const combinedKB = byteKB(combined).toFixed(1);
     _diag.info("PATH B step_write: " + combinedKB + " KB");
 
@@ -664,18 +591,18 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
         return false;
     }
 
-    // Step 5 — Snap cursor to top
+    // Snap cursor to top
     await _moveCursorToTop(item);
-    _diag.info("PATH B step_cursor: snapped to top");
+    _diag.info("PATH B step_cursor: snapped");
 
-    // Step 6 — Verify tokens survived the write
+    // Verify tokens survived the write
     try {
         const bodyAfter = await _getBody(item);
-        const startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
-        const endOk = bodyAfter.indexOf(CONFIG.CB_SIG_END) !== -1;
+        const startOk   = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
+        const endOk     = bodyAfter.indexOf(CONFIG.CB_SIG_END)   !== -1;
         _diag.info("PATH B step_verify: bodyLen=" + bodyAfter.length
             + " | CB_SIG_START=" + startOk
-            + " | CB_SIG_END=" + endOk);
+            + " | CB_SIG_END="   + endOk);
         _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " (PATH B) ===");
         return startOk && endOk;
     } catch (e) {
@@ -700,7 +627,7 @@ async function writeDiagnostics(item) {
 // ─── Backend fetch ────────────────────────────────────────────────────────────
 
 function _resolveContext() {
-    let email = "";
+    let email    = "";
     let platform = "WINDOWS";
     try {
         email = (Office.context.mailbox.userProfile.emailAddress || "").trim();
@@ -897,7 +824,7 @@ function _safeGetItem() {
 async function applySignature(event) {
     _diag.info("=== applySignature START ===");
     const guarded = makeGuardedEvent(
-        event || { completed: () => { } },
+        event || { completed: () => {} },
         CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
     );
     const item = _safeGetItem();
@@ -920,7 +847,7 @@ async function applySignature(event) {
 async function onSendHandler(event) {
     _diag.info("=== onSendHandler START ===");
     const guarded = makeGuardedEvent(
-        event || { completed: () => { } },
+        event || { completed: () => {} },
         CONFIG.SEND_HANDLER_TIMEOUT_MS
     );
     const item = _safeGetItem();
@@ -958,7 +885,7 @@ async function onSendHandler(event) {
 async function onFromChangedHandler(event) {
     _diag.info("=== onFromChangedHandler START ===");
     const guarded = makeGuardedEvent(
-        event || { completed: () => { } },
+        event || { completed: () => {} },
         CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
     );
     const item = _safeGetItem();
@@ -978,9 +905,9 @@ Office.onReady(() => {
         return;
     }
     try {
-        Office.actions.associate("applySignature", applySignature);
-        Office.actions.associate("onSendHandler", onSendHandler);
-        Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+        Office.actions.associate("applySignature",        applySignature);
+        Office.actions.associate("onSendHandler",         onSendHandler);
+        Office.actions.associate("onFromChangedHandler",  onFromChangedHandler);
         _diag.info("registerHandlers: all handlers registered");
     } catch (e) {
         _diag.error("registerHandlers: Office.actions.associate threw: " + e.message);
