@@ -7125,32 +7125,28 @@ function writeSignature(item, html, onDone, forceReplace) {
 
         // ── Locate reply chain boundary ───────────────────────────────────────
         // Classic Outlook 2016/2019 (Trident/Word engine) does NOT use
-        // divRplyFwdMsg. Instead it emits one of these structures:
+        // divRplyFwdMsg. It emits a borderless outer <div> wrapping an inner
+        // <div> with a top-border style as the visual separator before the
+        // "From / Sent / To / Subject" header block:
         //
-        //   A) <hr tabIndex=-1>  — the horizontal rule that visually separates
-        //      the compose area from the quoted chain. This is the most reliable
-        //      marker in Classic Outlook; it appears immediately before the
-        //      "From: / Sent: / To: / Subject:" header block.
+        //   <div><div style='border:none;border-top:solid #E1E1E1 1.0pt;...'>
         //
-        //   B) <div id="divRplyFwdMsg">  — OWA / modern Outlook (not Classic,
-        //      but kept for cross-client safety).
+        // We split at the OUTER <div> so the entire separator + quoted chain
+        // stays in chainArea. For OWA / modern Outlook we keep divRplyFwdMsg
+        // and divTaggedContent as fallbacks. blockquote is the last resort.
         //
-        //   C) <div id="divTaggedContent">  — some OWA variants.
-        //
-        //   D) <blockquote>  — plain-text / minimal fallback.
-        //
-        // All patterns are tried in priority order; the first match wins.
         // If none match (new compose), chainArea stays "" and the signature
         // appends at the end — correct behaviour for new emails.
         var REPLY_PATTERNS = [
-            // Classic Outlook 2016/2019 — <hr> separator (various attribute orders)
-            /(<hr\s[^>]*tabIndex\s*=\s*["']?-1["']?[^>]*>)/i,
-            /(<hr\s[^>]*style\s*=\s*["'][^"']*["'][^>]*>)/i,
-            /(<hr\b[^>]*>)/i,
-            // OWA / modern Outlook reply wrapper div
+            // Classic Outlook 2016/2019 — outer div wrapping the border-top separator
+            // Matches: <div><div style='border:none;border-top:solid
+            /(<div>\s*<div[^>]+border-top\s*:\s*solid[^>]*>)/i,
+            // Broader fallback: any div whose style contains border-top:solid
+            /(<div[^>]+style\s*=\s*["'][^"']*border-top\s*:\s*solid[^"']*["'][^>]*>)/i,
+            // OWA / modern Outlook reply wrapper divs
             /(<div[^>]+\bid=["']divRplyFwdMsg["'][^>]*>)/i,
             /(<div[^>]+\bid=["']divTaggedContent["'][^>]*>)/i,
-            // Generic blockquote fallback
+            // Generic blockquote last resort
             /(<blockquote[^>]*>)/i
         ];
 
@@ -7164,23 +7160,9 @@ function writeSignature(item, html, onDone, forceReplace) {
                 var splitAt = m.index;
                 composeArea = cleanBody.substring(0, splitAt);
                 chainArea   = cleanBody.substring(splitAt);
-                patternUsed = "pattern[" + pi + "]=" + m[0].substring(0, 80);
+                patternUsed = "pattern[" + pi + "] match=" + m[0].substring(0, 60);
                 break;
             }
-        }
-
-        // Diagnostic: find the first "From:" occurrence (reply chain header)
-        // and log 300 chars of context before it — this reveals the exact HTML
-        // marker Classic Outlook emits as the compose/chain boundary.
-        var fromIdx = cleanBody.indexOf("From:");
-        if (fromIdx === -1) fromIdx = cleanBody.indexOf("from:");
-        if (fromIdx !== -1) {
-            var diagStart = Math.max(0, fromIdx - 300);
-            var diagEnd   = Math.min(cleanBody.length, fromIdx + 100);
-            _diag.info("step_stripAndInsert: context around From: [" + diagStart + ":" + diagEnd + "]="
-                + cleanBody.substring(diagStart, diagEnd).replace(/\n/g, "↵").replace(/\r/g, ""));
-        } else {
-            _diag.warn("step_stripAndInsert: 'From:' not found in cleanBody — new compose?");
         }
 
         _diag.info("step_stripAndInsert: reply boundary"
