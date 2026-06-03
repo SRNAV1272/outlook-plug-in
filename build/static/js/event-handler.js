@@ -30,7 +30,10 @@ const CONFIG = {
     // Must match the tokens used in event-handler-classic.js so both files
     // share one stripping strategy.
     CB_SIG_START: "__CBSIG_START_7F2C9D4E__",
-    CB_SIG_END: "__CBSIG_END_7F2C9D4E__"
+    CB_SIG_END: "__CBSIG_END_7F2C9D4E__",
+    // ─── Size constants ───────────────────────────────────────────────────────────
+    // setSignatureAsync hard limit (Microsoft-documented): 131 072 bytes (128 KB).
+    SET_SIGNATURE_ASYNC_MAX_BYTES = 131072
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
@@ -608,7 +611,7 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
         const sigBytes = new Blob([rawHtml]).size;
         _diag.info("PATH A step_setSig: " + htmlKB.toFixed(1) + " KB (" + sigBytes + " bytes)");
 
-        if (sigBytes <= SET_SIGNATURE_ASYNC_MAX_BYTES) {
+        if (sigBytes <= CONFIG.SET_SIGNATURE_ASYNC_MAX_BYTES) {
             try {
                 await _setSignatureSlot(item, rawHtml);
                 _diag.info("PATH A step_setSig: OK");
@@ -621,7 +624,7 @@ async function writeSignature(item, rawHtml, forceReplace = false) {
             }
         } else {
             _diag.warn("PATH A step_setSig: " + sigBytes + " bytes exceeds "
-                + SET_SIGNATURE_ASYNC_MAX_BYTES + " limit — falling through to PATH A→B");
+                + CONFIG.SET_SIGNATURE_ASYNC_MAX_BYTES + " limit — falling through to PATH A→B");
         }
 
         // ── PATH A→B: oversized sig — rewrite body+sig+chain as one setAsync ─
