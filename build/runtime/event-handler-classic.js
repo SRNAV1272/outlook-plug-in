@@ -6715,15 +6715,13 @@ var CONFIG = {
 
     DIAG_ENABLED: false,
 
-    CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,
-
-    CHUNK_SIZE_KB: 150,
+    CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,   // 6 hours
 
     // ── Signature boundary tokens ──────────────────────────────────────────
     // Plain text nodes inside white-coloured <td> cells — survive Classic
     // Outlook's HTML round-trip AND OWA's sanitizer without being stripped.
-    // Must match the tokens used in the OWA event-handler so both files
-    // share one stripping strategy.
+    // Must match the tokens used in event-handler.js so both files share one
+    // stripping strategy.
     CB_SIG_START: "__CBSIG_START_7F2C9D4E__",
     CB_SIG_END: "__CBSIG_END_7F2C9D4E__"
 };
@@ -6869,8 +6867,6 @@ function cacheClear(cb) {
 //   • Plain text in a visually hidden cell (color:#ffffff, font-size:1px) →
 //     survives both renderers intact, is detectable with a simple indexOf,
 //     and never appears in the user-visible email body.
-//
-// The outer <table> has no marker attribute — detection is token-based only.
 
 function _wrapSignature(html) {
     return (
@@ -6878,6 +6874,12 @@ function _wrapSignature(html) {
         + "<tr>"
         + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
         + CONFIG.CB_SIG_START
+        + "</td>"
+        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
+        + "<p>&ensp;</p>"
+        + "</td>"
+        + "<td style=\"font-size:1px;color:#ffffff;line-height:1px;mso-line-height-rule:exactly;\">"
+        + "<p>&ensp;</p>"
         + "</td>"
         + "</tr>"
         + "<tr>"
@@ -6897,12 +6899,11 @@ function _wrapSignature(html) {
 
 // ─── Signature stripping ──────────────────────────────────────────────────────
 //
-// Removes ALL CardByte and native Outlook signature artifacts from a body
-// HTML string.
+// Removes ALL CardByte and native Outlook signature artifacts from a body HTML.
 //
 // STRATEGY — token-position walk instead of regex or DOMParser:
 //   Classic Outlook's Trident engine rewrites table nesting unpredictably, so
-//   we cannot rely on a fixed tag structure around the tokens.  Instead:
+//   we cannot rely on a fixed tag structure around the tokens. Instead:
 //
 //   1. Find CB_SIG_START with indexOf.
 //   2. Walk BACKWARDS with lastIndexOf("<table") to find the outermost table
@@ -6911,9 +6912,6 @@ function _wrapSignature(html) {
 //   4. Walk FORWARDS with indexOf("</table>") to close the block.
 //   5. Excise [outerTableOpen … closingTag] from the string.
 //   6. Repeat until no more tokens remain (handles double-insert edge case).
-//
-// Native Outlook signatures (div#Signature, div#appendonsend) are stripped
-// first via simple regex since their structure is predictable.
 
 function stripSignatures(html) {
     if (!html) {
@@ -6934,16 +6932,15 @@ function stripSignatures(html) {
     if (html.length !== before)
         _diag.info("stripSignatures: removed div#appendonsend (" + (before - html.length) + " chars)");
 
-    // ── 2. Legacy V1 plain-text markers (old format) ──────────────────────────
+    // ── 2. Legacy V1 plain-text markers ──────────────────────────────────────
     before = html.length;
     html = html.replace(/__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi, "");
     if (html.length !== before)
         _diag.info("stripSignatures: removed V1 markers (" + (before - html.length) + " chars)");
 
     // ── 3. CB_SIG token-walk (current format) ─────────────────────────────────
-    // Loop handles the edge case where a double-insert left two wrapped blocks.
     var iterations = 0;
-    var MAX_ITER = 10; // safety valve
+    var MAX_ITER = 10;
 
     while (iterations++ < MAX_ITER) {
         var startIdx = html.indexOf(CONFIG.CB_SIG_START);
@@ -6951,7 +6948,6 @@ function stripSignatures(html) {
 
         if (startIdx === -1 || endIdx === -1) {
             if (startIdx !== -1 || endIdx !== -1) {
-                // One token without its pair — orphan, cut it out cleanly.
                 _diag.warn("stripSignatures: orphan token detected — trimming");
                 html = html
                     .replace(CONFIG.CB_SIG_START, "")
@@ -6960,10 +6956,7 @@ function stripSignatures(html) {
             break;
         }
 
-        // Walk backwards from the START token to the nearest opening <table.
         var tableOpen = html.lastIndexOf("<table", startIdx);
-
-        // Walk forwards from the END token to the nearest closing </table>.
         var tableClose = html.indexOf("</table>", endIdx);
 
         if (tableOpen !== -1 && tableClose !== -1) {
@@ -6976,7 +6969,6 @@ function stripSignatures(html) {
             html = html.substring(0, tableOpen)
                 + html.substring(tableClose + "</table>".length);
         } else {
-            // Table boundaries not found — fall back to cutting just the token span.
             _diag.warn("stripSignatures: table boundary not found"
                 + " | tableOpen=" + tableOpen
                 + " | tableClose=" + tableClose
@@ -6987,9 +6979,8 @@ function stripSignatures(html) {
         }
     }
 
-    if (iterations >= MAX_ITER) {
+    if (iterations >= MAX_ITER)
         _diag.error("stripSignatures: MAX_ITER reached — possible infinite loop, bailing");
-    }
 
     // ── 4. Cosmetic clean-up ──────────────────────────────────────────────────
     html = html.replace(/(?:\s*<br\s*\/?>)+\s*$/gi, "");
@@ -6998,35 +6989,6 @@ function stripSignatures(html) {
 
     _diag.info("=== stripSignatures END | outputLen=" + html.length + " ===");
     return html;
-}
-
-// ─── Chunked HTML split ───────────────────────────────────────────────────────
-
-function splitHtmlAtBlockBoundaries(html, maxKB) {
-    var maxBytes = maxKB * 1024;
-    var chunks = [];
-    var current = "";
-    var blockRe = /([\s\S]*?(?:<\/(?:table|div|p|tr|td)>|<(?:br|img)[^>]*\/?>))/gi;
-    var match;
-    var lastIndex = 0;
-
-    while ((match = blockRe.exec(html)) !== null) {
-        var seg = match[0];
-        var candidate = current + seg;
-        if (new Blob([candidate]).size > maxBytes && current !== "") {
-            chunks.push(current);
-            current = seg;
-        } else {
-            current = candidate;
-        }
-        lastIndex = blockRe.lastIndex;
-    }
-
-    if (lastIndex < html.length) current += html.slice(lastIndex);
-    if (current) chunks.push(current);
-    if (chunks.length === 0 && html.length > 0) chunks.push(html);
-
-    return chunks;
 }
 
 // ─── Body helpers ─────────────────────────────────────────────────────────────
@@ -7051,36 +7013,35 @@ function _setBody(item, html, cb) {
     });
 }
 
-// ─── Chunked insertion via setSelectedDataAsync ───────────────────────────────
+// ─── Single-shot insertion ────────────────────────────────────────────────────
+//
+// Replaces the old _insertChunks() approach. Classic Outlook's Trident engine
+// handles setSelectedDataAsync in one call reliably for signatures up to ~500 KB;
+// chunking introduced ordering races and blank-body edge cases. One write = one
+// cursor reset = predictable result.
 
-function _insertChunks(item, chunks, index, onDone) {
-    if (index >= chunks.length) {
-        _diag.info("_insertChunks: all " + chunks.length + " chunk(s) inserted");
-        onDone(true);
-        return;
-    }
+function _insertSignature(item, html, onDone) {
     if (typeof item.body.setSelectedDataAsync !== "function") {
-        _diag.error("setSelectedDataAsync unavailable");
+        _diag.error("_insertSignature: setSelectedDataAsync unavailable");
         onDone(false);
         return;
     }
 
-    var chunk = chunks[index];
-    _diag.info("Inserting chunk " + (index + 1) + "/" + chunks.length
-        + " | " + byteKB(chunk).toFixed(1) + "KB");
+    var sizeKB = byteKB(html).toFixed(1);
+    _diag.info("_insertSignature: single-shot | " + sizeKB + " KB");
 
     item.body.setSelectedDataAsync(
-        chunk,
+        html,
         { coercionType: Office.CoercionType.Html },
         function (r) {
             if (r.status !== Office.AsyncResultStatus.Succeeded) {
-                _diag.error("setSelectedDataAsync failed on chunk " + (index + 1)
-                    + ": " + JSON.stringify(r.error));
+                _diag.error("_insertSignature: setSelectedDataAsync failed: "
+                    + JSON.stringify(r.error));
                 onDone(false);
                 return;
             }
-            _diag.info("Chunk " + (index + 1) + " OK");
-            setTimeout(function () { _insertChunks(item, chunks, index + 1, onDone); }, 100);
+            _diag.info("_insertSignature: OK (" + sizeKB + " KB inserted)");
+            onDone(true);
         }
     );
 }
@@ -7089,29 +7050,27 @@ function _insertChunks(item, chunks, index, onDone) {
 //
 // writeSignature(item, html, onDone, forceReplace)
 //
-// PATH A — small sig (<100 KB) + setSignatureAsync available.
-//   Wraps html in _wrapSignature and calls setSignatureAsync directly.
-//   No body manipulation needed — Outlook manages the signature slot.
-//   NOTE: setSignatureAsync does NOT preserve CB_SIG tokens across sessions
-//   in Classic Outlook, so PATH B is always used there.
+// Aligned with the modern event-handler's two-path strategy:
 //
-// PATH B — large sig OR setSignatureAsync unavailable (Classic Outlook).
-//   1. Clear native signature slot (if API present).
-//   2. Read existing body with getAsync.
-//   3. Detect CB_SIG tokens — if present (and !forceReplace), skip.
-//   4. Strip ALL previous signatures via stripSignatures().
+// PATH A — small sig (<100 KB) + setSignatureAsync available.
+//   Calls setSignatureAsync directly; Outlook manages the signature slot.
+//
+// PATH B — large sig OR setSignatureAsync unavailable (Classic Outlook always
+//   lands here because setSignatureAsync is not present in Trident runtime).
+//   1. Optionally clear native signature slot.
+//   2. Read existing body.
+//   3. Dedup guard — skip if tokens already present (unless forceReplace).
+//   4. Strip all previous signatures.
 //   5. Write stripped body via setAsync (resets cursor to end).
-//   6. Append new wrapped signature via setSelectedDataAsync chunks.
+//   6. Append new wrapped signature in ONE setSelectedDataAsync call.
 //   7. Verify token presence in body after write.
 
 function writeSignature(item, html, onDone, forceReplace) {
     var htmlKB = byteKB(html);
 
-    _diag.info("=== writeSignature START | " + htmlKB.toFixed(1) + "KB"
+    _diag.info("=== writeSignature START | " + htmlKB.toFixed(1) + " KB"
         + " | forceReplace=" + !!forceReplace + " ===");
 
-    // The html passed in here is already _wrapSignature()'d — it contains the
-    // CB_SIG tokens.  Log whether they are present as a sanity check.
     _diag.info("writeSignature: CB_SIG_START present in html: "
         + (html.indexOf(CONFIG.CB_SIG_START) !== -1));
     _diag.info("writeSignature: CB_SIG_END present in html: "
@@ -7119,7 +7078,7 @@ function writeSignature(item, html, onDone, forceReplace) {
 
     // ── PATH A ────────────────────────────────────────────────────────────────
     if (typeof item.body.setSignatureAsync === "function" && htmlKB < 100) {
-        _diag.info("PATH A: setSignatureAsync");
+        _diag.info("PATH A: setSignatureAsync (" + htmlKB.toFixed(1) + " KB)");
         item.body.setSignatureAsync(
             html,
             { coercionType: Office.CoercionType.Html },
@@ -7137,11 +7096,16 @@ function writeSignature(item, html, onDone, forceReplace) {
     }
 
     // ── PATH B ────────────────────────────────────────────────────────────────
-    _diag.info("PATH B: chunked setSelectedDataAsync");
+    _diag.info("PATH B: single-shot setSelectedDataAsync ("
+        + htmlKB.toFixed(1) + " KB)");
 
     function step_clearSlot(next) {
-        if (typeof item.body.setSignatureAsync !== "function") { next(); return; }
-        _diag.info("step_clearSlot");
+        if (typeof item.body.setSignatureAsync !== "function") {
+            _diag.info("step_clearSlot: setSignatureAsync unavailable — skipping");
+            next();
+            return;
+        }
+        _diag.info("step_clearSlot: clearing native signature slot");
         item.body.setSignatureAsync("", { coercionType: Office.CoercionType.Html }, function (r) {
             if (r.status !== Office.AsyncResultStatus.Succeeded)
                 _diag.warn("step_clearSlot non-fatal: " + JSON.stringify(r.error));
@@ -7152,52 +7116,51 @@ function writeSignature(item, html, onDone, forceReplace) {
     }
 
     function step_readBody(next) {
-        _diag.info("step_readBody");
+        _diag.info("step_readBody: reading current body");
         _getBody(item, function (body, err) {
-            if (err) { _diag.error("step_readBody: " + JSON.stringify(err)); onDone(false); return; }
-            _diag.info("step_readBody: length=" + body.length);
-            _diag.info("step_readBody: CB_SIG_START found=" + (body.indexOf(CONFIG.CB_SIG_START) !== -1));
-            _diag.info("step_readBody: CB_SIG_END found=" + (body.indexOf(CONFIG.CB_SIG_END) !== -1));
+            if (err) {
+                _diag.error("step_readBody failed: " + JSON.stringify(err));
+                onDone(false);
+                return;
+            }
+            _diag.info("step_readBody: length=" + body.length
+                + " | CB_SIG_START=" + (body.indexOf(CONFIG.CB_SIG_START) !== -1)
+                + " | CB_SIG_END=" + (body.indexOf(CONFIG.CB_SIG_END) !== -1));
             next(body);
         });
     }
 
     function step_stripAndInsert(existingBody) {
         // ── Dedup guard ───────────────────────────────────────────────────────
-        // Use CB_SIG token presence — survives Classic Outlook's Trident
-        // round-trip unlike HTML attributes or comments.
         var sigPresent =
             existingBody.indexOf(CONFIG.CB_SIG_START) !== -1 &&
             existingBody.indexOf(CONFIG.CB_SIG_END) !== -1;
 
         if (!forceReplace && sigPresent) {
-            _diag.info("step_stripAndInsert: tokens present + forceReplace=false — skipping");
+            _diag.info("step_stripAndInsert: signature already present"
+                + " + forceReplace=false — skipping insert");
             onDone(true);
             return;
         }
 
         // ── Strip all previous signatures ─────────────────────────────────────
         var cleanBody = stripSignatures(existingBody);
-        _diag.info("step_stripAndInsert: cleanBody length=" + cleanBody.length
-            + " (was " + existingBody.length + ")");
+        _diag.info("step_stripAndInsert: cleanBody=" + cleanBody.length
+            + " chars (was " + existingBody.length + ")");
 
-        // ── Split wrapped signature into chunks ───────────────────────────────
-        // html is already _wrapSignature()'d so tokens are inside the first chunk.
-        var chunks = splitHtmlAtBlockBoundaries(html, CONFIG.CHUNK_SIZE_KB);
-        _diag.info("step_stripAndInsert: " + chunks.length + " chunk(s)");
-
-        // ── Write stripped body (resets cursor to end) ────────────────────────
+        // ── Write stripped body first (resets cursor to end) ──────────────────
         _setBody(item, cleanBody, function (err) {
             if (err) {
                 _diag.error("step_stripAndInsert: setBody failed: " + JSON.stringify(err));
                 onDone(false);
                 return;
             }
+            _diag.info("step_stripAndInsert: setBody OK — appending signature");
 
-            // ── Append signature chunks ───────────────────────────────────────
-            _insertChunks(item, chunks, 0, function (success) {
+            // ── Single-shot signature insert ──────────────────────────────────
+            _insertSignature(item, html, function (success) {
                 if (!success) {
-                    _diag.error("step_stripAndInsert: chunked insert failed");
+                    _diag.error("step_stripAndInsert: insertSignature failed");
                     onDone(false);
                     return;
                 }
@@ -7205,13 +7168,14 @@ function writeSignature(item, html, onDone, forceReplace) {
                 // ── Verify tokens survived the write ─────────────────────────
                 _getBody(item, function (bodyAfter, err2) {
                     if (err2) {
-                        _diag.warn("Verification read failed — assuming success");
+                        _diag.warn("step_stripAndInsert: verification read failed — assuming success");
                         onDone(true);
                         return;
                     }
                     var startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
                     var endOk = bodyAfter.indexOf(CONFIG.CB_SIG_END) !== -1;
-                    _diag.info("Post-insert: length=" + bodyAfter.length
+                    _diag.info("step_stripAndInsert: post-insert"
+                        + " | bodyLen=" + bodyAfter.length
                         + " | CB_SIG_START=" + startOk
                         + " | CB_SIG_END=" + endOk);
                     _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " ===");
@@ -7233,7 +7197,7 @@ function writeSignature(item, html, onDone, forceReplace) {
 function writeDiagnostics(item, onDone) {
     if (!CONFIG.DIAG_ENABLED) { onDone(); return; }
     if (typeof item.body.prependAsync !== "function") {
-        _diag.warn("prependAsync unavailable — diagnostics skipped");
+        _diag.warn("writeDiagnostics: prependAsync unavailable — skipped");
         onDone();
         return;
     }
@@ -7260,7 +7224,7 @@ function fetchSignature(onSuccess, onError) {
     try { ctx = resolveContext(); }
     catch (e) { _diag.error(e.message); onError("context-error"); return; }
 
-    _diag.info("fetchSignature | email=" + ctx.email + " | platform=" + ctx.platform);
+    _diag.info("fetchSignature: email=" + ctx.email + " | platform=" + ctx.platform);
 
     var encrypted = encryptEmail(ctx.email);
     if (!encrypted) { onError("encrypt-failed"); return; }
@@ -7274,11 +7238,12 @@ function fetchSignature(onSuccess, onError) {
         xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
         xhr.setRequestHeader("username", encrypted);
         xhr.setRequestHeader("X-Platform", ctx.platform);
-    } catch (e) { _diag.error("xhr setup: " + e.message); onError("xhr-setup-error"); return; }
+    } catch (e) { _diag.error("XHR setup: " + e.message); onError("xhr-setup-error"); return; }
 
     xhr.onreadystatechange = function () {
         if (xhr.readyState !== 4) return;
-        _diag.info("XHR status=" + xhr.status);
+        _diag.info("fetchSignature: XHR status=" + xhr.status
+            + " | responseLen=" + (xhr.responseText || "").length);
 
         if (xhr.status >= 200 && xhr.status < 300) {
             var plaintext = decryptResponse(xhr.responseText);
@@ -7286,60 +7251,67 @@ function fetchSignature(onSuccess, onError) {
 
             var parsed;
             try { parsed = JSON.parse(plaintext); }
-            catch (e) { _diag.warn("JSON parse: " + e.message); onError("parse-error"); return; }
+            catch (e) { _diag.warn("fetchSignature: JSON parse failed: " + e.message); onError("parse-error"); return; }
 
             var html = parsed && parsed.html;
-            if (!html) { _diag.warn("Missing html field"); onError("missing-html"); return; }
+            if (!html) { _diag.warn("fetchSignature: missing html field"); onError("missing-html"); return; }
 
-            _diag.info("fetchSignature: html length=" + html.length);
+            _diag.info("fetchSignature: success | htmlLen=" + html.length);
             onSuccess(html);
         } else {
-            _diag.warn("HTTP " + xhr.status);
+            _diag.warn("fetchSignature: HTTP " + xhr.status);
             onError("http-" + xhr.status);
         }
     };
 
     xhr.ontimeout = function () {
-        _diag.warn("XHR timed out after " + CONFIG.XHR_TIMEOUT_MS + "ms");
+        _diag.warn("fetchSignature: XHR timed out after " + CONFIG.XHR_TIMEOUT_MS + "ms");
         onError("timeout");
     };
     xhr.onerror = function () {
-        _diag.error("XHR onerror — CORS/network block?");
+        _diag.error("fetchSignature: XHR onerror — CORS / network block?");
         onError("network-error");
     };
 
-    try { xhr.send(); _diag.info("xhr.send()"); }
-    catch (e) { _diag.error("xhr.send threw: " + e.message); onError("xhr-send-error"); }
+    try { xhr.send(); _diag.info("fetchSignature: xhr.send()"); }
+    catch (e) { _diag.error("fetchSignature: xhr.send threw: " + e.message); onError("xhr-send-error"); }
 }
 
 // ─── Apply signature flow ─────────────────────────────────────────────────────
+//
+// Mirrors _applySignatureCore() in the modern event-handler:
+//   1. Fetch fresh from backend.
+//   2. Wrap with CB_SIG tokens, cache, then write.
+//   3. On backend failure, fall back to cache.
+//   4. On both failures, log and complete without inserting.
 
 function applySignatureCore(item, guardedEvent, forceReplace) {
     _diag.info("applySignatureCore | forceReplace=" + !!forceReplace);
 
     fetchSignature(
         function (html) {
-            // Wrap with CB_SIG tokens BEFORE caching so every write path
-            // (compose, send, from-changed) uses the pre-wrapped version.
+            _diag.info("applySignatureCore: fresh fetch OK | htmlLen=" + html.length);
+            // Wrap before caching so every write path uses the pre-wrapped version.
             var wrapped = _wrapSignature(html);
             cacheSet(wrapped, function () {
                 writeSignature(item, wrapped, function (ok) {
-                    if (!ok) _diag.warn("writeSignature (fresh) failed");
+                    if (!ok) _diag.warn("applySignatureCore: writeSignature (fresh) failed");
                     writeDiagnostics(item, function () { guardedEvent.completed(); });
                 }, forceReplace);
             });
         },
         function (reason) {
-            _diag.warn("Backend failed (" + reason + ") — trying cache");
+            _diag.warn("applySignatureCore: backend failed (" + reason + ") — trying cache");
             cacheGet(function (cachedHtml) {
                 if (cachedHtml) {
+                    _diag.info("applySignatureCore: cache hit | len=" + cachedHtml.length);
                     // Cache already holds the wrapped version.
                     writeSignature(item, cachedHtml, function (ok) {
-                        if (!ok) _diag.warn("writeSignature (cached) failed");
+                        if (!ok) _diag.warn("applySignatureCore: writeSignature (cached) failed");
                         writeDiagnostics(item, function () { guardedEvent.completed(); });
                     }, forceReplace);
                 } else {
-                    _diag.error("Backend miss + cache miss — no signature");
+                    _diag.error("applySignatureCore: backend miss + cache miss — no signature available");
                     writeDiagnostics(item, function () { guardedEvent.completed(); });
                 }
             });
@@ -7353,7 +7325,7 @@ function makeGuardedEvent(event, timeoutMs) {
     var done = false;
     var timer = setTimeout(function () {
         if (done) return;
-        _diag.warn("Event guard timeout (" + timeoutMs + "ms) — forcing complete");
+        _diag.warn("makeGuardedEvent: timeout (" + timeoutMs + "ms) — forcing complete");
         complete();
     }, timeoutMs);
 
@@ -7386,8 +7358,11 @@ function applySignature(event) {
         CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
     );
     var item = _safeGetItem();
-    if (!item) { _diag.error("No mailbox item"); guarded.completed(); return; }
-
+    if (!item) {
+        _diag.error("applySignature: no mailbox item");
+        guarded.completed();
+        return;
+    }
     // forceReplace=false — respect dedup guard on first compose open.
     applySignatureCore(item, guarded, false);
 }
@@ -7400,11 +7375,13 @@ function onSendHandler(event) {
     );
     var item = _safeGetItem();
     if (!item) {
-        _diag.warn("onSendHandler: no item — allowing send");
+        _diag.warn("onSendHandler: no mailbox item — allowing send");
         guarded.completed({ allowEvent: true });
         return;
     }
 
+    // onSendHandler runs in the same Trident context as applySignature in
+    // Classic Outlook (no separate iframe), so OfficeRuntime.storage is shared.
     cacheGet(function (cachedHtml) {
         if (!cachedHtml) {
             _diag.info("onSendHandler: no cached signature — passing through");
@@ -7415,10 +7392,10 @@ function onSendHandler(event) {
         }
 
         _diag.info("onSendHandler: writing cached signature ("
-            + cachedHtml.length + " chars) with forceReplace=true");
+            + cachedHtml.length + " chars) | forceReplace=true");
 
-        // forceReplace=true — unconditionally strip any stale/native sig
-        // that Outlook re-injected between compose and send, then rewrite clean.
+        // forceReplace=true — unconditionally replace any stale / native sig
+        // that Outlook re-injected between compose and send.
         // cachedHtml is already _wrapSignature()'d.
         writeSignature(item, cachedHtml, function (ok) {
             if (!ok) _diag.warn("onSendHandler: writeSignature failed");
@@ -7448,15 +7425,16 @@ function onFromChangedHandler(event) {
 
 (function registerHandlers() {
     if (typeof Office === "undefined" || !Office.actions) {
-        _diag.error("Office.actions unavailable — registration skipped");
+        _diag.error("registerHandlers: Office.actions unavailable — registration skipped");
         return;
     }
     try {
         Office.actions.associate("applySignature", applySignature);
         Office.actions.associate("onSendHandler", onSendHandler);
         Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
-        _diag.info("Handlers registered | CryptoJS=" + (typeof CryptoJS !== "undefined"));
+        _diag.info("registerHandlers: all handlers registered"
+            + " | CryptoJS=" + (typeof CryptoJS !== "undefined"));
     } catch (e) {
-        _diag.error("Office.actions.associate threw: " + e.message);
+        _diag.error("registerHandlers: Office.actions.associate threw: " + e.message);
     }
 })();
