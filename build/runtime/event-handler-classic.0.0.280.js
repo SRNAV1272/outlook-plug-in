@@ -7124,19 +7124,33 @@ function writeSignature(item, html, onDone, forceReplace) {
             + " chars (was " + existingBody.length + ")");
 
         // ── Locate reply chain boundary ───────────────────────────────────────
-        // In a reply/forward, Classic Outlook wraps the quoted chain in a
-        // <div id="divRplyFwdMsg"> block. The signature must be inserted
-        // BEFORE that block (after the compose area), not at the end of the
-        // full body string.  For new compose there is no such block, so we
-        // fall back to appending at the end.
+        // Classic Outlook 2016/2019 (Trident/Word engine) does NOT use
+        // divRplyFwdMsg. Instead it emits one of these structures:
         //
-        // Boundary candidates (checked in priority order):
-        //   1. <div id="divRplyFwdMsg"   — Classic Outlook / OWA reply block
-        //   2. <div id="divTaggedContent" — some OWA variants
-        //   3. <blockquote               — plain-text / edge-case fallback
+        //   A) <hr tabIndex=-1>  — the horizontal rule that visually separates
+        //      the compose area from the quoted chain. This is the most reliable
+        //      marker in Classic Outlook; it appears immediately before the
+        //      "From: / Sent: / To: / Subject:" header block.
+        //
+        //   B) <div id="divRplyFwdMsg">  — OWA / modern Outlook (not Classic,
+        //      but kept for cross-client safety).
+        //
+        //   C) <div id="divTaggedContent">  — some OWA variants.
+        //
+        //   D) <blockquote>  — plain-text / minimal fallback.
+        //
+        // All patterns are tried in priority order; the first match wins.
+        // If none match (new compose), chainArea stays "" and the signature
+        // appends at the end — correct behaviour for new emails.
         var REPLY_PATTERNS = [
+            // Classic Outlook 2016/2019 — <hr> separator (various attribute orders)
+            /(<hr\s[^>]*tabIndex\s*=\s*["']?-1["']?[^>]*>)/i,
+            /(<hr\s[^>]*style\s*=\s*["'][^"']*["'][^>]*>)/i,
+            /(<hr\b[^>]*>)/i,
+            // OWA / modern Outlook reply wrapper div
             /(<div[^>]+\bid=["']divRplyFwdMsg["'][^>]*>)/i,
             /(<div[^>]+\bid=["']divTaggedContent["'][^>]*>)/i,
+            // Generic blockquote fallback
             /(<blockquote[^>]*>)/i
         ];
 
@@ -7147,15 +7161,18 @@ function writeSignature(item, html, onDone, forceReplace) {
         for (var pi = 0; pi < REPLY_PATTERNS.length; pi++) {
             var m = REPLY_PATTERNS[pi].exec(cleanBody);
             if (m) {
-                // Split just before the opening tag so the tag itself stays
-                // with the quoted chain, not the compose area.
                 var splitAt = m.index;
                 composeArea = cleanBody.substring(0, splitAt);
                 chainArea   = cleanBody.substring(splitAt);
-                patternUsed = REPLY_PATTERNS[pi].toString();
+                patternUsed = "pattern[" + pi + "]=" + m[0].substring(0, 80);
                 break;
             }
         }
+
+        // Diagnostic: log the first 500 chars of cleanBody so we can see what
+        // structure Classic Outlook is actually emitting if pattern=none.
+        _diag.info("step_stripAndInsert: cleanBody[0:500]="
+            + cleanBody.substring(0, 500).replace(/\n/g, "↵"));
 
         _diag.info("step_stripAndInsert: reply boundary"
             + " | pattern=" + patternUsed
