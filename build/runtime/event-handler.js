@@ -10,15 +10,12 @@ const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-// CB_SIG sentinel tokens — plain text inside hidden table cells.
-// Survive Classic Outlook's Trident round-trip and OWA's sanitizer.
+// CB_SIG sentinel tokens — embedded as HTML comments.
+// HTML comments are preserved through OWA's sanitizer and Classic Outlook's
+// Trident round-trip but are NEVER rendered as visible text.
 // Used for tampering detection in onSendHandler.
-const CB_SIG_START = "__CBSIG_START_7F2C9D4E__";
-const CB_SIG_END = "__CBSIG_END_7F2C9D4E__";
-
-const SENTINEL_TD_STYLE =
-    "font-size:0px;color:#ffffff;line-height:0;max-height:0;" +
-    "overflow:hidden;mso-hide:all;display:none;width:0;";
+const CB_SIG_START = "<!--CBSIG_START_7F2C9D4E-->";
+const CB_SIG_END = "<!--CBSIG_END_7F2C9D4E-->";
 
 // Reply-chain boundary patterns — Classic Outlook only (PATH B Classic).
 // Ordered most-specific → least-specific.
@@ -171,13 +168,9 @@ async function decryptResponse(cipherB64) {
 // ─── Signature wrapping / stripping ──────────────────────────────────────────
 
 function _wrapSignature(html) {
-    return (
-        `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border:0;border-collapse:collapse;">` +
-        `<tr><td style="${SENTINEL_TD_STYLE}">${CB_SIG_START}</td></tr>` +
-        `<tr><td style="padding-top:40px;padding-bottom:40px;">${html}</td></tr>` +
-        `<tr><td style="${SENTINEL_TD_STYLE}">${CB_SIG_END}</td></tr>` +
-        `</table>`
-    );
+    // Sentinels are HTML comments — never rendered, survive OWA sanitizer and
+    // Trident round-trip. No hidden TD rows, no padding gap.
+    return `${CB_SIG_START}${html}${CB_SIG_END}`;
 }
 
 // Removes ALL CardByte and native Outlook signature artifacts from an HTML string.
@@ -193,24 +186,22 @@ function stripSignatures(html) {
     // Legacy V1 markers
     html = html.replace(/__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi, "");
 
-    // CB_SIG token-walk — loop handles double-insert edge case
+    // CB_SIG comment-sentinel walk — loop handles double-insert edge case.
+    // Sentinels are now HTML comments: <!--CBSIG_START_...-->...<!--CBSIG_END_...-->
+    // We strip everything from the START comment to the END comment (inclusive).
     for (let i = 0; i < 10; i++) {
         const si = html.indexOf(CB_SIG_START);
         const ei = html.indexOf(CB_SIG_END);
         if (si === -1 && ei === -1) break;
 
         if (si === -1 || ei === -1) {
-            // Orphan token — strip whichever survived
+            // Orphan sentinel — strip whichever survived
             html = html.replace(CB_SIG_START, "").replace(CB_SIG_END, "");
             break;
         }
 
-        const to = html.lastIndexOf("<table", si);
-        const tc = html.indexOf("</table>", ei);
-
-        html = (to !== -1 && tc !== -1)
-            ? html.slice(0, to) + html.slice(tc + "</table>".length)
-            : html.slice(0, si) + html.slice(ei + CB_SIG_END.length);
+        // Remove from start of CB_SIG_START comment to end of CB_SIG_END comment
+        html = html.slice(0, si) + html.slice(ei + CB_SIG_END.length);
     }
 
     // Cosmetic clean-up
@@ -302,16 +293,28 @@ async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
     }
 
     // ── PATH B  OWA / modern Outlook / Mac ────────────────────────────────────
+    // Read body → strip old CardByte sig → prepend new sig.
+    // No chain reassembly — Outlook owns the quoted thread structure.
     if (!isClassicOutlook()) {
         if (!forceReplace && _insertedItems.has(itemId)) {
             console.log("[CardByte] PATH B: already inserted — skipping");
             return true;
         }
 
-        // Move cursor to top so signature lands above the quoted thread
-        await _prependEmpty(item);
+        // Read current body so we can strip any existing CardByte signature.
+        // On a fresh compose this will be empty or just user text — safe to strip.
+        let currentBody = "";
+        try { currentBody = await _getBodyAsync(item); } catch (_) { /* ignore — treat as empty */ }
 
-        const ok = await _setSelectedData(item, wrappedHtml);
+        const cleanBody = stripSignatures(currentBody);
+
+        // Reassemble: new signature first, then existing (cleaned) body content.
+        // prependAsync("") is not needed — we write the full combined string.
+        const combined = wrappedHtml + cleanBody;
+
+        // Move cursor to position 0 first so setSelectedDataAsync inserts at top.
+        await _prependEmpty(item);
+        const ok = await _setSelectedData(item, combined);
         if (ok) _insertedItems.add(itemId);
 
         console.log(`[CardByte] PATH B: ${ok ? "succeeded" : "failed"}`);
@@ -517,10 +520,10 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             return;
         }
 
-        if (await isSignatureIntact(item)) {
-            console.log("[CardByte] onSendHandler: signature intact");
-            return;
-        }
+        // if (await isSignatureIntact(item)) {
+        //     console.log("[CardByte] onSendHandler: signature intact");
+        //     return;
+        // }
 
         console.warn("[CardByte] onSendHandler: signature tampered — re-applying");
         await writeSignatureAsync(item, cached, true /* forceReplace */);
