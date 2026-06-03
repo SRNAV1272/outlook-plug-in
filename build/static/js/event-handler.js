@@ -1,67 +1,75 @@
-let CACHED_SIGNATURE_HTML = null;
-const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
-const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
-const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-// ─── Session-based cache buster ───────────────────────────────────────────────
-const SESSION_KEY = "cardbyte_session_id";
-const CACHE_KEY = "cardbyte_cached_signature";
-const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
-const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+"use strict";
 
-function getOrCreateSessionId() {
-    let sid = sessionStorage.getItem(SESSION_KEY);
-    if (!sid) {
-        sid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36);
-        sessionStorage.setItem(SESSION_KEY, sid);
-    }
-    return sid;
-}
+// ─── Configuration ────────────────────────────────────────────────────────────
 
-function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-    // If skipping session check, just return whatever is in cache directly
-    if (skipSessionCheck) {
-        return localStorage.getItem(CACHE_KEY);
-    }
+const CONFIG = {
+    XHR_URL: "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+    XHR_TIMEOUT_MS: 6000,
 
-    const currentSid = getOrCreateSessionId();
-    const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
+    AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
+    AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
-    if (cachedSid !== currentSid) {
-        console.log("[CardByte] New session detected — clearing cached signature");
-        localStorage.removeItem(CACHE_KEY);
-        localStorage.removeItem(CACHE_SESSION_KEY);
-        localStorage.removeItem(CACHE_TIMESTAMP_KEY);
-        return null;
-    }
+    CACHE_KEY: "cardbyte_sig_html",
 
-    if (!skipTtl) {
-        const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
-        if (Date.now() - ts > CACHE_TTL_MS) {
-            console.log("[CardByte] Cache TTL expired — clearing cached signature");
-            localStorage.removeItem(CACHE_KEY);
-            localStorage.removeItem(CACHE_SESSION_KEY);
-            localStorage.removeItem(CACHE_TIMESTAMP_KEY);
-            return null;
-        }
+    WRAP_TOP_PX: 40,
+    WRAP_BOTTOM_PX: 40,
+
+    SEND_HANDLER_TIMEOUT_MS: 2000,
+    COMPOSE_HANDLER_TIMEOUT_MS: 10000,
+
+    DIAG_ENABLED: false,
+
+    CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,   // 6 hours
+
+    FETCH_MAX_RETRIES: 2,
+    FETCH_RETRY_DELAY_MS: 1000,
+
+    // ── Signature boundary tokens ──────────────────────────────────────────
+    // Plain text nodes inside white-coloured <td> cells — survive Classic
+    // Outlook's HTML round-trip AND OWA's sanitizer without being stripped.
+    // Must match the tokens used in event-handler-classic.js so both files
+    // share one stripping strategy.
+    CB_SIG_START: "__CBSIG_START_7F2C9D4E__",
+    CB_SIG_END: "__CBSIG_END_7F2C9D4E__"
+};
+
+// ─── Diagnostic log ───────────────────────────────────────────────────────────
+
+const _diag = (() => {
+    const buf = [];
+
+    function push(level, msg) {
+        buf.push("[" + new Date().toISOString() + "] [" + level + "] " + msg);
+        try { console.log("[CardByte]", level, msg); } catch (_) { }
     }
 
-    return localStorage.getItem(CACHE_KEY);
-}
+    function buildHtmlBlock() {
+        const escaped = buf.join("\n")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+        return "<div style='"
+            + "margin:0 0 16px 0;padding:12px 16px;"
+            + "border:2px solid #d9534f;border-radius:4px;"
+            + "background-color:#fff3cd;"
+            + "font-family:Consolas,Courier New,monospace;"
+            + "font-size:11px;color:#333;white-space:pre-wrap;'>"
+            + "<strong style='color:#d9534f;font-size:13px;'>"
+            + "[CardByte DIAGNOSTIC LOG — DELETE BEFORE SENDING]"
+            + "</strong><br/><br/>"
+            + escaped
+            + "</div>";
+    }
 
-function setCachedSignature(html) {
-    const currentSid = getOrCreateSessionId();
-    try {
-        localStorage.setItem(CACHE_KEY, html);
-        localStorage.setItem(CACHE_SESSION_KEY, currentSid);
-        localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now().toString());
-    } catch (_) { }
-}
+    return {
+        info: (m) => push("INFO", m),
+        warn: (m) => push("WARN", m),
+        error: (m) => push("ERROR", m),
+        html: buildHtmlBlock
+    };
+})();
 
-const MAX_SAFE_HTML_SIZE = 500_000;
-const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
-const MOBILE_MAX_IMAGE_WIDTH = 200;
-const MOBILE_IMAGE_QUALITY = 0.5;
+// ─── Platform detection ───────────────────────────────────────────────────────
 
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
@@ -91,293 +99,781 @@ function detectPlatform() {
     return "desktop";
 }
 
-function isOWA() { return detectPlatform() === "owa"; }
-function isMac() { return detectPlatform() === "mac"; }
+// ─── Utilities ────────────────────────────────────────────────────────────────
 
-
-Office.onReady(() => {
-    console.log("✅ Office.onReady is Started !");
-    console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
-});
+function byteKB(str) {
+    return new Blob([str]).size / 1024;
+}
 
 function base64ToArrayBuffer(base64) {
-    let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
-    const padding = base64Data.length % 4;
-    if (padding) base64Data += "=".repeat(4 - padding);
-    const binaryString = atob(base64Data);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+    let b64 = base64.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4;
+    if (pad) b64 += "=".repeat(4 - pad);
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return bytes.buffer;
 }
 
 function arrayBufferToBase64(buffer) {
     const bytes = new Uint8Array(buffer);
-    let binaryString = "";
-    for (let i = 0; i < bytes.length; i++) binaryString += String.fromCharCode(bytes[i]);
-    return btoa(binaryString);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
 }
 
-async function handleAesDecrypt(encryptedText, generatedKey) {
-    try {
-        if (!encryptedText) return "";
-        const keyToUse = generatedKey || AES_KEY;
-        let keyBuffer;
-        try { keyBuffer = base64ToArrayBuffer(keyToUse); }
-        catch (e) { console.error("Failed to decode key as base64:", e); return encryptedText; }
-        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
-            if (generatedKey && generatedKey !== AES_KEY) return handleAesDecrypt(encryptedText, AES_KEY);
-            return encryptedText;
-        }
-        const ivBuffer = base64ToArrayBuffer(AES_IV);
-        if (ivBuffer.byteLength !== 16) return encryptedText;
-        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
-        let encryptedBuffer;
-        try { encryptedBuffer = base64ToArrayBuffer(encryptedText); }
-        catch (e) { return encryptedText; }
-        if (encryptedBuffer.byteLength % 16 !== 0) {
-            console.error(`Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes`);
-            return encryptedText;
-        }
-        const decryptedBuffer = await crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBuffer }, key, encryptedBuffer);
-        return new TextDecoder().decode(decryptedBuffer);
-    } catch (err) {
-        if (generatedKey && generatedKey !== AES_KEY && err.message.includes("key data")) {
-            try { return await handleAesDecrypt(encryptedText, AES_KEY); }
-            catch (e) { console.error("Fallback also failed:", e.message); }
-        }
-        return encryptedText;
-    }
-}
+// ─── Encryption (Web Crypto AES-CBC) ─────────────────────────────────────────
 
-async function encryptEmail(email = "") {
+async function encryptEmail(email) {
+    if (!email || !email.trim()) { _diag.warn("encryptEmail: empty email"); return ""; }
     try {
-        if (!email || email.trim() === "") { console.warn("Warning: Empty email provided"); return ""; }
-        const keyBuffer = base64ToArrayBuffer(AES_KEY);
-        const ivBuffer = base64ToArrayBuffer(AES_IV);
-        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) { console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`); return ""; }
-        if (ivBuffer.byteLength !== 16) { console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`); return ""; }
-        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
-        const data = new TextEncoder().encode(email);
-        const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
-        const base64Result = arrayBufferToBase64(encrypted);
-        try { atob(base64Result); } catch (e) { console.error("Result is NOT valid base64:", e); }
-        return base64Result;
-    } catch (err) {
-        console.error("Encryption error:", err);
+        const keyBuffer = base64ToArrayBuffer(CONFIG.AES_KEY_B64);
+        const ivBuffer = base64ToArrayBuffer(CONFIG.AES_IV_B64);
+        const key = await crypto.subtle.importKey(
+            "raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]
+        );
+        const encrypted = await crypto.subtle.encrypt(
+            { name: "AES-CBC", iv: ivBuffer },
+            key,
+            new TextEncoder().encode(email)
+        );
+        return arrayBufferToBase64(encrypted);
+    } catch (e) {
+        _diag.error("encryptEmail threw: " + e.message);
         return "";
     }
 }
 
-async function renderSignatureOnServer(user) {
-    const platform = Office.context.diagnostics.platform;
-    const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
-
+async function decryptResponse(cipherB64) {
+    if (!cipherB64) { _diag.warn("decryptResponse: empty input"); return ""; }
     try {
-        const encryptedMail = await encryptEmail(user);
-        const primaryRes = await fetch(
-            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
+        const keyBuffer = base64ToArrayBuffer(CONFIG.AES_KEY_B64);
+        const ivBuffer = base64ToArrayBuffer(CONFIG.AES_IV_B64);
+        const key = await crypto.subtle.importKey(
+            "raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]
         );
-        if (primaryRes.ok) {
-            const data = await primaryRes.text();
-            const decryptedData = await handleAesDecrypt(data);
-            console.log("Using NEW renderer");
-            return JSON.parse(decryptedData)?.html || null;
+        const encBuffer = base64ToArrayBuffer(cipherB64);
+        if (encBuffer.byteLength % 16 !== 0) {
+            _diag.error("decryptResponse: invalid ciphertext length " + encBuffer.byteLength);
+            return "";
         }
-        console.warn("Primary failed. Falling back to legacy...");
-    } catch (err) {
-        console.warn("Primary crashed. Falling back to legacy...", err);
+        const decrypted = await crypto.subtle.decrypt(
+            { name: "AES-CBC", iv: ivBuffer },
+            key,
+            encBuffer
+        );
+        return new TextDecoder().decode(decrypted);
+    } catch (e) {
+        _diag.error("decryptResponse threw: " + e.message);
+        return "";
+    }
+}
+
+// ─── Integrity hash (Web Crypto SHA-256) ─────────────────────────────────────
+
+async function sha256Hex(str) {
+    const data = new TextEncoder().encode(str);
+    const hashBuf = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hashBuf))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+}
+
+// ─── Cache (OfficeRuntime.storage) ────────────────────────────────────────────
+//
+// Mirrors the classic handler exactly:
+//   - Memory cache layer (per-iframe, fast path)
+//   - OfficeRuntime.storage (shared across compose + send iframes)
+//   - SHA-256 integrity check on every read
+//   - 6-hour TTL
+//
+// OfficeRuntime.storage is accessible from both the compose iframe and the
+// onSend iframe, solving the session-isolation problem that forced the
+// original event-handler.js to comment out onSendHandler.
+
+const _memCache = {};
+
+async function cacheGet() {
+    // Fast path: in-memory
+    const mem = _memCache[CONFIG.CACHE_KEY];
+    if (mem?.html && mem?.hash) {
+        const memHash = await sha256Hex(mem.html);
+        if (memHash === mem.hash) {
+            _diag.info("cacheGet: memory hit");
+            return mem.html;
+        }
+        _diag.warn("cacheGet: memory hash mismatch — falling through");
     }
 
+    // Persistent path: OfficeRuntime.storage
     try {
-        const legacyRes = await fetch(
-            "https://newqa-enterprise.cardbyte.ai/render-signature",
-            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
-        );
-        if (!legacyRes.ok) throw new Error("Legacy renderer failed");
-        const legacyData = await legacyRes.json();
-        console.log("Using LEGACY renderer", legacyData);
-        return legacyData?.finalHtml || null;
-    } catch (legacyError) {
-        console.error("Both primary and legacy failed:", legacyError);
+        const raw = await OfficeRuntime.storage.getItem(CONFIG.CACHE_KEY);
+        if (!raw) { _diag.warn("cacheGet: storage miss"); return null; }
+
+        let entry;
+        try { entry = typeof raw === "string" ? JSON.parse(raw) : raw; }
+        catch (_) { _diag.error("cacheGet: JSON parse failed"); return null; }
+
+        if (!entry?.html || !entry?.hash) {
+            _diag.warn("cacheGet: invalid entry shape"); return null;
+        }
+        if (Date.now() - entry.ts > CONFIG.CACHE_MAX_AGE_MS) {
+            _diag.warn("cacheGet: entry expired"); return null;
+        }
+        const storedHash = await sha256Hex(entry.html);
+        if (storedHash !== entry.hash) {
+            _diag.error("cacheGet: integrity check failed"); return null;
+        }
+
+        _memCache[CONFIG.CACHE_KEY] = entry;
+        _diag.info("cacheGet: storage hit");
+        return entry.html;
+    } catch (e) {
+        _diag.warn("cacheGet threw: " + e.message);
         return null;
     }
 }
 
-function bodySetSignatureAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        const sizeInBytes = new Blob([html]).size;
-
-        // Outlook setSignatureAsync has practical limits around 100 KB
-        if (sizeInBytes <= 100 * 1024 &&
-            typeof item.body.setSignatureAsync === "function") {
-
-            item.body.setSignatureAsync(
-                html,
-                { coercionType: Office.CoercionType.Html },
-                (r) => {
-                    if (r.status === Office.AsyncResultStatus.Succeeded) {
-                        resolve();
-                    } else {
-                        reject(r.error);
-                    }
-                }
-            );
-        } else {
-            // Fallback for large signatures
-            if (typeof item.body.setSelectedDataAsync !== "function") {
-                reject(new Error("setSelectedDataAsync not available"));
-                return;
-            }
-
-            item.body.setSelectedDataAsync(
-                html,
-                { coercionType: Office.CoercionType.Html },
-                (r) => {
-                    if (r.status === Office.AsyncResultStatus.Succeeded) {
-                        resolve();
-                    } else {
-                        reject(r.error);
-                    }
-                }
-            );
-        }
-    });
+async function cacheSet(html) {
+    try {
+        const entry = { html, ts: Date.now(), hash: await sha256Hex(html) };
+        _memCache[CONFIG.CACHE_KEY] = entry;
+        await OfficeRuntime.storage.setItem(CONFIG.CACHE_KEY, JSON.stringify(entry));
+        _diag.info("cacheSet: saved");
+        return true;
+    } catch (e) {
+        _diag.warn("cacheSet threw: " + e.message);
+        return false;
+    }
 }
 
-function moveCursorToTop(item) {
-    return new Promise((resolve) => {
-        try {
-            if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-            item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-            });
-        } catch { resolve(); }
-    });
+async function cacheClear() {
+    delete _memCache[CONFIG.CACHE_KEY];
+    try {
+        await OfficeRuntime.storage.removeItem(CONFIG.CACHE_KEY);
+        _diag.info("cacheClear: done");
+    } catch (e) {
+        _diag.warn("cacheClear threw: " + e.message);
+    }
 }
 
-// FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
-// sessionStorage) can still read the signature cached by the compose iframe.
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}) {
-    const userProfile = mailbox?.userProfile || {};
-    const userEmail = userProfile?.emailAddress;
+// ─── Signature wrapping ───────────────────────────────────────────────────────
+//
+// Wraps the raw backend HTML in a sentinel table that carries CB_SIG_START and
+// CB_SIG_END as plain text inside visually-hidden cells.
+//
+// Sentinel cell style: width:0 + overflow:hidden + max-height:0 ensures the
+// token text is fully suppressed even on Trident/Word, which ignores font-size:1px
+// and color:#ffffff alone. The token still survives the HTML round-trip as a
+// text node and is detectable with indexOf.
 
-    let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
+const SENTINEL_TD_STYLE =
+    "font-size:0px;color:#ffffff;line-height:0;max-height:0;" +
+    "overflow:hidden;mso-hide:all;display:none;width:0;";
 
-    if (fetchIfMissing && userEmail && fetched == null) {
-        const MAX_RETRIES = 2;
-        let attempt = 0;
-        let lastError = null;
-
-        while (attempt <= MAX_RETRIES) {
-            try {
-                if (attempt > 0) {
-                    console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, then 2s
-                }
-                const result = await renderSignatureOnServer(userEmail);
-                if (result != null) {
-                    fetched = result;
-                    CACHED_SIGNATURE_HTML = fetched;
-                    setCachedSignature(fetched);
-                    break;
-                }
-                lastError = new Error("Server returned null");
-            } catch (err) {
-                lastError = err;
-                console.warn(`[CardByte] Fetch attempt ${attempt + 1} failed:`, err);
-            }
-            attempt++;
-        }
-
-        if (fetched != null) {
-            CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);  // ← store compressed, not raw
-        }
-
-        if (fetched == null) {
-            console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
-        }
-    }
-
-    // FIX: If signature is still null (server down, cache miss, no email, etc.)
-    // fall back to a minimal identity signature instead of inserting "null".
-    // Fallback only if everything above — fresh fetch, retries — all came up empty
-    if (!fetched) {
-        // Last-ditch: try reading stale cache, bypassing both session and TTL checks
-        const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-        if (staleCache) {
-            console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
-            fetched = staleCache;
-        } else {
-            console.warn("[CardByte] No signature available — using fallback identity signature.");
-            fetched = `
-            <div contenteditable="false" data-cbsig="true">
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                  <tr>
-                    <td style="font-family:Arial,sans-serif;font-size:12px;">
-                      <strong>${userProfile.displayName || ""}</strong><br/>
-                      ${userProfile.emailAddress || ""}<br/>
-                      <span style="color:#999;">Sent via CardByte</span>
-                    </td>
-                  </tr>
-                </table>
-            </div>
-            `;
-        }
-    }
-
-    let finalSignature = `<div contenteditable="false" data-cbsig="true" style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
-
-    console.log("[CardByte] ════════════════════════════════════",
-        fetched ? "Applying signature" : "No cached signature, will fetch from server",
-        finalSignature, item?.body
+function _wrapSignature(html) {
+    return (
+        "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:0;border-collapse:collapse;\">"
+        + "<tr>"
+        + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
+        + CONFIG.CB_SIG_START
+        + "</td>"
+        + "</tr>"
+        + "<tr>"
+        + "<td style=\"padding-top:" + CONFIG.WRAP_TOP_PX + "px;"
+        + "padding-bottom:" + CONFIG.WRAP_BOTTOM_PX + "px;\">"
+        + html
+        + "</td>"
+        + "</tr>"
+        + "<tr>"
+        + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
+        + CONFIG.CB_SIG_END
+        + "</td>"
+        + "</tr>"
+        + "</table>"
     );
-
-    await bodySetSignatureAsync(item, finalSignature);
 }
 
-window.applySignature = async function (event = { completed: () => { } }, options = {}) {
-    const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
+// ─── Signature stripping ──────────────────────────────────────────────────────
+//
+// Removes ALL CardByte and native Outlook signature artifacts from a body HTML.
+//
+// STRATEGY — token-position walk instead of regex or DOMParser:
+//   Classic Outlook's Trident engine rewrites table nesting unpredictably, so
+//   we cannot rely on a fixed tag structure around the tokens. Instead:
+//
+//   1. Find CB_SIG_START with indexOf.
+//   2. Walk BACKWARDS with lastIndexOf("<table") to find the outermost table
+//      that encloses the token — the wrapper _wrapSignature produced.
+//   3. Find CB_SIG_END with indexOf.
+//   4. Walk FORWARDS with indexOf("</table>") to close the block.
+//   5. Excise [outerTableOpen … closingTag] from the string.
+//   6. Repeat until no more tokens remain (handles double-insert edge case).
+
+function stripSignatures(html) {
+    if (!html) { _diag.warn("stripSignatures: empty input"); return ""; }
+
+    _diag.info("=== stripSignatures START | inputLen=" + html.length + " ===");
+
+    // ── 1. Native Outlook div-based signatures ────────────────────────────────
+    let before = html.length;
+    html = html.replace(/<div[^>]*\bid=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    if (html.length !== before)
+        _diag.info("stripSignatures: removed div#Signature (" + (before - html.length) + " chars)");
+
+    before = html.length;
+    html = html.replace(/<div[^>]*\bid=["']appendonsend["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    if (html.length !== before)
+        _diag.info("stripSignatures: removed div#appendonsend (" + (before - html.length) + " chars)");
+
+    // ── 2. Legacy plain-text markers ─────────────────────────────────────────
+    before = html.length;
+    html = html.replace(/__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi, "");
+    if (html.length !== before)
+        _diag.info("stripSignatures: removed V1 markers (" + (before - html.length) + " chars)");
+
+    // ── 3. CB_SIG token-walk (current format) ─────────────────────────────────
+    let iterations = 0;
+    const MAX_ITER = 10;
+
+    while (iterations++ < MAX_ITER) {
+        const startIdx = html.indexOf(CONFIG.CB_SIG_START);
+        const endIdx = html.indexOf(CONFIG.CB_SIG_END);
+
+        if (startIdx === -1 || endIdx === -1) {
+            if (startIdx !== -1 || endIdx !== -1) {
+                _diag.warn("stripSignatures: orphan token detected — trimming");
+                html = html
+                    .replace(CONFIG.CB_SIG_START, "")
+                    .replace(CONFIG.CB_SIG_END, "");
+            }
+            break;
+        }
+
+        const tableOpen = html.lastIndexOf("<table", startIdx);
+        const tableClose = html.indexOf("</table>", endIdx);
+
+        if (tableOpen !== -1 && tableClose !== -1) {
+            const removed = tableClose + "</table>".length - tableOpen;
+            _diag.info("stripSignatures: removing CB_SIG block"
+                + " | tableOpen=" + tableOpen
+                + " | tableClose=" + tableClose
+                + " | removed=" + removed + " chars");
+            html = html.substring(0, tableOpen)
+                + html.substring(tableClose + "</table>".length);
+        } else {
+            _diag.warn("stripSignatures: table boundary not found"
+                + " | tableOpen=" + tableOpen
+                + " | tableClose=" + tableClose
+                + " — falling back to token-span cut");
+            html = html.substring(0, startIdx)
+                + html.substring(endIdx + CONFIG.CB_SIG_END.length);
+        }
+    }
+
+    if (iterations >= MAX_ITER)
+        _diag.error("stripSignatures: MAX_ITER reached — possible infinite loop, bailing");
+
+    // ── 4. Cosmetic clean-up ──────────────────────────────────────────────────
+    html = html.replace(/(?:\s*<br\s*\/?>)+\s*$/gi, "");
+    html = html.replace(/<div>\s*<\/div>/gi, "");
+    html = html.replace(/<p>\s*<\/p>/gi, "");
+
+    _diag.info("=== stripSignatures END | outputLen=" + html.length + " ===");
+    return html;
+}
+
+// ─── Body helpers ─────────────────────────────────────────────────────────────
+
+function _getBody(item) {
+    return new Promise((resolve, reject) => {
+        if (typeof item.body.getAsync !== "function") {
+            reject(new Error("getAsync unavailable")); return;
+        }
+        item.body.getAsync(Office.CoercionType.Html, (r) => {
+            if (r.status === Office.AsyncResultStatus.Succeeded)
+                resolve(r.value || "");
+            else
+                reject(r.error);
+        });
+    });
+}
+
+function _setBody(item, html) {
+    return new Promise((resolve, reject) => {
+        if (typeof item.body.setAsync !== "function") {
+            reject(new Error("setAsync unavailable")); return;
+        }
+        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+            if (r.status === Office.AsyncResultStatus.Succeeded)
+                resolve();
+            else
+                reject(r.error);
+        });
+    });
+}
+
+function _setSignatureSlot(item, html) {
+    return new Promise((resolve, reject) => {
+        item.body.setSignatureAsync(
+            html,
+            { coercionType: Office.CoercionType.Html },
+            (r) => {
+                if (r.status === Office.AsyncResultStatus.Succeeded) resolve();
+                else reject(r.error);
+            }
+        );
+    });
+}
+
+// ─── Core write path ──────────────────────────────────────────────────────────
+//
+// writeSignature(item, html, forceReplace)
+//
+// PATH A — small sig (<100 KB) + setSignatureAsync available (OWA / New Outlook).
+//   Calls setSignatureAsync directly; Outlook manages the signature slot.
+//
+// PATH B — large sig OR setSignatureAsync unavailable (Classic Outlook always
+//   lands here because setSignatureAsync is not present in Trident runtime).
+//
+//   Reply-chain boundary is found FIRST, before dedup and strip:
+//     • We split at the first reply-chain marker so signatures already in the
+//       quoted chain (from the original sender) are never touched.
+//     • Dedup guard checks compose area only — if CB_SIG tokens are already
+//       present there and forceReplace=false, we skip the insert.
+//     • stripSignatures runs on compose area only.
+//     • Final write: cleanCompose + wrapped sig + untouched chainArea — ONE
+//       setAsync call (no cursor juggling; avoids prepend-to-top bug).
+//
+// Why one setAsync instead of setAsync + setSelectedDataAsync?
+//   setAsync resets the cursor to position 0 (top of body). A subsequent
+//   setSelectedDataAsync therefore inserts at the TOP, prepending the
+//   signature instead of appending it. Combining into one setAsync call
+//   eliminates the cursor entirely and guarantees correct append order.
+
+const REPLY_PATTERNS = [
+    // Classic Outlook 2016/2019 — outer div wrapping the border-top separator
+    /(<div>\s*<div[^>]+border-top\s*:\s*solid[^>]*>)/i,
+    // Broader fallback: any div whose style contains border-top:solid
+    /(<div[^>]+style\s*=\s*["'][^"']*border-top\s*:\s*solid[^"']*["'][^>]*>)/i,
+    // OWA / modern Outlook reply wrapper divs
+    /(<div[^>]+\bid=["']divRplyFwdMsg["'][^>]*>)/i,
+    /(<div[^>]+\bid=["']divTaggedContent["'][^>]*>)/i,
+    // Generic blockquote last resort
+    /(<blockquote[^>]*>)/i
+];
+
+async function writeSignature(item, html, forceReplace = false) {
+    const htmlKB = byteKB(html);
+
+    _diag.info("=== writeSignature START | " + htmlKB.toFixed(1) + " KB"
+        + " | forceReplace=" + forceReplace + " ===");
+
+    // ── PATH A ────────────────────────────────────────────────────────────────
+    if (typeof item.body.setSignatureAsync === "function" && htmlKB < 100) {
+        _diag.info("PATH A: setSignatureAsync (" + htmlKB.toFixed(1) + " KB)");
+        try {
+            await _setSignatureSlot(item, html);
+            _diag.info("PATH A succeeded");
+            _diag.info("=== writeSignature END | success=true ===");
+            return true;
+        } catch (e) {
+            _diag.error("PATH A failed: " + (e?.message || JSON.stringify(e)));
+            return false;
+        }
+    }
+
+    // ── PATH B ────────────────────────────────────────────────────────────────
+    _diag.info("PATH B: combined setAsync body+sig (" + htmlKB.toFixed(1) + " KB)");
+
+    // Step 1 — Clear native signature slot (best-effort)
+    if (typeof item.body.setSignatureAsync === "function") {
+        _diag.info("step_clearSlot: clearing native signature slot");
+        try {
+            await _setSignatureSlot(item, "");
+            _diag.info("step_clearSlot: cleared");
+        } catch (e) {
+            _diag.warn("step_clearSlot non-fatal: " + (e?.message || JSON.stringify(e)));
+        }
+    } else {
+        _diag.info("step_clearSlot: setSignatureAsync unavailable — skipping");
+    }
+
+    // Step 2 — Read existing body
+    let existingBody;
+    try {
+        existingBody = await _getBody(item);
+        _diag.info("step_readBody: length=" + existingBody.length
+            + " | CB_SIG_START=" + (existingBody.indexOf(CONFIG.CB_SIG_START) !== -1)
+            + " | CB_SIG_END=" + (existingBody.indexOf(CONFIG.CB_SIG_END) !== -1));
+    } catch (e) {
+        _diag.error("step_readBody failed: " + (e?.message || JSON.stringify(e)));
+        return false;
+    }
+
+    // Step 3 — Locate reply-chain boundary FIRST
+    let composeArea = existingBody;
+    let chainArea = "";
+    let patternUsed = "none";
+
+    for (let pi = 0; pi < REPLY_PATTERNS.length; pi++) {
+        const m = REPLY_PATTERNS[pi].exec(existingBody);
+        if (m) {
+            composeArea = existingBody.substring(0, m.index);
+            chainArea = existingBody.substring(m.index);
+            patternUsed = "pattern[" + pi + "]";
+            break;
+        }
+    }
+
+    _diag.info("step_boundary"
+        + " | pattern=" + patternUsed
+        + " | composeLen=" + composeArea.length
+        + " | chainLen=" + chainArea.length);
+
+    // Step 4 — Dedup guard (compose area only)
+    const sigInComposeArea =
+        composeArea.indexOf(CONFIG.CB_SIG_START) !== -1 &&
+        composeArea.indexOf(CONFIG.CB_SIG_END) !== -1;
+
+    if (!forceReplace && sigInComposeArea) {
+        _diag.info("step_dedup: signature already present in compose area"
+            + " + forceReplace=false — skipping insert");
+        _diag.info("=== writeSignature END | success=true (skipped) ===");
+        return true;
+    }
+
+    // Step 5 — Strip previous signatures from compose area only
+    const cleanCompose = stripSignatures(composeArea);
+    _diag.info("step_strip: cleanCompose=" + cleanCompose.length
+        + " chars (was " + composeArea.length + ")");
+
+    // Step 6 — Assemble and write in ONE setAsync call
+    const combined = cleanCompose + html + chainArea;
+    const combinedKB = byteKB(combined).toFixed(1);
+    _diag.info("step_write: writing combined body+sig | " + combinedKB + " KB");
 
     try {
-        // if (!item) return;
-        // compose iframe — normal session check applies
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
-    } catch (err) {
-        console.error("[CardByte] Error in applySignature:", err);
-    } finally {
-        event.completed();
+        await _setBody(item, combined);
+        _diag.info("step_write: setBody OK");
+    } catch (e) {
+        _diag.error("step_write: setBody failed: " + (e?.message || JSON.stringify(e)));
+        return false;
     }
-};
 
-window.onSendHandler = async function (event = { completed: () => { } }) {
-    const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
-
+    // Step 7 — Verify tokens survived the write
     try {
-        if (!item) return;
-        // FIX: skipSessionCheck:true because onSendHandler runs in a separate
-        // iframe with its own fresh sessionStorage, so the session ID never
-        // matches the one stored by applySignature — causing a false cache miss.
-        // await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
-    } catch (err) {
-        console.error("[CardByte] Error in onSendHandler:", err);
-    } finally {
-        event.completed({ allowEvent: true });
+        const bodyAfter = await _getBody(item);
+        const startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
+        const endOk = bodyAfter.indexOf(CONFIG.CB_SIG_END) !== -1;
+        _diag.info("step_verify: bodyLen=" + bodyAfter.length
+            + " | CB_SIG_START=" + startOk
+            + " | CB_SIG_END=" + endOk);
+        _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " ===");
+        return startOk && endOk;
+    } catch (e) {
+        _diag.warn("step_verify: read failed — assuming success");
+        return true;
     }
-};
-
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("onSendHandler", onSendHandler);
-    console.log("[CardByte] Office.actions.associate registered: onSendHandler");
 }
 
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("applySignature", applySignature);
-    console.log("[CardByte] Office.actions.associate registered: applySignature");
-} else {
-    console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
+// ─── Diagnostics flush ────────────────────────────────────────────────────────
+
+async function writeDiagnostics(item) {
+    if (!CONFIG.DIAG_ENABLED) return;
+    if (typeof item.body.prependAsync !== "function") {
+        _diag.warn("writeDiagnostics: prependAsync unavailable — skipped");
+        return;
+    }
+    await new Promise((resolve) =>
+        item.body.prependAsync(_diag.html(), { coercionType: Office.CoercionType.Html }, resolve)
+    );
 }
+
+// ─── Backend fetch ────────────────────────────────────────────────────────────
+
+function _resolveContext() {
+    let email = "";
+    let platform = "WINDOWS";
+    try {
+        email = (Office.context.mailbox.userProfile.emailAddress || "").trim();
+        const p = Office.context.diagnostics.platform;
+        if (p === Office.PlatformType.Mac || p === "Mac") platform = "MAC";
+    } catch (e) {
+        throw new Error("resolveContext: " + e.message);
+    }
+    if (!email) throw new Error("resolveContext: no email address");
+    return { email, platform };
+}
+
+// fetchSignature wraps the XHR in a Promise so the caller can await it.
+// Retry logic (up to FETCH_MAX_RETRIES) is handled in applySignatureCore.
+function fetchSignature() {
+    return new Promise(async (resolve, reject) => {
+        let ctx;
+        try { ctx = _resolveContext(); }
+        catch (e) { _diag.error(e.message); reject(new Error("context-error")); return; }
+
+        _diag.info("fetchSignature: email=" + ctx.email + " | platform=" + ctx.platform);
+
+        const encrypted = await encryptEmail(ctx.email);
+        if (!encrypted) { reject(new Error("encrypt-failed")); return; }
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", CONFIG.XHR_URL, true);
+        xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
+        xhr.setRequestHeader("username", encrypted);
+        xhr.setRequestHeader("X-Platform", ctx.platform);
+
+        xhr.onreadystatechange = async function () {
+            if (xhr.readyState !== 4) return;
+            _diag.info("fetchSignature: XHR status=" + xhr.status
+                + " | responseLen=" + (xhr.responseText || "").length);
+
+            if (xhr.status >= 200 && xhr.status < 300) {
+                const plaintext = await decryptResponse(xhr.responseText);
+                if (!plaintext) { reject(new Error("decrypt-failed")); return; }
+
+                let parsed;
+                try { parsed = JSON.parse(plaintext); }
+                catch (e) { reject(new Error("parse-error")); return; }
+
+                const html = parsed?.html;
+                if (!html) { reject(new Error("missing-html")); return; }
+
+                _diag.info("fetchSignature: success | htmlLen=" + html.length);
+                resolve(html);
+            } else {
+                _diag.warn("fetchSignature: HTTP " + xhr.status);
+                reject(new Error("http-" + xhr.status));
+            }
+        };
+
+        xhr.ontimeout = () => {
+            _diag.warn("fetchSignature: timed out after " + CONFIG.XHR_TIMEOUT_MS + "ms");
+            reject(new Error("timeout"));
+        };
+        xhr.onerror = () => {
+            _diag.error("fetchSignature: onerror — CORS / network block?");
+            reject(new Error("network-error"));
+        };
+
+        xhr.send();
+        _diag.info("fetchSignature: xhr.send()");
+    });
+}
+
+// ─── Apply signature flow ─────────────────────────────────────────────────────
+//
+// Mirrors the classic handler's applySignatureCore exactly:
+//   1. Fetch fresh from backend (with retries).
+//   2. Wrap with CB_SIG tokens, cache, then write.
+//   3. On backend failure, fall back to cache.
+//   4. On both failures, use identity fallback, log and complete.
+//
+// forceReplace semantics (same as classic):
+//   applySignature (onNewMessageCompose)  → forceReplace=false  (dedup guard on)
+//   onSendHandler                         → forceReplace=true   (always refresh)
+//   onFromChangedHandler                  → forceReplace=true   (sender changed)
+
+async function applySignatureCore(item, guardedEvent, forceReplace = false) {
+    _diag.info("applySignatureCore | forceReplace=" + forceReplace);
+
+    let rawHtml = null;
+
+    // ── 1. Fetch from backend with retries ────────────────────────────────────
+    for (let attempt = 0; attempt <= CONFIG.FETCH_MAX_RETRIES; attempt++) {
+        if (attempt > 0) {
+            _diag.warn("applySignatureCore: retry " + attempt + "/" + CONFIG.FETCH_MAX_RETRIES);
+            await new Promise(r => setTimeout(r, CONFIG.FETCH_RETRY_DELAY_MS * attempt));
+        }
+        try {
+            rawHtml = await fetchSignature();
+            _diag.info("applySignatureCore: fresh fetch OK | htmlLen=" + rawHtml.length);
+            break;
+        } catch (e) {
+            _diag.warn("applySignatureCore: fetch attempt " + (attempt + 1) + " failed: " + e.message);
+        }
+    }
+
+    // ── 2. If fetch succeeded — wrap, cache, write ────────────────────────────
+    if (rawHtml) {
+        const wrapped = _wrapSignature(rawHtml);
+        await cacheSet(wrapped);
+        const ok = await writeSignature(item, wrapped, forceReplace);
+        if (!ok) _diag.warn("applySignatureCore: writeSignature (fresh) failed");
+        await writeDiagnostics(item);
+        guardedEvent.completed();
+        return;
+    }
+
+    // ── 3. Backend failed — try cache ─────────────────────────────────────────
+    _diag.warn("applySignatureCore: all fetch attempts failed — trying cache");
+    const cachedHtml = await cacheGet();
+
+    if (cachedHtml) {
+        _diag.info("applySignatureCore: cache hit | len=" + cachedHtml.length);
+        const ok = await writeSignature(item, cachedHtml, forceReplace);
+        if (!ok) _diag.warn("applySignatureCore: writeSignature (cached) failed");
+        await writeDiagnostics(item);
+        guardedEvent.completed();
+        return;
+    }
+
+    // ── 4. Cache miss too — identity fallback ─────────────────────────────────
+    _diag.warn("applySignatureCore: backend miss + cache miss — using identity fallback");
+
+    let userProfile = {};
+    try { userProfile = Office.context.mailbox.userProfile || {}; } catch (_) { }
+
+    const fallbackHtml = _wrapSignature(`
+        <table cellpadding="0" cellspacing="0" border="0" width="400">
+          <tr>
+            <td style="font-family:Arial,sans-serif;font-size:12px;">
+              <strong>${userProfile.displayName || ""}</strong><br/>
+              ${userProfile.emailAddress || ""}<br/>
+              <span style="color:#999;">Sent via CardByte</span>
+            </td>
+          </tr>
+        </table>
+    `);
+
+    const ok = await writeSignature(item, fallbackHtml, forceReplace);
+    if (!ok) _diag.warn("applySignatureCore: writeSignature (fallback) failed");
+    await writeDiagnostics(item);
+    guardedEvent.completed();
+}
+
+// ─── Guarded event wrapper ────────────────────────────────────────────────────
+
+function makeGuardedEvent(event, timeoutMs, opts = {}) {
+    let done = false;
+    const timer = setTimeout(() => {
+        if (done) return;
+        _diag.warn("makeGuardedEvent: timeout (" + timeoutMs + "ms) — forcing complete");
+        complete();
+    }, timeoutMs);
+
+    function complete(completionOpts) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try {
+            completionOpts ? event.completed(completionOpts) : event.completed();
+        } catch (e) {
+            _diag.error("event.completed threw: " + e.message);
+        }
+    }
+
+    return { completed: complete };
+}
+
+// ─── Office item helper ───────────────────────────────────────────────────────
+
+function _safeGetItem() {
+    try {
+        return Office?.context?.mailbox?.item ?? null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// ─── Event handlers ───────────────────────────────────────────────────────────
+
+/**
+ * applySignature — fires on OnNewMessageCompose / OnNewAppointmentOrganizer.
+ * forceReplace=false: respects dedup guard so a signature already in the
+ * compose area (e.g. from a previous draft open) is not duplicated.
+ */
+async function applySignature(event) {
+    _diag.info("=== applySignature START ===");
+    const guarded = makeGuardedEvent(
+        event || { completed: () => { } },
+        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
+    );
+    const item = _safeGetItem();
+    if (!item) {
+        _diag.error("applySignature: no mailbox item");
+        guarded.completed();
+        return;
+    }
+    await applySignatureCore(item, guarded, false);
+}
+
+/**
+ * onSendHandler — fires immediately before the message is sent.
+ * forceReplace=true: unconditionally replaces any stale / native signature
+ * that Outlook may have re-injected between compose and send.
+ *
+ * Uses OfficeRuntime.storage (shared across iframes) to read the cached
+ * wrapped signature without needing to hit the network on send.
+ */
+async function onSendHandler(event) {
+    _diag.info("=== onSendHandler START ===");
+    const guarded = makeGuardedEvent(
+        event || { completed: () => { } },
+        CONFIG.SEND_HANDLER_TIMEOUT_MS
+    );
+    const item = _safeGetItem();
+    if (!item) {
+        _diag.warn("onSendHandler: no mailbox item — allowing send");
+        guarded.completed({ allowEvent: true });
+        return;
+    }
+
+    const cachedHtml = await cacheGet();
+
+    if (!cachedHtml) {
+        _diag.info("onSendHandler: no cached signature — passing through");
+        await writeDiagnostics(item);
+        guarded.completed({ allowEvent: true });
+        return;
+    }
+
+    _diag.info("onSendHandler: writing cached signature ("
+        + cachedHtml.length + " chars) | forceReplace=true");
+
+    // cachedHtml is already _wrapSignature()'d — write directly.
+    const ok = await writeSignature(item, cachedHtml, true /* forceReplace */);
+    if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+
+    await writeDiagnostics(item);
+    guarded.completed({ allowEvent: true });
+}
+
+/**
+ * onFromChangedHandler — fires when the sender address changes.
+ * Clears the cache so the new sender's signature is fetched fresh,
+ * then writes it with forceReplace=true to replace the previous one.
+ */
+async function onFromChangedHandler(event) {
+    _diag.info("=== onFromChangedHandler START ===");
+    const guarded = makeGuardedEvent(
+        event || { completed: () => { } },
+        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
+    );
+    const item = _safeGetItem();
+    if (!item) { guarded.completed(); return; }
+
+    await cacheClear();
+    await applySignatureCore(item, guarded, true /* forceReplace */);
+}
+
+// ─── Handler registration ─────────────────────────────────────────────────────
+
+Office.onReady(() => {
+    _diag.info("Office.onReady fired | platform=" + detectPlatform());
+
+    if (typeof Office === "undefined" || !Office.actions) {
+        _diag.error("registerHandlers: Office.actions unavailable — registration skipped");
+        return;
+    }
+    try {
+        Office.actions.associate("applySignature", applySignature);
+        Office.actions.associate("onSendHandler", onSendHandler);
+        Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+        _diag.info("registerHandlers: all handlers registered");
+    } catch (e) {
+        _diag.error("registerHandlers: Office.actions.associate threw: " + e.message);
+    }
+});
