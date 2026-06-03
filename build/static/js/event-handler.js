@@ -23,7 +23,6 @@ function getOrCreateSessionId() {
 }
 
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-    // If skipping session check, just return whatever is in cache directly
     if (skipSessionCheck) {
         return localStorage.getItem(CACHE_KEY);
     }
@@ -97,7 +96,6 @@ function detectPlatform() {
 
 function isOWA() { return detectPlatform() === "owa"; }
 function isMac() { return detectPlatform() === "mac"; }
-
 
 Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
@@ -241,11 +239,10 @@ function clearDefaultSignature(item) {
             resolve();
             return;
         }
-
         item.body.setSignatureAsync(
             "",
             { coercionType: Office.CoercionType.Html },
-            () => resolve() // ignore failure, continue anyway
+            () => resolve()
         );
     });
 }
@@ -254,37 +251,27 @@ function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
         const sizeInBytes = new Blob([html]).size;
 
-        // Outlook setSignatureAsync has practical limits around 100 KB
         if (sizeInBytes <= 100 * 1024 &&
             typeof item.body.setSignatureAsync === "function") {
-
             item.body.setSignatureAsync(
                 html,
                 { coercionType: Office.CoercionType.Html },
                 (r) => {
-                    if (r.status === Office.AsyncResultStatus.Succeeded) {
-                        resolve();
-                    } else {
-                        reject(r.error);
-                    }
+                    if (r.status === Office.AsyncResultStatus.Succeeded) resolve();
+                    else reject(r.error);
                 }
             );
         } else {
-            // Fallback for large signatures
             if (typeof item.body.setSelectedDataAsync !== "function") {
                 reject(new Error("setSelectedDataAsync not available"));
                 return;
             }
-
             item.body.setSelectedDataAsync(
                 html,
                 { coercionType: Office.CoercionType.Html },
                 (r) => {
-                    if (r.status === Office.AsyncResultStatus.Succeeded) {
-                        resolve();
-                    } else {
-                        reject(r.error);
-                    }
+                    if (r.status === Office.AsyncResultStatus.Succeeded) resolve();
+                    else reject(r.error);
                 }
             );
         }
@@ -303,8 +290,8 @@ function moveCursorToTop(item) {
     });
 }
 
-// FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
-// sessionStorage) can still read the signature cached by the compose iframe.
+// ─── applySignature (compose time) — unchanged ────────────────────────────────
+
 async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}) {
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
@@ -320,7 +307,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             try {
                 if (attempt > 0) {
                     console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, then 2s
+                    await new Promise(r => setTimeout(r, 1000 * attempt));
                 }
                 const result = await renderSignatureOnServer(userEmail);
                 if (result != null) {
@@ -339,7 +326,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
 
         if (fetched != null) {
             CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);  // ← store compressed, not raw
+            setCachedSignature(fetched);
         }
 
         if (fetched == null) {
@@ -347,11 +334,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    // FIX: If signature is still null (server down, cache miss, no email, etc.)
-    // fall back to a minimal identity signature instead of inserting "null".
-    // Fallback only if everything above — fresh fetch, retries — all came up empty
     if (!fetched) {
-        // Last-ditch: try reading stale cache, bypassing both session and TTL checks
         const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (staleCache) {
             console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
@@ -391,13 +374,278 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     await moveCursorToTop(item);
 }
 
-window.applySignature = async function (event = { completed: () => { } }, options = {}) {
-    const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
+// ─── onSend helpers ───────────────────────────────────────────────────────────
+
+function _getBodyAsync(item) {
+    return new Promise((resolve, reject) => {
+        item.body.getAsync(
+            Office.CoercionType.Html,
+            { asyncContext: null },
+            (result) => {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    resolve(result.value || "");
+                } else {
+                    reject(result.error);
+                }
+            }
+        );
+    });
+}
+
+function _setBodyAsync(item, html) {
+    return new Promise((resolve, reject) => {
+        item.body.setAsync(
+            html,
+            { coercionType: Office.CoercionType.Html },
+            (result) => {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    resolve();
+                } else {
+                    reject(result.error);
+                }
+            }
+        );
+    });
+}
+
+function _hasCidImages(bodyHtml) {
+    return /src=["']cid:/i.test(bodyHtml);
+}
+
+function _escapeRegex(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function _guessMimeType(filename) {
+    const ext = (filename || "").split(".").pop().toLowerCase();
+    const map = {
+        jpg: "image/jpeg", jpeg: "image/jpeg",
+        png: "image/png",  gif: "image/gif",
+        webp: "image/webp", bmp: "image/bmp",
+        svg: "image/svg+xml"
+    };
+    return map[ext] || "image/jpeg";
+}
+
+function _getAttachmentContentAsync(item, attachmentId) {
+    return new Promise((resolve, reject) => {
+        item.getAttachmentContentAsync(attachmentId, (result) => {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+                resolve(result.value.content); // already base64 for binary types
+            } else {
+                reject(result.error);
+            }
+        });
+    });
+}
+
+// Converts every cid: reference in bodyHtml to a base64 data URI so that
+// setAsync doesn't orphan the MIME attachment wiring.
+async function _resolveCidImages(bodyHtml, item) {
+    const cidPattern = /src=["']cid:([^"']+)["']/gi;
+    const cids = [];
+    let match;
+
+    while ((match = cidPattern.exec(bodyHtml)) !== null) {
+        cids.push(match[1]);
+    }
+
+    if (cids.length === 0) return bodyHtml;
+
+    const attachments = item.attachments || [];
+
+    for (const cid of cids) {
+        const normalizedCid = cid.replace(/^<|>$/g, "");
+
+        const attachment = attachments.find(a => {
+            const aid = (a.id || "").replace(/^<|>$/g, "");
+            return (
+                aid === normalizedCid ||
+                a.name === normalizedCid.split("@")[0]
+            );
+        });
+
+        if (!attachment) {
+            console.warn(`[CardByte] No attachment found for cid:${cid}`);
+            continue;
+        }
+
+        try {
+            const base64  = await _getAttachmentContentAsync(item, attachment.id);
+            const mime    = _guessMimeType(attachment.name);
+            const dataUri = `data:${mime};base64,${base64}`;
+
+            bodyHtml = bodyHtml.replace(
+                new RegExp(`src=["']cid:${_escapeRegex(cid)}["']`, "gi"),
+                `src="${dataUri}"`
+            );
+
+            console.log(`[CardByte] Resolved cid:${cid} → base64 (${attachment.name})`);
+        } catch (err) {
+            console.warn(`[CardByte] Failed to resolve cid:${cid}`, err);
+        }
+    }
+
+    return bodyHtml;
+}
+
+// Strips ONLY the first (compose-area) CB wrapper table and injects
+// freshSignatureHtml in its place. Reply-chain CB signatures are never
+// touched because indexOf() returns only the first occurrence.
+function _stripAndInjectComposeSignature(bodyHtml, freshSignatureHtml) {
+    const startMarkerPos = bodyHtml.indexOf(CB_SIG_START);
+    const endMarkerPos   = bodyHtml.indexOf(CB_SIG_END);
+
+    if (startMarkerPos === -1 || endMarkerPos === -1 || endMarkerPos < startMarkerPos) {
+        console.warn("[CardByte] No compose-area CB signature found — prepending fresh signature.");
+        return freshSignatureHtml + bodyHtml;
+    }
+
+    const outerTableStart = bodyHtml.lastIndexOf("<table", startMarkerPos);
+    if (outerTableStart === -1) {
+        console.warn("[CardByte] CB_SIG_START found but no wrapping <table> — falling back to marker-only strip.");
+        const fallbackEnd = bodyHtml.indexOf("</table>", endMarkerPos);
+        if (fallbackEnd === -1) return freshSignatureHtml + bodyHtml;
+        return (
+            bodyHtml.slice(0, startMarkerPos) +
+            freshSignatureHtml +
+            bodyHtml.slice(fallbackEnd + "</table>".length)
+        );
+    }
+
+    const CLOSE_TAG     = "</table>";
+    const outerTableEnd = bodyHtml.indexOf(CLOSE_TAG, endMarkerPos);
+    if (outerTableEnd === -1) {
+        console.warn("[CardByte] Could not find closing </table> after CB_SIG_END — stripping to end.");
+        return bodyHtml.slice(0, outerTableStart) + freshSignatureHtml;
+    }
+
+    const outerTableEndFull = outerTableEnd + CLOSE_TAG.length;
+    const before = bodyHtml.slice(0, outerTableStart);
+    const after  = bodyHtml.slice(outerTableEndFull);
+
+    console.log(
+        `[CardByte] Stripped compose CB signature (chars ${outerTableStart}–${outerTableEndFull}). ` +
+        `Reply chain preserved (${after.length} chars follow).`
+    );
+
+    return before + freshSignatureHtml + after;
+}
+
+// Resolves the signature HTML from cache, then server, then identity fallback.
+async function _resolveSignatureHtml(mailbox) {
+    let sigHtml = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+
+    if (!sigHtml) {
+        const userEmail = mailbox?.userProfile?.emailAddress;
+        if (userEmail) {
+            try {
+                console.warn("[CardByte] onSend: cache miss — attempting live fetch.");
+                sigHtml = await renderSignatureOnServer(userEmail);
+                if (sigHtml) setCachedSignature(sigHtml);
+            } catch (err) {
+                console.error("[CardByte] onSend: live fetch failed:", err);
+            }
+        }
+    }
+
+    if (!sigHtml) {
+        const p = mailbox?.userProfile || {};
+        console.warn("[CardByte] onSend: using fallback identity signature.");
+        sigHtml = `
+            <div contenteditable="false" data-cbsig="true">
+              <table cellpadding="0" cellspacing="0" border="0" width="400">
+                <tr>
+                  <td style="font-family:Arial,sans-serif;font-size:12px;">
+                    <strong>${p.displayName || ""}</strong><br/>
+                    ${p.emailAddress || ""}
+                  </td>
+                </tr>
+              </table>
+            </div>`;
+    }
+
+    return sigHtml;
+}
+
+// ─── onSend core ──────────────────────────────────────────────────────────────
+//
+// Decision tree:
+//
+//   Has existing CB sig in body?
+//   ├── NO  → setSignatureAsync (safe: nothing in compose zone to strip,
+//   │          reply chain untouched)
+//   └── YES → cid: images present?
+//             ├── NO  → surgical _stripAndInjectComposeSignature + setAsync
+//             └── YES → resolve cid: → base64, verify none remain unresolved,
+//                        then surgical strip+inject + setAsync
+
+async function _applySignatureOnSend(item, mailbox) {
+    let bodyHtml;
+    try {
+        bodyHtml = await _getBodyAsync(item);
+    } catch (err) {
+        console.error("[CardByte] onSend: getAsync failed — aborting.", err);
+        return;
+    }
+
+    const hasExistingCBSig = bodyHtml.indexOf(CB_SIG_START) !== -1;
+
+    // ── No existing CB signature ───────────────────────────────────────────────
+    // User deleted it, or applySignature failed at compose time.
+    // setSignatureAsync only touches the Outlook signature zone — it never
+    // reaches into the reply chain and there's nothing in the compose zone
+    // to accidentally strip.
+    if (!hasExistingCBSig) {
+        console.warn("[CardByte] onSend: no CB signature found — injecting via setSignatureAsync.");
+        const sigHtml = await _resolveSignatureHtml(mailbox);
+        try {
+            await bodySetSignatureAsync(item, _wrapSignature(sigHtml));
+        } catch (err) {
+            console.error("[CardByte] onSend: setSignatureAsync failed:", err);
+        }
+        return;
+    }
+
+    // ── Existing CB signature present — surgical replacement ───────────────────
+    if (_hasCidImages(bodyHtml)) {
+        console.log("[CardByte] onSend: cid: images detected — resolving to base64 before setAsync.");
+        try {
+            bodyHtml = await _resolveCidImages(bodyHtml, item);
+        } catch (err) {
+            // Resolution failed entirely — safest to leave the existing
+            // compose-area sig untouched rather than risk destroying images.
+            console.warn("[CardByte] onSend: cid: resolution failed — skipping replacement.", err);
+            return;
+        }
+
+        // Guard: if any cid: refs remain unresolved (Mac lazy-attachment issue),
+        // abort setAsync to protect the images.
+        const unresolvedCount = (bodyHtml.match(/src=["']cid:/gi) || []).length;
+        if (unresolvedCount > 0) {
+            console.warn(`[CardByte] onSend: ${unresolvedCount} cid: ref(s) still unresolved — skipping setAsync.`);
+            return;
+        }
+    }
+
+    const sigHtml     = await _resolveSignatureHtml(mailbox);
+    const patchedBody = _stripAndInjectComposeSignature(bodyHtml, _wrapSignature(sigHtml));
 
     try {
-        // if (!item) return;
-        // compose iframe — normal session check applies
+        await _setBodyAsync(item, patchedBody);
+        console.log("[CardByte] onSend: surgical replacement complete.");
+    } catch (err) {
+        console.error("[CardByte] onSend: setAsync failed:", err);
+    }
+}
+
+// ─── Public handlers ──────────────────────────────────────────────────────────
+
+window.applySignature = async function (event = { completed: () => {} }, options = {}) {
+    const mailbox = Office?.context?.mailbox;
+    const item    = mailbox?.item;
+
+    try {
         await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
@@ -406,16 +654,13 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 };
 
-window.onSendHandler = async function (event = { completed: () => { } }) {
+window.onSendHandler = async function (event = { completed: () => {} }) {
     const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
+    const item    = mailbox?.item;
 
     try {
         if (!item) return;
-        // FIX: skipSessionCheck:true because onSendHandler runs in a separate
-        // iframe with its own fresh sessionStorage, so the session ID never
-        // matches the one stored by applySignature — causing a false cache miss.
-        // await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
+        await _applySignatureOnSend(item, mailbox);
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
