@@ -6713,7 +6713,7 @@ var CONFIG = {
     SEND_HANDLER_TIMEOUT_MS: 2000,
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
 
-    DIAG_ENABLED: true,
+    DIAG_ENABLED: false,
 
     CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,   // 6 hours
 
