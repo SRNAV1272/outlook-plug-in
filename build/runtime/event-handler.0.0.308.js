@@ -420,7 +420,7 @@ function _guessMimeType(filename) {
     const ext = (filename || "").split(".").pop().toLowerCase();
     const map = {
         jpg: "image/jpeg", jpeg: "image/jpeg",
-        png: "image/png",  gif: "image/gif",
+        png: "image/png", gif: "image/gif",
         webp: "image/webp", bmp: "image/bmp",
         svg: "image/svg+xml"
     };
@@ -431,7 +431,7 @@ function _getAttachmentContentAsync(item, attachmentId) {
     return new Promise((resolve, reject) => {
         item.getAttachmentContentAsync(attachmentId, (result) => {
             if (result.status === Office.AsyncResultStatus.Succeeded) {
-                resolve(result.value.content); // already base64 for binary types
+                resolve(result.value.content);
             } else {
                 reject(result.error);
             }
@@ -439,8 +439,6 @@ function _getAttachmentContentAsync(item, attachmentId) {
     });
 }
 
-// Converts every cid: reference in bodyHtml to a base64 data URI so that
-// setAsync doesn't orphan the MIME attachment wiring.
 async function _resolveCidImages(bodyHtml, item) {
     const cidPattern = /src=["']cid:([^"']+)["']/gi;
     const cids = [];
@@ -450,9 +448,29 @@ async function _resolveCidImages(bodyHtml, item) {
         cids.push(match[1]);
     }
 
+    console.log(`[CardByte] cid: refs found in body: ${cids.length}`, cids);
+    console.log(`[CardByte] item.attachments count: ${(item.attachments || []).length}`,
+        (item.attachments || []).map(a => ({ id: a.id, name: a.name, isInline: a.isInline }))
+    );
+
     if (cids.length === 0) return bodyHtml;
 
     const attachments = item.attachments || [];
+
+    // ── OWA-specific: if there are cid: refs but zero attachments, OWA has
+    // already converted user-pasted images to base64 in getAsync output.
+    // The remaining cid: refs belong to the reply chain (sent from classic
+    // Outlook). They are read-only quoted content — setAsync will pass them
+    // through verbatim and the receiving client will render them from its
+    // own MIME parts. Safe to proceed without resolving.
+    if (attachments.length === 0) {
+        console.warn(
+            "[CardByte] cid: refs present but item.attachments is empty. " +
+            "OWA already resolved user images to base64. " +
+            "Remaining cid: refs are in the reply chain — safe to pass through."
+        );
+        return bodyHtml; // return as-is, do NOT abort
+    }
 
     for (const cid of cids) {
         const normalizedCid = cid.replace(/^<|>$/g, "");
@@ -466,13 +484,15 @@ async function _resolveCidImages(bodyHtml, item) {
         });
 
         if (!attachment) {
-            console.warn(`[CardByte] No attachment found for cid:${cid}`);
+            console.warn(`[CardByte] No attachment found for cid:${cid} — reply chain ref, leaving as-is.`);
+            // Don't abort — this cid: is in the reply chain, not user-composed content.
+            // Remove it from the "unresolved" count by NOT tracking it as a failure.
             continue;
         }
 
         try {
-            const base64  = await _getAttachmentContentAsync(item, attachment.id);
-            const mime    = _guessMimeType(attachment.name);
+            const base64 = await _getAttachmentContentAsync(item, attachment.id);
+            const mime = _guessMimeType(attachment.name);
             const dataUri = `data:${mime};base64,${base64}`;
 
             bodyHtml = bodyHtml.replace(
@@ -489,12 +509,9 @@ async function _resolveCidImages(bodyHtml, item) {
     return bodyHtml;
 }
 
-// Strips ONLY the first (compose-area) CB wrapper table and injects
-// freshSignatureHtml in its place. Reply-chain CB signatures are never
-// touched because indexOf() returns only the first occurrence.
 function _stripAndInjectComposeSignature(bodyHtml, freshSignatureHtml) {
     const startMarkerPos = bodyHtml.indexOf(CB_SIG_START);
-    const endMarkerPos   = bodyHtml.indexOf(CB_SIG_END);
+    const endMarkerPos = bodyHtml.indexOf(CB_SIG_END);
 
     if (startMarkerPos === -1 || endMarkerPos === -1 || endMarkerPos < startMarkerPos) {
         console.warn("[CardByte] No compose-area CB signature found — prepending fresh signature.");
@@ -503,7 +520,7 @@ function _stripAndInjectComposeSignature(bodyHtml, freshSignatureHtml) {
 
     const outerTableStart = bodyHtml.lastIndexOf("<table", startMarkerPos);
     if (outerTableStart === -1) {
-        console.warn("[CardByte] CB_SIG_START found but no wrapping <table> — falling back to marker-only strip.");
+        console.warn("[CardByte] CB_SIG_START found but no wrapping <table> — marker-only strip.");
         const fallbackEnd = bodyHtml.indexOf("</table>", endMarkerPos);
         if (fallbackEnd === -1) return freshSignatureHtml + bodyHtml;
         return (
@@ -513,7 +530,7 @@ function _stripAndInjectComposeSignature(bodyHtml, freshSignatureHtml) {
         );
     }
 
-    const CLOSE_TAG     = "</table>";
+    const CLOSE_TAG = "</table>";
     const outerTableEnd = bodyHtml.indexOf(CLOSE_TAG, endMarkerPos);
     if (outerTableEnd === -1) {
         console.warn("[CardByte] Could not find closing </table> after CB_SIG_END — stripping to end.");
@@ -522,17 +539,16 @@ function _stripAndInjectComposeSignature(bodyHtml, freshSignatureHtml) {
 
     const outerTableEndFull = outerTableEnd + CLOSE_TAG.length;
     const before = bodyHtml.slice(0, outerTableStart);
-    const after  = bodyHtml.slice(outerTableEndFull);
+    const after = bodyHtml.slice(outerTableEndFull);
 
     console.log(
-        `[CardByte] Stripped compose CB signature (chars ${outerTableStart}–${outerTableEndFull}). ` +
+        `[CardByte] Stripped compose CB sig (chars ${outerTableStart}–${outerTableEndFull}). ` +
         `Reply chain preserved (${after.length} chars follow).`
     );
 
     return before + freshSignatureHtml + after;
 }
 
-// Resolves the signature HTML from cache, then server, then identity fallback.
 async function _resolveSignatureHtml(mailbox) {
     let sigHtml = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
 
@@ -569,16 +585,6 @@ async function _resolveSignatureHtml(mailbox) {
 }
 
 // ─── onSend core ──────────────────────────────────────────────────────────────
-//
-// Decision tree:
-//
-//   Has existing CB sig in body?
-//   ├── NO  → setSignatureAsync (safe: nothing in compose zone to strip,
-//   │          reply chain untouched)
-//   └── YES → cid: images present?
-//             ├── NO  → surgical _stripAndInjectComposeSignature + setAsync
-//             └── YES → resolve cid: → base64, verify none remain unresolved,
-//                        then surgical strip+inject + setAsync
 
 async function _applySignatureOnSend(item, mailbox) {
     let bodyHtml;
@@ -589,46 +595,45 @@ async function _applySignatureOnSend(item, mailbox) {
         return;
     }
 
+    console.log(`[CardByte] onSend: body length=${bodyHtml.length}, hasCBSig=${bodyHtml.indexOf(CB_SIG_START) !== -1}, hasCid=${_hasCidImages(bodyHtml)}`);
+
     const hasExistingCBSig = bodyHtml.indexOf(CB_SIG_START) !== -1;
 
-    // ── No existing CB signature ───────────────────────────────────────────────
-    // User deleted it, or applySignature failed at compose time.
-    // setSignatureAsync only touches the Outlook signature zone — it never
-    // reaches into the reply chain and there's nothing in the compose zone
-    // to accidentally strip.
     if (!hasExistingCBSig) {
-        console.warn("[CardByte] onSend: no CB signature found — injecting via setSignatureAsync.");
+        console.warn("[CardByte] onSend: no CB signature — injecting via setSignatureAsync.");
         const sigHtml = await _resolveSignatureHtml(mailbox);
         try {
             await bodySetSignatureAsync(item, _wrapSignature(sigHtml));
+            console.log("[CardByte] onSend: setSignatureAsync complete.");
         } catch (err) {
             console.error("[CardByte] onSend: setSignatureAsync failed:", err);
         }
         return;
     }
 
-    // ── Existing CB signature present — surgical replacement ───────────────────
+    // Resolve cid: images if present
     if (_hasCidImages(bodyHtml)) {
         console.log("[CardByte] onSend: cid: images detected — resolving to base64 before setAsync.");
         try {
             bodyHtml = await _resolveCidImages(bodyHtml, item);
         } catch (err) {
-            // Resolution failed entirely — safest to leave the existing
-            // compose-area sig untouched rather than risk destroying images.
-            console.warn("[CardByte] onSend: cid: resolution failed — skipping replacement.", err);
+            console.warn("[CardByte] onSend: _resolveCidImages threw — skipping replacement.", err);
             return;
         }
 
-        // Guard: if any cid: refs remain unresolved (Mac lazy-attachment issue),
-        // abort setAsync to protect the images.
-        const unresolvedCount = (bodyHtml.match(/src=["']cid:/gi) || []).length;
-        if (unresolvedCount > 0) {
-            console.warn(`[CardByte] onSend: ${unresolvedCount} cid: ref(s) still unresolved — skipping setAsync.`);
-            return;
+        // Only abort if attachments existed AND some still couldn't be resolved.
+        // Reply-chain cid: refs (no matching attachment) are fine to leave as-is.
+        const attachmentCount = (item.attachments || []).length;
+        if (attachmentCount > 0) {
+            const unresolvedCount = (bodyHtml.match(/src=["']cid:/gi) || []).length;
+            if (unresolvedCount > 0) {
+                console.warn(`[CardByte] onSend: ${unresolvedCount} attachment-backed cid: ref(s) still unresolved — skipping setAsync.`);
+                return;
+            }
         }
     }
 
-    const sigHtml     = await _resolveSignatureHtml(mailbox);
+    const sigHtml = await _resolveSignatureHtml(mailbox);
     const patchedBody = _stripAndInjectComposeSignature(bodyHtml, _wrapSignature(sigHtml));
 
     try {
@@ -641,9 +646,9 @@ async function _applySignatureOnSend(item, mailbox) {
 
 // ─── Public handlers ──────────────────────────────────────────────────────────
 
-window.applySignature = async function (event = { completed: () => {} }, options = {}) {
+window.applySignature = async function (event = { completed: () => { } }, options = {}) {
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
 
     try {
         await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
@@ -654,9 +659,9 @@ window.applySignature = async function (event = { completed: () => {} }, options
     }
 };
 
-window.onSendHandler = async function (event = { completed: () => {} }) {
+window.onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
 
     try {
         if (!item) return;
