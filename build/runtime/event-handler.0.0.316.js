@@ -875,14 +875,14 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
         );
 
         // ── Check-first: is signature already above the chain? ─────────────────
-        const sigInComposeArea =
-            composeArea.indexOf(CB_SIG_START) !== -1 &&
-            composeArea.indexOf(CB_SIG_END) !== -1;
+        // const sigInComposeArea =
+        //     composeArea.indexOf(CB_SIG_START) !== -1 &&
+        //     composeArea.indexOf(CB_SIG_END) !== -1;
 
-        if (sigInComposeArea) {
-            console.log("[CardByte] onSendHandler: signature intact above chain — skipping write");
-            return;
-        }
+        // if (sigInComposeArea) {
+        //     console.log("[CardByte] onSendHandler: signature intact above chain — skipping write");
+        //     return;
+        // }
 
         // ── Signature missing or below chain — rebuild ─────────────────────────
         console.warn("[CardByte] onSendHandler: signature not in compose area — re-inserting");
