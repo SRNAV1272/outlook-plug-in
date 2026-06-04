@@ -396,7 +396,8 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    let finalSignature = `<div style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
+    let finalSignature = _wrapSignature(fetched);
+    // `<div style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
