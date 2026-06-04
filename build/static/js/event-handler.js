@@ -21,7 +21,7 @@ const _insertedItems = new Set();
 // Trident round-trip AND OWA's sanitizer. Used for dedup detection and
 // tampering detection in onSendHandler.
 const CB_SIG_START = "__CBSIG_START_7F2C9D4E__";
-const CB_SIG_END   = "__CBSIG_END_7F2C9D4E__";
+const CB_SIG_END = "__CBSIG_END_7F2C9D4E__";
 
 // Sentinel cell style: visually hidden in all clients.
 const SENTINEL_TD_STYLE =
@@ -132,7 +132,7 @@ function stripSignatures(html) {
 
     while (iterations++ < MAX_ITER) {
         const startIdx = html.indexOf(CB_SIG_START);
-        const endIdx   = html.indexOf(CB_SIG_END);
+        const endIdx = html.indexOf(CB_SIG_END);
 
         if (startIdx === -1 || endIdx === -1) {
             // Orphan token cleanup
@@ -142,16 +142,16 @@ function stripSignatures(html) {
             break;
         }
 
-        const tableOpen  = html.lastIndexOf("<table", startIdx);
+        const tableOpen = html.lastIndexOf("<table", startIdx);
         const tableClose = html.indexOf("</table>", endIdx);
 
         if (tableOpen !== -1 && tableClose !== -1) {
             html = html.substring(0, tableOpen) +
-                   html.substring(tableClose + "</table>".length);
+                html.substring(tableClose + "</table>".length);
         } else {
             // Fallback: excise everything between the tokens themselves
             html = html.substring(0, startIdx) +
-                   html.substring(endIdx + CB_SIG_END.length);
+                html.substring(endIdx + CB_SIG_END.length);
         }
     }
 
@@ -208,6 +208,17 @@ async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
 
     // ── Shared itemId for dedup tracking (both paths) ─────────────────────────
     const itemId = item.itemId || item.conversationId || "unknown";
+
+    await new Promise((resolve, reject) => {
+        item.body.setSignatureAsync(
+            "",
+            { coercionType: Office.CoercionType.Html },
+            (r) => {
+                if (r.status === Office.AsyncResultStatus.Succeeded) resolve();
+                else reject(r.error);
+            }
+        );
+    });
 
     // ── PATH A ────────────────────────────────────────────────────────────────
     if (typeof item.body.setSignatureAsync === "function" && htmlSizeKB < 100) {
@@ -266,14 +277,14 @@ async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
 
     // Step 2: Split at reply-chain boundary
     let composeArea = existingBody;
-    let chainArea   = "";
+    let chainArea = "";
     let patternUsed = "none";
 
     for (let i = 0; i < REPLY_PATTERNS.length; i++) {
         const m = REPLY_PATTERNS[i].exec(existingBody);
         if (m) {
             composeArea = existingBody.substring(0, m.index);
-            chainArea   = existingBody.substring(m.index);
+            chainArea = existingBody.substring(m.index);
             patternUsed = `pattern[${i}]`;
             break;
         }
@@ -332,7 +343,7 @@ async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
     try {
         const bodyAfter = await _getBodyAsync(item);
         const startOk = bodyAfter.indexOf(CB_SIG_START) !== -1;
-        const endOk   = bodyAfter.indexOf(CB_SIG_END)   !== -1;
+        const endOk = bodyAfter.indexOf(CB_SIG_END) !== -1;
         console.log(`[CardByte] writeSignatureAsync PATH B: post-write verification | CB_SIG_START=${startOk} | CB_SIG_END=${endOk} | bodyLen=${bodyAfter.length}`);
         if (startOk && endOk) _insertedItems.add(itemId);
         return startOk && endOk;
@@ -436,10 +447,10 @@ async function encryptEmail(email = "") {
     try {
         if (!email || email.trim() === "") { console.warn("Warning: Empty email provided"); return ""; }
         const keyBuffer = base64ToArrayBuffer(AES_KEY);
-        const ivBuffer  = base64ToArrayBuffer(AES_IV);
+        const ivBuffer = base64ToArrayBuffer(AES_IV);
         if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) { console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`); return ""; }
         if (ivBuffer.byteLength !== 16) { console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`); return ""; }
-        const key  = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
+        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
         const data = new TextEncoder().encode(email);
         const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
         const base64Result = arrayBufferToBase64(encrypted);
@@ -454,7 +465,7 @@ async function encryptEmail(email = "") {
 // ─── Backend fetch ────────────────────────────────────────────────────────────
 
 async function renderSignatureOnServer(user) {
-    const platform  = Office.context.diagnostics.platform;
+    const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
     try {
@@ -499,7 +510,7 @@ async function isSignatureIntact(item) {
     try {
         const body = await _getBodyAsync(item);
         const startOk = body.indexOf(CB_SIG_START) !== -1;
-        const endOk   = body.indexOf(CB_SIG_END)   !== -1;
+        const endOk = body.indexOf(CB_SIG_END) !== -1;
         console.log(`[CardByte] isSignatureIntact: CB_SIG_START=${startOk} | CB_SIG_END=${endOk}`);
         return startOk && endOk;
     } catch (err) {
@@ -522,14 +533,14 @@ async function isSignatureIntact(item) {
 
 async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, forceReplace = false } = {}) {
     const userProfile = mailbox?.userProfile || {};
-    const userEmail   = userProfile?.emailAddress;
+    const userEmail = userProfile?.emailAddress;
 
     let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
 
     // ── Fetch from backend if cache miss ─────────────────────────────────────
     if (fetchIfMissing && userEmail && fetched == null) {
         const MAX_RETRIES = 2;
-        let attempt   = 0;
+        let attempt = 0;
         let lastError = null;
 
         while (attempt <= MAX_RETRIES) {
@@ -595,7 +606,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
 // won't have their edits wiped.
 window.applySignature = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
 
     try {
         await _applySignatureCore(item, mailbox, { fetchIfMissing: true, forceReplace: false });
@@ -614,7 +625,7 @@ window.applySignature = async function (event = { completed: () => { } }) {
 // best-effort and must not block the user.
 window.onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
 
     try {
         if (!item) return;
