@@ -1,9 +1,43 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// CardByte Outlook Add-in — event-handler.js
+//
+// Write strategy (Modern Office.js):
+//
+//   PATH A  setSignatureAsync  — new mail only, html < 100 KB
+//           Outlook manages the signature slot natively.
+//           Cursor is reset to top via a no-op setSelectedDataAsync("") after.
+//
+//   PATH B  _writeWithBoundaryAsync — reply / forward OR large HTML
+//           1. getAsync          — read full body (CIDs intact)
+//           2. Split             — composeArea | chainArea at reply boundary
+//           3. stripSignatures   — clean compose area only (chain untouched)
+//           4. setAsync(full)    — atomic full-body replace:
+//                                  cleanCompose + sig + chainArea
+//                                  CIDs survive because chainArea is written
+//                                  back verbatim from the getAsync read.
+//           5. setSelectedDataAsync("", Text) — cursor reset to top (best-effort)
+//
+//   FALLBACK inside PATH B (_writeWithSelectedDataAsync):
+//           Used only when setAsync is unavailable (edge-case Outlook builds).
+//           prependAsync("") attempts cursor-to-top before setSelectedDataAsync.
+//
+// onSendHandler:
+//   Boundary-aware check-first pattern:
+//     - Split body at reply boundary → composeArea | chainArea
+//     - If CB_SIG tokens found in composeArea → signature intact, skip write
+//     - Otherwise → stripSignatures on both halves, re-inject above chain
+//     - setAsync(cleanCompose + sig + cleanChain) — always allows send
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 let CACHED_SIGNATURE_HTML = null;
 const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
-// ─── Session-based cache buster ───────────────────────────────────────────────
+// ─── Session-based cache keys ─────────────────────────────────────────────────
+
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
@@ -12,35 +46,42 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ─── Per-item insertion tracker ───────────────────────────────────────────────
 // Tracks which compose item IDs have already had a signature inserted in this
-// add-in session. Replaces body-token dedup guard, which false-positives on
-// replies where the quoted original email already carries CB_SIG tokens.
+// add-in session. Prevents double-insertion without relying on body-token
+// presence (which false-positives on replies carrying the original CB_SIG).
+
 const _insertedItems = new Set();
 
-// ─── CB_SIG sentinel tokens (must match event-handler-classic.js) ─────────────
-// Plain-text tokens embedded in hidden table cells. Survive Classic Outlook's
-// Trident round-trip AND OWA's sanitizer. Used for dedup detection and
-// tampering detection in onSendHandler.
+// ─── CB_SIG sentinel tokens ───────────────────────────────────────────────────
+// Plain-text tokens embedded in hidden table cells.
+// Survive Classic Outlook's Trident round-trip AND OWA's sanitizer.
+// Used for dedup detection and tampering detection in onSendHandler.
+
 const CB_SIG_START = "__CBSIG_START_7F2C9D4E__";
 const CB_SIG_END = "__CBSIG_END_7F2C9D4E__";
 
-// Sentinel cell style: visually hidden in all clients.
 const SENTINEL_TD_STYLE =
     "font-size:0px;color:#ffffff;line-height:0;max-height:0;" +
     "overflow:hidden;mso-hide:all;display:none;width:0;";
 
-// ─── Reply-chain boundary patterns (ported from event-handler-classic.js) ─────
-// Ordered from most-specific to least-specific.
+// ─── Reply-chain boundary patterns ───────────────────────────────────────────
+// Ordered most-specific → least-specific.
+
 const REPLY_PATTERNS = [
-    // Classic Outlook 2016/2019: outer div wrapping a border-top separator div
+    // Classic Outlook 2016/2019 — outer div wrapping a border-top separator
     /(<div>\s*<div[^>]+border-top\s*:\s*solid[^>]*>)/i,
-    // Broader fallback: any div whose style contains border-top:solid
+    // Broader fallback — any div whose style contains border-top:solid
     /(<div[^>]+style\s*=\s*["'][^"']*border-top\s*:\s*solid[^"']*["'][^>]*>)/i,
     // OWA / modern Outlook reply wrapper divs
     /(<div[^>]+\bid=["']divRplyFwdMsg["'][^>]*>)/i,
     /(<div[^>]+\bid=["']divTaggedContent["'][^>]*>)/i,
     // Generic blockquote last resort
-    /(<blockquote[^>]*>)/i
+    /(<blockquote[^>]*>)/i,
 ];
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION / CACHE HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
 
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
@@ -87,16 +128,22 @@ function setCachedSignature(html) {
         localStorage.setItem(CACHE_KEY, html);
         localStorage.setItem(CACHE_SESSION_KEY, currentSid);
         localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now().toString());
-    } catch (_) { }
+    } catch (_) { /* storage quota exceeded — silently skip */ }
 }
 
-// ─── Signature wrapping (ported from event-handler-classic.js) ────────────────
-// Wraps raw backend HTML in a sentinel table so we can detect and strip it
-// reliably across both Classic Outlook and OWA. The top/bottom spacing divs
-// from the original event-handler.js are preserved inside the wrapper.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNATURE WRAPPING / STRIPPING
+// ─────────────────────────────────────────────────────────────────────────────
+
+// _wrapSignature
+// Wraps raw backend HTML in a CB_SIG sentinel table so we can detect and strip
+// it reliably across Classic Outlook and OWA.
+
 function _wrapSignature(html) {
     return (
-        "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:0;border-collapse:collapse;\">" +
+        "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"" +
+        " style=\"border:0;border-collapse:collapse;\">" +
         "<tr>" +
         "<td style=\"" + SENTINEL_TD_STYLE + "\">" + CB_SIG_START + "</td>" +
         "</tr>" +
@@ -112,10 +159,11 @@ function _wrapSignature(html) {
     );
 }
 
-// ─── Signature stripping (ported from event-handler-classic.js) ───────────────
+// stripSignatures
 // Removes ALL CardByte and native Outlook signature artifacts from a body HTML.
-// Uses a token-position walk instead of regex / DOMParser because Classic
-// Outlook's Trident engine rewrites table nesting unpredictably.
+// Uses a token-position walk (no DOMParser) — safe in Classic Outlook's Trident
+// environment where table nesting is rewritten unpredictably.
+
 function stripSignatures(html) {
     if (!html) return "";
 
@@ -126,7 +174,7 @@ function stripSignatures(html) {
     // 2. Legacy V1 plain-text markers
     html = html.replace(/__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi, "");
 
-    // 3. CB_SIG token-walk (current format) — handles double-insert edge case
+    // 3. CB_SIG token-walk — handles double-insert edge case, up to 10 passes
     let iterations = 0;
     const MAX_ITER = 10;
 
@@ -149,7 +197,7 @@ function stripSignatures(html) {
             html = html.substring(0, tableOpen) +
                 html.substring(tableClose + "</table>".length);
         } else {
-            // Fallback: excise everything between the tokens themselves
+            // Fallback: excise everything between the tokens
             html = html.substring(0, startIdx) +
                 html.substring(endIdx + CB_SIG_END.length);
         }
@@ -163,7 +211,10 @@ function stripSignatures(html) {
     return html;
 }
 
-// ─── Body helpers ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BODY HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
 
 function _getBodyAsync(item) {
     return new Promise((resolve, reject) => {
@@ -178,84 +229,65 @@ function _getBodyAsync(item) {
     });
 }
 
-// ─── Core write path ──────────────────────────────────────────────────────────
-//
-// writeSignatureAsync(item, wrappedHtml, forceReplace)
-//
-// PATH A — setSignatureAsync available AND html < 100 KB.
-//   Outlook manages the signature slot. We also issue a no-op
-//   setSelectedDataAsync("") afterwards to move the cursor to the top of the
-//   compose area, so the user's typing position is natural.
-//
-// PATH B — setSignatureAsync unavailable OR html >= 100 KB.
-//   1. Read current body via getAsync.
-//   2. Split at reply-chain boundary (reply / forward detection).
-//   3. Dedup guard: if CB_SIG tokens already present in compose area and
-//      forceReplace=false, bail early.
-//   4. Strip all previous signatures from the compose area only (quoted chain
-//      is intentionally left untouched).
-//   5. Concatenate: cleanCompose + wrappedHtml + chainArea.
-//   6. Write combined string via setSelectedDataAsync (only API available on
-//      paths that don't have setAsync, but here used for its replace-all
-//      semantics — we first clear with prependAsync("") to reset selection,
-//      then write via setSelectedDataAsync with the full body replacement).
-//
-// NOTE: setAsync is intentionally NOT used. The requirement is to use only
-// setSignatureAsync (PATH A) and setSelectedDataAsync (PATH B + cursor reset).
 
-// ─── Reply/Forward detection ──────────────────────────────────────────────────
-// Returns true if the current compose item is a reply or forward.
-// Used to decide whether to use boundary-aware PATH B instead of PATH A.
+// ─────────────────────────────────────────────────────────────────────────────
+// REPLY / FORWARD DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
 
 function isReplyOrForward(item) {
-    // Modern API: composeType is available in requirement set 1.10+
+    // Modern API: composeType available in requirement set 1.10+
     if (item?.composeType !== undefined) {
-        return item.composeType === Office.MailboxEnums.ComposeType.Reply ||
-            item.composeType === Office.MailboxEnums.ComposeType.Forward;
+        return (
+            item.composeType === Office.MailboxEnums.ComposeType.Reply ||
+            item.composeType === Office.MailboxEnums.ComposeType.Forward
+        );
     }
-    // Fallback: inReplyTo is set on replies/forwards but null on new mails
+    // Fallback: inReplyTo is set on replies/forwards, null on new mails
     if (item?.inReplyTo !== undefined) {
         return item.inReplyTo != null;
     }
-    return false; // assume new mail if we can't tell
+    return false;
 }
 
-// ─── Shared boundary-aware write ─────────────────────────────────────────────
-// Used by both PATH A (reply/forward) and PATH B.
-// Reads body → splits at reply chain → strips old sig from compose area →
-// re-injects wrappedHtml above chain → writes back via setSelectedDataAsync.
 
-async function _writeWithBoundaryAsync(item, wrappedHtml) {
-    let existingBody;
-    try {
-        existingBody = await _getBodyAsync(item);
-    } catch (err) {
-        console.error("[CardByte] _writeWithBoundaryAsync: getAsync failed", err);
-        return false;
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+// WRITE PATHS
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // Split at reply-chain boundary
-    let composeArea = existingBody;
-    let chainArea = "";
+// _splitAtBoundary
+// Splits a full body string at the reply-chain boundary.
+// Returns { composeArea, chainArea, patternUsed }.
+
+function _splitAtBoundary(fullBody) {
     for (let i = 0; i < REPLY_PATTERNS.length; i++) {
-        const m = REPLY_PATTERNS[i].exec(existingBody);
+        const m = REPLY_PATTERNS[i].exec(fullBody);
         if (m) {
-            composeArea = existingBody.substring(0, m.index);
-            chainArea = existingBody.substring(m.index);
-            console.log(`[CardByte] _writeWithBoundaryAsync: boundary=pattern[${i}] | composeLen=${composeArea.length} | chainLen=${chainArea.length}`);
-            break;
+            return {
+                composeArea: fullBody.substring(0, m.index),
+                chainArea: fullBody.substring(m.index),
+                patternUsed: `pattern[${i}]`,
+            };
         }
     }
+    return { composeArea: fullBody, chainArea: "", patternUsed: "none" };
+}
 
-    const cleanCompose = stripSignatures(composeArea);
-    const combined = cleanCompose + wrappedHtml + chainArea;
+// ─── _writeWithSelectedDataAsync ─────────────────────────────────────────────
+// Fallback path used only when setAsync is unavailable.
+// Less reliable for full-body replace in OWA reply context — setAsync is
+// always preferred. Classic Outlook uses _setBody (which wraps setAsync)
+// directly, so this path is mainly a safety net for edge-case builds.
 
-    console.log(`[CardByte] _writeWithBoundaryAsync: writing | ${(new Blob([combined]).size / 1024).toFixed(1)} KB`);
-
-    // Reset cursor to top before replace
+async function _writeWithSelectedDataAsync(item, combined) {
+    // prependAsync("") attempts cursor-to-top before the replace.
+    // Works on Desktop; ignored by OWA in reply context — hence setAsync preferred.
     await new Promise((resolve) => {
         if (typeof item.body.prependAsync !== "function") { resolve(); return; }
-        item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
+        item.body.prependAsync(
+            "",
+            { coercionType: Office.CoercionType.Text },
+            () => resolve()
+        );
     });
 
     return new Promise((resolve) => {
@@ -264,10 +296,10 @@ async function _writeWithBoundaryAsync(item, wrappedHtml) {
             { coercionType: Office.CoercionType.Html },
             (r) => {
                 if (r.status === Office.AsyncResultStatus.Succeeded) {
-                    console.log("[CardByte] _writeWithBoundaryAsync: write succeeded");
+                    console.log("[CardByte] _writeWithSelectedDataAsync: succeeded");
                     resolve(true);
                 } else {
-                    console.error("[CardByte] _writeWithBoundaryAsync: setSelectedDataAsync failed", r.error);
+                    console.error("[CardByte] _writeWithSelectedDataAsync: failed", r.error);
                     resolve(false);
                 }
             }
@@ -275,28 +307,136 @@ async function _writeWithBoundaryAsync(item, wrappedHtml) {
     });
 }
 
+// ─── _writeWithBoundaryAsync ──────────────────────────────────────────────────
+//
+// Core write path for PATH B (reply/forward and large HTML).
+//
+// STRATEGY:
+//   1. getAsync          — read full body HTML (CIDs preserved as opaque strings)
+//   2. _splitAtBoundary  — composeArea | chainArea
+//   3. stripSignatures   — clean compose area only; chainArea is untouched
+//   4. setAsync(full)    — atomic full-body replace:
+//                          cleanCompose + wrappedHtml + chainArea
+//                          CIDs survive: read from getAsync, written back verbatim
+//   5. setSelectedDataAsync("", Text) — cursor reset to top (best-effort, non-fatal)
+//
+// FALLBACK: if setAsync unavailable → _writeWithSelectedDataAsync(combined)
+
+async function _writeWithBoundaryAsync(item, wrappedHtml) {
+    // ── Step 1: Read full body ─────────────────────────────────────────────────
+    let existingBody;
+    try {
+        existingBody = await _getBodyAsync(item);
+    } catch (err) {
+        console.error("[CardByte] _writeWithBoundaryAsync: getAsync failed", err);
+        return false;
+    }
+
+    // ── Step 2: Split at reply-chain boundary ──────────────────────────────────
+    const { composeArea, chainArea, patternUsed } = _splitAtBoundary(existingBody);
+    console.log(
+        `[CardByte] _writeWithBoundaryAsync: boundary=${patternUsed}` +
+        ` | composeLen=${composeArea.length} | chainLen=${chainArea.length}`
+    );
+
+    // ── Step 3: Strip old signature from compose area only ─────────────────────
+    // chainArea is intentionally untouched — CIDs and quoted content live here.
+    const cleanCompose = stripSignatures(composeArea);
+
+    // ── Step 4: Assemble full replacement ──────────────────────────────────────
+    // cleanCompose + new signature + original chain (CIDs intact)
+    const combined = cleanCompose + wrappedHtml + chainArea;
+    const combinedKB = (new Blob([combined]).size / 1024).toFixed(1);
+    console.log(`[CardByte] _writeWithBoundaryAsync: writing ${combinedKB} KB via setAsync`);
+
+    const setAsyncAvailable = typeof item.body.setAsync === "function";
+    const setSelectedAvailable = typeof item.body.setSelectedDataAsync === "function";
+
+    // ── Step 5a: setAsync — true full-body replace ─────────────────────────────
+    if (setAsyncAvailable) {
+        const writeOk = await new Promise((resolve) => {
+            item.body.setAsync(
+                combined,
+                { coercionType: Office.CoercionType.Html },
+                (r) => {
+                    if (r.status === Office.AsyncResultStatus.Succeeded) {
+                        console.log("[CardByte] _writeWithBoundaryAsync: setAsync succeeded");
+                        resolve(true);
+                    } else {
+                        console.error("[CardByte] _writeWithBoundaryAsync: setAsync failed", r.error);
+                        resolve(false);
+                    }
+                }
+            );
+        });
+
+        if (!writeOk) {
+            // setAsync failed — fall through to setSelectedDataAsync
+            if (setSelectedAvailable) {
+                console.warn("[CardByte] _writeWithBoundaryAsync: setAsync failed — falling back to setSelectedDataAsync");
+                return await _writeWithSelectedDataAsync(item, combined);
+            }
+            return false;
+        }
+
+        // ── Step 5b: Cursor reset to top of compose area ───────────────────────
+        // After setAsync the cursor lands at position 0. A no-op
+        // setSelectedDataAsync(Text) confirms and locks it there so the user
+        // types above the signature. Best-effort — failure is non-fatal.
+        await new Promise((resolve) => {
+            if (!setSelectedAvailable) { resolve(); return; }
+            item.body.setSelectedDataAsync(
+                "",
+                { coercionType: Office.CoercionType.Text },
+                () => resolve()
+            );
+        });
+
+        console.log("[CardByte] _writeWithBoundaryAsync: cursor reset done");
+        return true;
+    }
+
+    // ── setAsync unavailable — direct fallback ─────────────────────────────────
+    console.warn("[CardByte] _writeWithBoundaryAsync: setAsync unavailable — using setSelectedDataAsync fallback");
+    return await _writeWithSelectedDataAsync(item, combined);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// writeSignatureAsync — orchestrates PATH A / PATH B
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// PATH A — setSignatureAsync, new mail, html < 100 KB
+//   Outlook manages the signature slot. Clears the slot first (avoids
+//   double-appending), then writes the new HTML, then resets cursor to top.
+//   Skipped entirely for reply/forward — setSignatureAsync places the sig
+//   BELOW the reply chain on OWA/modern Outlook.
+//
+// PATH B — _writeWithBoundaryAsync, reply/forward or large HTML
+//   Boundary-aware setAsync-based full-body replace (see above).
+
 async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
     const htmlSizeKB = new Blob([wrappedHtml]).size / 1024;
     const itemId = item.itemId || item.conversationId || "unknown";
     const replyOrForward = isReplyOrForward(item);
 
-    // ── PATH A — setSignatureAsync, new mail only ──────────────────────────────
-    // For reply/forward we skip PATH A entirely and use boundary-aware PATH B,
-    // because setSignatureAsync places the signature BELOW the reply chain on
-    // OWA and modern Outlook, not above it.
+    // ── PATH A — setSignatureAsync (new mail only) ─────────────────────────────
     if (
         typeof item.body.setSignatureAsync === "function" &&
         htmlSizeKB < 100 &&
-        !replyOrForward          // ← key gate
+        !replyOrForward
     ) {
-        console.log(`[CardByte] writeSignatureAsync PATH A (new mail) | ${htmlSizeKB.toFixed(1)} KB | forceReplace=${forceReplace}`);
+        console.log(
+            `[CardByte] writeSignatureAsync PATH A (new mail)` +
+            ` | ${htmlSizeKB.toFixed(1)} KB | forceReplace=${forceReplace}`
+        );
 
         if (!forceReplace && _insertedItems.has(itemId)) {
             console.log(`[CardByte] PATH A: already inserted for ${itemId} — skipping`);
             return true;
         }
 
-        // Clear slot first, then write
+        // Clear slot first to avoid double-appending on re-open
         await new Promise((resolve, reject) => {
             item.body.setSignatureAsync(
                 "",
@@ -328,13 +468,12 @@ async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
         return true;
     }
 
-    // ── PATH B — boundary-aware, used for reply/forward AND large HTML ─────────
-    console.log(`[CardByte] writeSignatureAsync PATH B (${replyOrForward ? "reply/forward" : "large HTML"}) | ${htmlSizeKB.toFixed(1)} KB | forceReplace=${forceReplace}`);
-
-    if (typeof item.body.setSelectedDataAsync !== "function") {
-        console.error("[CardByte] PATH B: setSelectedDataAsync unavailable");
-        return false;
-    }
+    // ── PATH B — boundary-aware (reply/forward or large HTML) ─────────────────
+    console.log(
+        `[CardByte] writeSignatureAsync PATH B` +
+        ` (${replyOrForward ? "reply/forward" : "large HTML"})` +
+        ` | ${htmlSizeKB.toFixed(1)} KB | forceReplace=${forceReplace}`
+    );
 
     if (!forceReplace && _insertedItems.has(itemId)) {
         console.log(`[CardByte] PATH B: already inserted for ${itemId} — skipping`);
@@ -344,12 +483,15 @@ async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
     const success = await _writeWithBoundaryAsync(item, wrappedHtml);
 
     if (success) {
-        // Verify tokens survived
+        // Post-write token verification
         try {
             const bodyAfter = await _getBodyAsync(item);
             const startOk = bodyAfter.indexOf(CB_SIG_START) !== -1;
             const endOk = bodyAfter.indexOf(CB_SIG_END) !== -1;
-            console.log(`[CardByte] PATH B: post-write verification | CB_SIG_START=${startOk} | CB_SIG_END=${endOk}`);
+            console.log(
+                `[CardByte] PATH B: post-write verification` +
+                ` | CB_SIG_START=${startOk} | CB_SIG_END=${endOk}`
+            );
             if (startOk && endOk) _insertedItems.add(itemId);
             return startOk && endOk;
         } catch (_) {
@@ -361,7 +503,10 @@ async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
     return false;
 }
 
-// ─── Platform detection ───────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLATFORM DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
 
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
@@ -370,8 +515,11 @@ function detectPlatform() {
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
 
-    if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android"))
-        return ua.includes("android") ? "mobile-android" : "mobile-ios";
+    if (
+        ua.includes("outlookmobile") ||
+        ua.includes("outlook-ios") ||
+        ua.includes("outlook-android")
+    ) return ua.includes("android") ? "mobile-android" : "mobile-ios";
 
     if (
         (platform === "officeonline" || platform === "web" || platform === "") &&
@@ -395,56 +543,78 @@ function isOWA() { return detectPlatform() === "owa"; }
 function isMac() { return detectPlatform() === "mac"; }
 
 Office.onReady(() => {
-    console.log("✅ Office.onReady is Started !");
+    console.log("✅ Office.onReady is Started!");
     console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
 });
 
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CRYPTO HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
 
 function base64ToArrayBuffer(base64) {
-    let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
-    const padding = base64Data.length % 4;
-    if (padding) base64Data += "=".repeat(4 - padding);
-    const binaryString = atob(base64Data);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+    let b64 = base64.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4;
+    if (pad) b64 += "=".repeat(4 - pad);
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return bytes.buffer;
 }
 
 function arrayBufferToBase64(buffer) {
     const bytes = new Uint8Array(buffer);
-    let binaryString = "";
-    for (let i = 0; i < bytes.length; i++) binaryString += String.fromCharCode(bytes[i]);
-    return btoa(binaryString);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
 }
 
 async function handleAesDecrypt(encryptedText, generatedKey) {
     try {
         if (!encryptedText) return "";
+
         const keyToUse = generatedKey || AES_KEY;
         let keyBuffer;
-        try { keyBuffer = base64ToArrayBuffer(keyToUse); }
-        catch (e) { console.error("Failed to decode key as base64:", e); return encryptedText; }
+        try {
+            keyBuffer = base64ToArrayBuffer(keyToUse);
+        } catch (e) {
+            console.error("Failed to decode key as base64:", e);
+            return encryptedText;
+        }
+
         if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
             if (generatedKey && generatedKey !== AES_KEY) return handleAesDecrypt(encryptedText, AES_KEY);
             return encryptedText;
         }
+
         const ivBuffer = base64ToArrayBuffer(AES_IV);
         if (ivBuffer.byteLength !== 16) return encryptedText;
-        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
+
+        const key = await crypto.subtle.importKey(
+            "raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]
+        );
+
         let encryptedBuffer;
-        try { encryptedBuffer = base64ToArrayBuffer(encryptedText); }
-        catch (e) { return encryptedText; }
+        try {
+            encryptedBuffer = base64ToArrayBuffer(encryptedText);
+        } catch (e) {
+            return encryptedText;
+        }
+
         if (encryptedBuffer.byteLength % 16 !== 0) {
             console.error(`Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes`);
             return encryptedText;
         }
-        const decryptedBuffer = await crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBuffer }, key, encryptedBuffer);
+
+        const decryptedBuffer = await crypto.subtle.decrypt(
+            { name: "AES-CBC", iv: ivBuffer }, key, encryptedBuffer
+        );
         return new TextDecoder().decode(decryptedBuffer);
+
     } catch (err) {
         if (generatedKey && generatedKey !== AES_KEY && err.message.includes("key data")) {
             try { return await handleAesDecrypt(encryptedText, AES_KEY); }
-            catch (e) { console.error("Fallback also failed:", e.message); }
+            catch (e) { console.error("Fallback decrypt also failed:", e.message); }
         }
         return encryptedText;
     }
@@ -452,24 +622,41 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
 
 async function encryptEmail(email = "") {
     try {
-        if (!email || email.trim() === "") { console.warn("Warning: Empty email provided"); return ""; }
+        if (!email || email.trim() === "") {
+            console.warn("Warning: Empty email provided");
+            return "";
+        }
+
         const keyBuffer = base64ToArrayBuffer(AES_KEY);
         const ivBuffer = base64ToArrayBuffer(AES_IV);
-        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) { console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`); return ""; }
-        if (ivBuffer.byteLength !== 16) { console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`); return ""; }
+
+        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
+            console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`);
+            return "";
+        }
+        if (ivBuffer.byteLength !== 16) {
+            console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`);
+            return "";
+        }
+
         const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
         const data = new TextEncoder().encode(email);
         const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
+
         const base64Result = arrayBufferToBase64(encrypted);
         try { atob(base64Result); } catch (e) { console.error("Result is NOT valid base64:", e); }
         return base64Result;
+
     } catch (err) {
         console.error("Encryption error:", err);
         return "";
     }
 }
 
-// ─── Backend fetch ────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BACKEND FETCH
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function renderSignatureOnServer(user) {
     const platform = Office.context.diagnostics.platform;
@@ -484,34 +671,41 @@ async function renderSignatureOnServer(user) {
         if (primaryRes.ok) {
             const data = await primaryRes.text();
             const decryptedData = await handleAesDecrypt(data);
-            console.log("Using NEW renderer");
+            console.log("[CardByte] Using NEW renderer");
             return JSON.parse(decryptedData)?.html || null;
         }
-        console.warn("Primary failed. Falling back to legacy...");
+        console.warn("[CardByte] Primary renderer failed. Falling back to legacy...");
     } catch (err) {
-        console.warn("Primary crashed. Falling back to legacy...", err);
+        console.warn("[CardByte] Primary renderer crashed. Falling back to legacy...", err);
     }
 
     try {
         const legacyRes = await fetch(
             "https://newqa-enterprise.cardbyte.ai/render-signature",
-            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email: user }),
+            }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
         const legacyData = await legacyRes.json();
-        console.log("Using LEGACY renderer", legacyData);
+        console.log("[CardByte] Using LEGACY renderer", legacyData);
         return legacyData?.finalHtml || null;
     } catch (legacyError) {
-        console.error("Both primary and legacy failed:", legacyError);
+        console.error("[CardByte] Both primary and legacy renderers failed:", legacyError);
         return null;
     }
 }
 
-// ─── Tampering detection ──────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TAMPERING DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
 //
-// Checks whether the CB_SIG tokens are still present in the compose body.
-// Returns true if the signature is intact, false if it has been tampered with
-// or is missing entirely. Used by onSendHandler to decide whether to re-apply.
+// Checks whether CB_SIG tokens are still present in the compose body.
+// Returns true if intact; false if stripped or absent.
+// Used by onSendHandler to decide whether to re-apply.
 
 async function isSignatureIntact(item) {
     try {
@@ -521,30 +715,37 @@ async function isSignatureIntact(item) {
         console.log(`[CardByte] isSignatureIntact: CB_SIG_START=${startOk} | CB_SIG_END=${endOk}`);
         return startOk && endOk;
     } catch (err) {
+        // Fail open — don't block send on a read error
         console.warn("[CardByte] isSignatureIntact: getAsync failed — assuming intact", err);
-        return true; // Fail open: don't block send on a read error
+        return true;
     }
 }
 
-// ─── Core apply flow ──────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORE APPLY FLOW
+// ─────────────────────────────────────────────────────────────────────────────
 //
-// _applySignatureCore orchestrates:
+// _applySignatureCore
 //   1. Fetch raw HTML from backend (with retry), or fall back to cache / stale cache.
 //   2. Wrap the raw HTML in CB_SIG sentinel tokens via _wrapSignature().
 //   3. Cache the WRAPPED version so both compose and send paths share it.
-//   4. Delegate writing to writeSignatureAsync() which handles PATH A / PATH B,
-//      reply-chain splitting, dedup guard, and cursor reset.
+//   4. Delegate writing to writeSignatureAsync() → PATH A or PATH B.
 //
 // forceReplace=true skips the dedup guard — used by onSendHandler and
-// onFromChanged to unconditionally replace a stale / tampered signature.
+// onFromChanged to unconditionally replace a stale or tampered signature.
 
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, forceReplace = false } = {}) {
+async function _applySignatureCore(
+    item,
+    mailbox,
+    { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, forceReplace = false } = {}
+) {
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
 
     let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
 
-    // ── Fetch from backend if cache miss ─────────────────────────────────────
+    // ── Fetch from backend if cache miss ──────────────────────────────────────
     if (fetchIfMissing && userEmail && fetched == null) {
         const MAX_RETRIES = 2;
         let attempt = 0;
@@ -558,7 +759,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
                 }
                 const result = await renderSignatureOnServer(userEmail);
                 if (result != null) {
-                    // Wrap BEFORE caching so every write path receives a sentinel-wrapped blob
+                    // Wrap BEFORE caching — every write path receives a sentinel-wrapped blob
                     fetched = _wrapSignature(result);
                     CACHED_SIGNATURE_HTML = fetched;
                     setCachedSignature(fetched);
@@ -573,20 +774,20 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
 
         if (fetched == null) {
-            console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
+            console.error(
+                `[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError
+            );
         }
     }
 
     // ── Fallback chain ────────────────────────────────────────────────────────
     if (!fetched) {
-        // Last-ditch: stale cache (bypass both session and TTL checks)
         const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (staleCache) {
             console.warn("[CardByte] Using stale cached signature as last resort.");
             fetched = staleCache;
         } else {
             console.warn("[CardByte] No signature available — using fallback identity signature.");
-            // Wrap the fallback so it carries the sentinel tokens too
             const fallbackHtml = `
                 <table cellpadding="0" cellspacing="0" border="0" width="400">
                   <tr>
@@ -601,16 +802,24 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    console.log(`[CardByte] _applySignatureCore: writing signature | forceReplace=${forceReplace} | sizeKB=${(new Blob([fetched]).size / 1024).toFixed(1)}`);
+    console.log(
+        `[CardByte] _applySignatureCore: writing signature` +
+        ` | forceReplace=${forceReplace}` +
+        ` | sizeKB=${(new Blob([fetched]).size / 1024).toFixed(1)}`
+    );
 
     await writeSignatureAsync(item, fetched, forceReplace);
 }
 
-// ─── Public event handlers ────────────────────────────────────────────────────
 
-// applySignature — fires on NewMail / Reply / ReplyAll / Forward compose open.
-// Uses dedup guard (forceReplace=false) so a user who edited and re-opened
-// won't have their edits wiped.
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC EVENT HANDLERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// applySignature
+// Fires on NewMail / Reply / ReplyAll / Forward compose open.
+// forceReplace=false — dedup guard prevents wiping user edits on re-open.
+
 window.applySignature = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
@@ -624,12 +833,19 @@ window.applySignature = async function (event = { completed: () => { } }) {
     }
 };
 
-// onSendHandler — fires just before the email is sent.
-// Checks whether the CB_SIG tokens are still present in the body. If the
-// signature has been tampered with (tokens stripped by user or another add-in),
-// it re-applies from cache with forceReplace=true before allowing the send.
-// The send is ALWAYS allowed (allowEvent: true) — signature re-apply is
-// best-effort and must not block the user.
+// onSendHandler
+// Fires just before the email is sent.
+//
+// Boundary-aware check-first pattern:
+//   1. Read full body → split at reply boundary
+//   2. Check whether CB_SIG tokens are present in composeArea (above chain)
+//   3. If YES  → signature intact, skip body write entirely
+//   4. If NO   → strip any stray sigs from both halves, re-inject above chain
+//                setAsync(cleanCompose + sig + cleanChain)
+//
+// The send is ALWAYS allowed (allowEvent: true).
+// Signature re-apply is best-effort and must never block the user.
+
 window.onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
@@ -643,9 +859,53 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
             return;
         }
 
-        // Always boundary-aware at send time — covers both new mail and reply/forward
-        console.log("[CardByte] onSendHandler: re-applying signature with boundary awareness");
-        await _writeWithBoundaryAsync(item, cachedHtml);
+        // ── Read and split ─────────────────────────────────────────────────────
+        let fullBody;
+        try {
+            fullBody = await _getBodyAsync(item);
+        } catch (err) {
+            console.error("[CardByte] onSendHandler: getAsync failed — passing through", err);
+            return;
+        }
+
+        const { composeArea, chainArea, patternUsed } = _splitAtBoundary(fullBody);
+        console.log(
+            `[CardByte] onSendHandler: boundary=${patternUsed}` +
+            ` | composeLen=${composeArea.length} | chainLen=${chainArea.length}`
+        );
+
+        // ── Check-first: is signature already above the chain? ─────────────────
+        const sigInComposeArea =
+            composeArea.indexOf(CB_SIG_START) !== -1 &&
+            composeArea.indexOf(CB_SIG_END) !== -1;
+
+        if (sigInComposeArea) {
+            console.log("[CardByte] onSendHandler: signature intact above chain — skipping write");
+            return;
+        }
+
+        // ── Signature missing or below chain — rebuild ─────────────────────────
+        console.warn("[CardByte] onSendHandler: signature not in compose area — re-inserting");
+
+        const cleanCompose = stripSignatures(composeArea);
+        const cleanChain = stripSignatures(chainArea);   // strip any stray sig below boundary
+        const combined = cleanCompose + cachedHtml + cleanChain;
+
+        await new Promise((resolve) => {
+            item.body.setAsync(
+                combined,
+                { coercionType: Office.CoercionType.Html },
+                (r) => {
+                    if (r.status === Office.AsyncResultStatus.Succeeded) {
+                        console.log("[CardByte] onSendHandler: re-inject succeeded");
+                    } else {
+                        console.error("[CardByte] onSendHandler: re-inject failed", r.error);
+                    }
+                    resolve();
+                }
+            );
+        });
+
         console.log("[CardByte] onSendHandler: done");
 
     } catch (err) {
@@ -655,7 +915,10 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     }
 };
 
-// ─── Handler registration ─────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HANDLER REGISTRATION
+// ─────────────────────────────────────────────────────────────────────────────
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("onSendHandler", onSendHandler);
@@ -666,5 +929,8 @@ if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("applySignature", applySignature);
     console.log("[CardByte] Office.actions.associate registered: applySignature");
 } else {
-    console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
+    console.log(
+        "[CardByte] Office.actions not available — LaunchEvent path not active" +
+        " (expected on Classic Outlook 2016/2019)"
+    );
 }
