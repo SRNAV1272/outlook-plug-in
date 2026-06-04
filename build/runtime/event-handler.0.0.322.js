@@ -226,16 +226,9 @@ const CB_SIG_END = "__CBSIG_END_7F2C9D4E__"
 
 function _wrapSignature(html) {
     return (
-        "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:0;border-collapse:collapse;\">"
-        + "<tr>"
-        + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
         + "<p>&ensp;</p>"
-        + "</td>"
-        + "<tr>"
-        + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
         + "<p>&ensp;</p>"
-        + "</td>"
-        + "</tr>"
+        + "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:0;border-collapse:collapse;\">"
         + "</tr>"
         + "<tr>"
         + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
