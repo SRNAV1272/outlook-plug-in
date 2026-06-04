@@ -220,6 +220,10 @@ var SENTINEL_TD_STYLE =
     "font-size:0px;color:#ffffff;line-height:0;max-height:0;"
     + "overflow:hidden;mso-hide:all;display:none;width:0;";
 
+
+const CB_SIG_START = "__CBSIG_START_7F2C9D4E__"
+const CB_SIG_END = "__CBSIG_END_7F2C9D4E__"
+
 function _wrapSignature(html) {
     return (
         "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:0;border-collapse:collapse;\">"
@@ -235,7 +239,7 @@ function _wrapSignature(html) {
         + "</tr>"
         + "<tr>"
         + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
-        + CONFIG.CB_SIG_START
+        + CB_SIG_START
         + "</td>"
         + "</tr>"
         + "<tr>"
@@ -245,7 +249,7 @@ function _wrapSignature(html) {
         + "</tr>"
         + "<tr>"
         + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
-        + CONFIG.CB_SIG_END
+        + CB_SIG_END
         + "</td>"
         + "</tr>"
         + "</table>"
