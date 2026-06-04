@@ -203,155 +203,162 @@ function _getBodyAsync(item) {
 // NOTE: setAsync is intentionally NOT used. The requirement is to use only
 // setSignatureAsync (PATH A) and setSelectedDataAsync (PATH B + cursor reset).
 
-async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
-    const htmlSizeKB = new Blob([wrappedHtml]).size / 1024;
+// ─── Reply/Forward detection ──────────────────────────────────────────────────
+// Returns true if the current compose item is a reply or forward.
+// Used to decide whether to use boundary-aware PATH B instead of PATH A.
 
-    // ── Shared itemId for dedup tracking (both paths) ─────────────────────────
-    const itemId = item.itemId || item.conversationId || "unknown";
-
-    await new Promise((resolve, reject) => {
-        item.body.setSignatureAsync(
-            "",
-            { coercionType: Office.CoercionType.Html },
-            (r) => {
-                if (r.status === Office.AsyncResultStatus.Succeeded) resolve();
-                else reject(r.error);
-            }
-        );
-    });
-
-    // ── PATH A ────────────────────────────────────────────────────────────────
-    if (typeof item.body.setSignatureAsync === "function" && htmlSizeKB < 100) {
-        console.log(`[CardByte] writeSignatureAsync PATH A | ${htmlSizeKB.toFixed(1)} KB | forceReplace=${forceReplace}`);
-
-        if (!forceReplace && _insertedItems.has(itemId)) {
-            console.log(`[CardByte] writeSignatureAsync PATH A: already inserted for item ${itemId} — skipping`);
-            return true;
-        }
-
-        await new Promise((resolve, reject) => {
-            item.body.setSignatureAsync(
-                wrappedHtml,
-                { coercionType: Office.CoercionType.Html },
-                (r) => {
-                    if (r.status === Office.AsyncResultStatus.Succeeded) resolve();
-                    else reject(r.error);
-                }
-            );
-        });
-
-        // Move cursor to top of compose area so the user types above the signature.
-        // setSignatureAsync places the signature at the bottom but leaves the
-        // cursor wherever Outlook wants — a no-op setSelectedDataAsync("") at
-        // CoercionType.Text resets the selection to the top of the body.
-        await new Promise((resolve) => {
-            if (typeof item.body.setSelectedDataAsync !== "function") { resolve(); return; }
-            item.body.setSelectedDataAsync(
-                "",
-                { coercionType: Office.CoercionType.Text },
-                () => resolve()   // ignore errors — cursor move is best-effort
-            );
-        });
-
-        console.log("[CardByte] writeSignatureAsync PATH A succeeded");
-        _insertedItems.add(itemId);
-        return true;
+function isReplyOrForward(item) {
+    // Modern API: composeType is available in requirement set 1.10+
+    if (item?.composeType !== undefined) {
+        return item.composeType === Office.MailboxEnums.ComposeType.Reply ||
+            item.composeType === Office.MailboxEnums.ComposeType.Forward;
     }
-
-    // ── PATH B ────────────────────────────────────────────────────────────────
-    console.log(`[CardByte] writeSignatureAsync PATH B | ${htmlSizeKB.toFixed(1)} KB | forceReplace=${forceReplace}`);
-
-    if (typeof item.body.setSelectedDataAsync !== "function") {
-        console.error("[CardByte] writeSignatureAsync PATH B: setSelectedDataAsync unavailable");
-        return false;
+    // Fallback: inReplyTo is set on replies/forwards but null on new mails
+    if (item?.inReplyTo !== undefined) {
+        return item.inReplyTo != null;
     }
+    return false; // assume new mail if we can't tell
+}
 
-    // Step 1: Read the current body
+// ─── Shared boundary-aware write ─────────────────────────────────────────────
+// Used by both PATH A (reply/forward) and PATH B.
+// Reads body → splits at reply chain → strips old sig from compose area →
+// re-injects wrappedHtml above chain → writes back via setSelectedDataAsync.
+
+async function _writeWithBoundaryAsync(item, wrappedHtml) {
     let existingBody;
     try {
         existingBody = await _getBodyAsync(item);
     } catch (err) {
-        console.error("[CardByte] writeSignatureAsync PATH B: getAsync failed", err);
+        console.error("[CardByte] _writeWithBoundaryAsync: getAsync failed", err);
         return false;
     }
 
-    // Step 2: Split at reply-chain boundary
+    // Split at reply-chain boundary
     let composeArea = existingBody;
     let chainArea = "";
-    let patternUsed = "none";
-
     for (let i = 0; i < REPLY_PATTERNS.length; i++) {
         const m = REPLY_PATTERNS[i].exec(existingBody);
         if (m) {
             composeArea = existingBody.substring(0, m.index);
             chainArea = existingBody.substring(m.index);
-            patternUsed = `pattern[${i}]`;
+            console.log(`[CardByte] _writeWithBoundaryAsync: boundary=pattern[${i}] | composeLen=${composeArea.length} | chainLen=${chainArea.length}`);
             break;
         }
     }
-    console.log(`[CardByte] writeSignatureAsync PATH B: reply boundary=${patternUsed} | composeLen=${composeArea.length} | chainLen=${chainArea.length}`);
 
-    // Step 3: Dedup guard — item-ID based, not body-token based.
-    // Body-token check false-positives on replies where the quoted original
-    // email already carries CB_SIG tokens from the previous send.
-
-    if (!forceReplace && _insertedItems.has(itemId)) {
-        console.log(`[CardByte] writeSignatureAsync PATH B: already inserted for item ${itemId} — skipping`);
-        return true;
-    }
-
-    // Step 4: Strip previous signatures from compose area only
     const cleanCompose = stripSignatures(composeArea);
-    console.log(`[CardByte] writeSignatureAsync PATH B: cleanCompose=${cleanCompose.length} chars (was ${composeArea.length})`);
-
-    // Step 5: Assemble full replacement body
     const combined = cleanCompose + wrappedHtml + chainArea;
-    console.log(`[CardByte] writeSignatureAsync PATH B: writing combined body | ${(new Blob([combined]).size / 1024).toFixed(1)} KB`);
 
-    // Step 6: Write via setSelectedDataAsync.
-    // We must first select-all so that setSelectedDataAsync replaces the entire
-    // body. We achieve this by calling prependAsync("") to reset the cursor to
-    // the very beginning, which makes the subsequent setSelectedDataAsync
-    // effectively replace everything from that point to the end — but that
-    // would only insert, not replace. Instead we use the documented approach:
-    // call setSelectedDataAsync with the FULL body after ensuring the selection
-    // spans the whole document by first invoking body.getAsync and then writing
-    // back. In practice, calling setSelectedDataAsync with the full body HTML
-    // on an Office.CoercionType.Html coercion replaces the entire body when the
-    // cursor is at position 0 (top). We move to position 0 first via a no-op
-    // prependAsync("").
+    console.log(`[CardByte] _writeWithBoundaryAsync: writing | ${(new Blob([combined]).size / 1024).toFixed(1)} KB`);
+
+    // Reset cursor to top before replace
     await new Promise((resolve) => {
         if (typeof item.body.prependAsync !== "function") { resolve(); return; }
         item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
     });
 
-    const success = await new Promise((resolve) => {
+    return new Promise((resolve) => {
         item.body.setSelectedDataAsync(
             combined,
             { coercionType: Office.CoercionType.Html },
             (r) => {
-                if (r.status === Office.AsyncResultStatus.Succeeded) resolve(true);
-                else {
-                    console.error("[CardByte] writeSignatureAsync PATH B: setSelectedDataAsync failed", r.error);
+                if (r.status === Office.AsyncResultStatus.Succeeded) {
+                    console.log("[CardByte] _writeWithBoundaryAsync: write succeeded");
+                    resolve(true);
+                } else {
+                    console.error("[CardByte] _writeWithBoundaryAsync: setSelectedDataAsync failed", r.error);
                     resolve(false);
                 }
             }
         );
     });
+}
 
-    // Verify tokens survived the write
-    try {
-        const bodyAfter = await _getBodyAsync(item);
-        const startOk = bodyAfter.indexOf(CB_SIG_START) !== -1;
-        const endOk = bodyAfter.indexOf(CB_SIG_END) !== -1;
-        console.log(`[CardByte] writeSignatureAsync PATH B: post-write verification | CB_SIG_START=${startOk} | CB_SIG_END=${endOk} | bodyLen=${bodyAfter.length}`);
-        if (startOk && endOk) _insertedItems.add(itemId);
-        return startOk && endOk;
-    } catch (_) {
-        // Verification read failure is non-fatal — trust the write result
-        if (success) _insertedItems.add(itemId);
-        return success;
+async function writeSignatureAsync(item, wrappedHtml, forceReplace = false) {
+    const htmlSizeKB = new Blob([wrappedHtml]).size / 1024;
+    const itemId = item.itemId || item.conversationId || "unknown";
+    const replyOrForward = isReplyOrForward(item);
+
+    // ── PATH A — setSignatureAsync, new mail only ──────────────────────────────
+    // For reply/forward we skip PATH A entirely and use boundary-aware PATH B,
+    // because setSignatureAsync places the signature BELOW the reply chain on
+    // OWA and modern Outlook, not above it.
+    if (
+        typeof item.body.setSignatureAsync === "function" &&
+        htmlSizeKB < 100 &&
+        !replyOrForward          // ← key gate
+    ) {
+        console.log(`[CardByte] writeSignatureAsync PATH A (new mail) | ${htmlSizeKB.toFixed(1)} KB | forceReplace=${forceReplace}`);
+
+        if (!forceReplace && _insertedItems.has(itemId)) {
+            console.log(`[CardByte] PATH A: already inserted for ${itemId} — skipping`);
+            return true;
+        }
+
+        // Clear slot first, then write
+        await new Promise((resolve, reject) => {
+            item.body.setSignatureAsync(
+                "",
+                { coercionType: Office.CoercionType.Html },
+                (r) => r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error)
+            );
+        });
+
+        await new Promise((resolve, reject) => {
+            item.body.setSignatureAsync(
+                wrappedHtml,
+                { coercionType: Office.CoercionType.Html },
+                (r) => r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error)
+            );
+        });
+
+        // Cursor to top of compose area
+        await new Promise((resolve) => {
+            if (typeof item.body.setSelectedDataAsync !== "function") { resolve(); return; }
+            item.body.setSelectedDataAsync(
+                "",
+                { coercionType: Office.CoercionType.Text },
+                () => resolve()
+            );
+        });
+
+        console.log("[CardByte] PATH A succeeded");
+        _insertedItems.add(itemId);
+        return true;
     }
+
+    // ── PATH B — boundary-aware, used for reply/forward AND large HTML ─────────
+    console.log(`[CardByte] writeSignatureAsync PATH B (${replyOrForward ? "reply/forward" : "large HTML"}) | ${htmlSizeKB.toFixed(1)} KB | forceReplace=${forceReplace}`);
+
+    if (typeof item.body.setSelectedDataAsync !== "function") {
+        console.error("[CardByte] PATH B: setSelectedDataAsync unavailable");
+        return false;
+    }
+
+    if (!forceReplace && _insertedItems.has(itemId)) {
+        console.log(`[CardByte] PATH B: already inserted for ${itemId} — skipping`);
+        return true;
+    }
+
+    const success = await _writeWithBoundaryAsync(item, wrappedHtml);
+
+    if (success) {
+        // Verify tokens survived
+        try {
+            const bodyAfter = await _getBodyAsync(item);
+            const startOk = bodyAfter.indexOf(CB_SIG_START) !== -1;
+            const endOk = bodyAfter.indexOf(CB_SIG_END) !== -1;
+            console.log(`[CardByte] PATH B: post-write verification | CB_SIG_START=${startOk} | CB_SIG_END=${endOk}`);
+            if (startOk && endOk) _insertedItems.add(itemId);
+            return startOk && endOk;
+        } catch (_) {
+            _insertedItems.add(itemId);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 // ─── Platform detection ───────────────────────────────────────────────────────
@@ -630,31 +637,20 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
     try {
         if (!item) return;
 
-        // skipSessionCheck=true: onSendHandler may run in a separate iframe
-        // (modern Outlook) where sessionStorage is fresh and wouldn't match
-        // the session ID stored by applySignature's iframe.
         const cachedHtml = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-
         if (!cachedHtml) {
             console.log("[CardByte] onSendHandler: no cached signature — passing through");
             return;
         }
 
-        // const intact = await isSignatureIntact(item);
-        // if (intact) {
-        //     console.log("[CardByte] onSendHandler: signature intact — no action needed");
-        //     return;
-        // }
-
-        console.warn("[CardByte] onSendHandler: signature tampered / missing — re-applying");
-        // forceReplace=true: bypass dedup guard and strip-then-rewrite
-        await writeSignatureAsync(item, cachedHtml, true /* forceReplace */);
-        console.log("[CardByte] onSendHandler: signature re-applied");
+        // Always boundary-aware at send time — covers both new mail and reply/forward
+        console.log("[CardByte] onSendHandler: re-applying signature with boundary awareness");
+        await _writeWithBoundaryAsync(item, cachedHtml);
+        console.log("[CardByte] onSendHandler: done");
 
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
-        // Always allow the send — signature enforcement must not block the user
         event.completed({ allowEvent: true });
     }
 };
