@@ -310,7 +310,7 @@ async function applySignatureWithFallback(item, html, send = false) {
     // Send time: read current body → append signature → setSelectedDataAsync
     try {
         const currentBody = await bodyGetAsync(item);
-        const combined = currentBody + html;
+        const combined = html;
         await bodySetSelectedDataAsync(item, combined);
         removeHeavySignatureNotification(item);
         console.log("[CardByte] Heavy signature inserted at send time via setSelectedDataAsync.");
