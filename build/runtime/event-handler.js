@@ -276,6 +276,15 @@ function bodySetSelectedDataAsync(item, html) {
  * Returns true  if the signature was injected now.
  * Returns false if it was deferred (heavy path).
  */
+function bodyGetAsync(item) {
+    return new Promise((resolve, reject) => {
+        if (typeof item.body.getAsync !== "function") { reject(new Error("getAsync not available")); return; }
+        item.body.getAsync(Office.CoercionType.Html, (r) => {
+            if (r.status === Office.AsyncResultStatus.Succeeded) resolve(r.value); else reject(r.error);
+        });
+    });
+}
+
 async function applySignatureWithFallback(item, html, send = false) {
     const HEAVY_THRESHOLD = 100 * 1024; // 100 KB
     const htmlSize = new Blob([html]).size;
@@ -283,24 +292,33 @@ async function applySignatureWithFallback(item, html, send = false) {
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
 
     if (htmlSize < HEAVY_THRESHOLD) {
-        // ── Light path: inject immediately ──────────────────────────────────
-        removeHeavySignatureNotification(item); // clear any stale advisory
+        // ── Light path: inject immediately via setSignatureAsync ─────────────
+        removeHeavySignatureNotification(item);
         await bodySetSignatureAsync(item, html);
         return true;
     }
 
-    // ── Heavy path: defer to send time, show advisory bar ──────────────────
-    console.warn(
-        `[CardByte] Signature size ${htmlSize} bytes exceeds 100 KB threshold — deferring to send time.`
-    );
+    // ── Heavy path ───────────────────────────────────────────────────────────
+    console.warn(`[CardByte] Signature size ${htmlSize} bytes exceeds 100 KB — heavy path (send=${send}).`);
 
-    if (send) {
-        // Clear any previously injected signature so the compose body stays clean
-        try { await bodySetSelectedDataAsync(item, ""); } catch (_) { }
+    if (!send) {
+        // Compose open: just show the notification bar, don't touch the body
+        showHeavySignatureNotification(item);
+        return false;
     }
 
-    !send && showHeavySignatureNotification(item);
-    return false;
+    // Send time: read current body → append signature → setSelectedDataAsync
+    try {
+        const currentBody = await bodyGetAsync(item);
+        const combined = currentBody + html;
+        await bodySetSelectedDataAsync(item, combined);
+        removeHeavySignatureNotification(item);
+        console.log("[CardByte] Heavy signature inserted at send time via setSelectedDataAsync.");
+        return true;
+    } catch (err) {
+        console.error("[CardByte] Heavy path send-time insertion failed:", err);
+        return false;
+    }
 }
 
 function moveCursorToTop(item) {

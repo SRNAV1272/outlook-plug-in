@@ -7397,14 +7397,10 @@ function onSendHandler(event) {
         _diag.info("onSendHandler: writing cached signature ("
             + cachedHtml.length + " chars) | forceReplace=true");
 
-        // ↓↓↓ ADD THIS LINE ↓↓↓
-        var cleanHtml = _unwrapSignature(cachedHtml);
-        // ↑↑↑ ADD THIS LINE ↑↑↑
-
         // forceReplace=true — unconditionally replace any stale / native sig
         // that Outlook re-injected between compose and send.
         // cachedHtml is already _wrapSignature()'d.
-        writeSignature(item, cleanHtml, function (ok) {
+        writeSignature(item, cachedHtml, function (ok) {
             if (!ok) _diag.warn("onSendHandler: writeSignature failed");
             writeDiagnostics(item, function () {
                 guarded.completed({ allowEvent: true });
