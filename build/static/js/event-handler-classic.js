@@ -7105,104 +7105,6 @@ function writeSignature(item, html, onDone, forceReplace) {
         });
     }
 
-    // function step_stripAndInsert(existingBody) {
-    //     // ── Dedup guard ───────────────────────────────────────────────────────
-    //     var sigPresent =
-    //         existingBody.indexOf(CONFIG.CB_SIG_START) !== -1 &&
-    //         existingBody.indexOf(CONFIG.CB_SIG_END)   !== -1;
-
-    //     if (!forceReplace && sigPresent) {
-    //         _diag.info("step_stripAndInsert: signature already present"
-    //             + " + forceReplace=false — skipping insert");
-    //         onDone(true);
-    //         return;
-    //     }
-
-    //     // ── Strip all previous signatures ─────────────────────────────────────
-    //     var cleanBody = stripSignatures(existingBody);
-    //     _diag.info("step_stripAndInsert: cleanBody=" + cleanBody.length
-    //         + " chars (was " + existingBody.length + ")");
-
-    //     // ── Locate reply chain boundary ───────────────────────────────────────
-    //     // Classic Outlook 2016/2019 (Trident/Word engine) does NOT use
-    //     // divRplyFwdMsg. It emits a borderless outer <div> wrapping an inner
-    //     // <div> with a top-border style as the visual separator before the
-    //     // "From / Sent / To / Subject" header block:
-    //     //
-    //     //   <div><div style='border:none;border-top:solid #E1E1E1 1.0pt;...'>
-    //     //
-    //     // We split at the OUTER <div> so the entire separator + quoted chain
-    //     // stays in chainArea. For OWA / modern Outlook we keep divRplyFwdMsg
-    //     // and divTaggedContent as fallbacks. blockquote is the last resort.
-    //     //
-    //     // If none match (new compose), chainArea stays "" and the signature
-    //     // appends at the end — correct behaviour for new emails.
-    //     var REPLY_PATTERNS = [
-    //         // Classic Outlook 2016/2019 — outer div wrapping the border-top separator
-    //         // Matches: <div><div style='border:none;border-top:solid
-    //         /(<div>\s*<div[^>]+border-top\s*:\s*solid[^>]*>)/i,
-    //         // Broader fallback: any div whose style contains border-top:solid
-    //         /(<div[^>]+style\s*=\s*["'][^"']*border-top\s*:\s*solid[^"']*["'][^>]*>)/i,
-    //         // OWA / modern Outlook reply wrapper divs
-    //         /(<div[^>]+\bid=["']divRplyFwdMsg["'][^>]*>)/i,
-    //         /(<div[^>]+\bid=["']divTaggedContent["'][^>]*>)/i,
-    //         // Generic blockquote last resort
-    //         /(<blockquote[^>]*>)/i
-    //     ];
-
-    //     var composeArea  = cleanBody;
-    //     var chainArea    = "";
-    //     var patternUsed  = "none";
-
-    //     for (var pi = 0; pi < REPLY_PATTERNS.length; pi++) {
-    //         var m = REPLY_PATTERNS[pi].exec(cleanBody);
-    //         if (m) {
-    //             var splitAt = m.index;
-    //             composeArea = cleanBody.substring(0, splitAt);
-    //             chainArea   = cleanBody.substring(splitAt);
-    //             patternUsed = "pattern[" + pi + "] match=" + m[0].substring(0, 60);
-    //             break;
-    //         }
-    //     }
-
-    //     _diag.info("step_stripAndInsert: reply boundary"
-    //         + " | pattern=" + patternUsed
-    //         + " | composeLen=" + composeArea.length
-    //         + " | chainLen=" + chainArea.length);
-
-    //     // ── Assemble: composeArea + signature + quoted chain ──────────────────
-    //     // One setAsync call — no cursor state to reason about.
-    //     var combined    = composeArea + html + chainArea;
-    //     var combinedKB  = byteKB(combined).toFixed(1);
-    //     _diag.info("step_stripAndInsert: writing combined body+sig | " + combinedKB + " KB");
-
-    //     _setBody(item, combined, function (err) {
-    //         if (err) {
-    //             _diag.error("step_stripAndInsert: setBody (combined) failed: "
-    //                 + JSON.stringify(err));
-    //             onDone(false);
-    //             return;
-    //         }
-    //         _diag.info("step_stripAndInsert: setBody OK");
-
-    //         // ── Verify tokens survived the write ─────────────────────────────
-    //         _getBody(item, function (bodyAfter, err2) {
-    //             if (err2) {
-    //                 _diag.warn("step_stripAndInsert: verification read failed — assuming success");
-    //                 onDone(true);
-    //                 return;
-    //             }
-    //             var startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
-    //             var endOk   = bodyAfter.indexOf(CONFIG.CB_SIG_END)   !== -1;
-    //             _diag.info("step_stripAndInsert: post-write verification"
-    //                 + " | bodyLen=" + bodyAfter.length
-    //                 + " | CB_SIG_START=" + startOk
-    //                 + " | CB_SIG_END=" + endOk);
-    //             _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " ===");
-    //             onDone(startOk && endOk);
-    //         });
-    //     });
-    // }
     function step_stripAndInsert(existingBody) {
 
         // ── Locate reply chain boundary FIRST ────────────────────────────────────
@@ -7495,10 +7397,14 @@ function onSendHandler(event) {
         _diag.info("onSendHandler: writing cached signature ("
             + cachedHtml.length + " chars) | forceReplace=true");
 
+        // ↓↓↓ ADD THIS LINE ↓↓↓
+        var cleanHtml = _unwrapSignature(cachedHtml);
+        // ↑↑↑ ADD THIS LINE ↑↑↑
+
         // forceReplace=true — unconditionally replace any stale / native sig
         // that Outlook re-injected between compose and send.
         // cachedHtml is already _wrapSignature()'d.
-        writeSignature(item, cachedHtml, function (ok) {
+        writeSignature(item, cleanHtml, function (ok) {
             if (!ok) _diag.warn("onSendHandler: writeSignature failed");
             writeDiagnostics(item, function () {
                 guarded.completed({ allowEvent: true });

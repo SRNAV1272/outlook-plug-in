@@ -1,7 +1,7 @@
 let CACHED_SIGNATURE_HTML = null;
-const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
+
 // ─── Session-based cache buster ───────────────────────────────────────────────
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
@@ -18,12 +18,7 @@ function getOrCreateSessionId() {
     return sid;
 }
 
-// FIX: Added skipSessionCheck option so onSendHandler (which runs in a separate
-// iframe/JS context with a fresh sessionStorage) can still read the cached
-// signature that was stored by applySignature in the compose iframe.
-
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-    // If skipping session check, just return whatever is in cache directly
     if (skipSessionCheck) {
         return localStorage.getItem(CACHE_KEY);
     }
@@ -216,38 +211,44 @@ async function renderSignatureOnServer(user) {
     }
 }
 
-var SENTINEL_TD_STYLE =
-    "font-size:0px;color:#ffffff;line-height:0;max-height:0;"
-    + "overflow:hidden;mso-hide:all;display:none;width:0;";
+// ─── Notification helpers ─────────────────────────────────────────────────────
 
+const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
 
-const CB_SIG_START = "__CBSIG_START_7F2C9D4E__"
-const CB_SIG_END = "__CBSIG_END_7F2C9D4E__"
-
-function _wrapSignature(html) {
-    return (
-        + "<p>&ensp;</p>"
-        + "<p>&ensp;</p>"
-        + "<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:0;border-collapse:collapse;\">"
-        + "</tr>"
-        + "<tr>"
-        + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
-        + CB_SIG_START
-        + "</td>"
-        + "</tr>"
-        + "<tr>"
-        + "<td>"
-        + html
-        + "</td>"
-        + "</tr>"
-        + "<tr>"
-        + "<td style=\"" + SENTINEL_TD_STYLE + "\">"
-        + CB_SIG_END
-        + "</td>"
-        + "</tr>"
-        + "</table>"
-    );
+/**
+ * Shows an informational notification bar in Outlook (compose window).
+ * Mirrors the CodeTwo-style advisory bar — informational, not an error.
+ */
+function showHeavySignatureNotification(item) {
+    try {
+        if (typeof item?.notificationMessages?.addAsync !== "function") return;
+        item.notificationMessages.addAsync(
+            NOTIF_KEY_HEAVY,
+            {
+                type: Office.MailboxEnums.ItemNotificationMessageType.InformationalMessage,
+                message: "Your signature is large and will be inserted at the time of send.",
+                icon: "Icon.16x16",   // must match an icon resource declared in your manifest
+                persistent: true
+            },
+            (result) => {
+                if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                    console.warn("[CardByte] Could not add notification:", result.error?.message);
+                }
+            }
+        );
+    } catch (err) {
+        console.warn("[CardByte] showHeavySignatureNotification failed:", err);
+    }
 }
+
+function removeHeavySignatureNotification(item) {
+    try {
+        if (typeof item?.notificationMessages?.removeAsync !== "function") return;
+        item.notificationMessages.removeAsync(NOTIF_KEY_HEAVY, () => { });
+    } catch (_) { }
+}
+
+// ─── Signature injection ──────────────────────────────────────────────────────
 
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
@@ -257,59 +258,49 @@ function bodySetSignatureAsync(item, html) {
         });
     });
 }
-
-function bodySetLargeSignatureAsync(item, html) {
+function bodySetSelectedDataAsync(item, html) {
     return new Promise((resolve, reject) => {
-        if (typeof item.body?.setSelectedDataAsync !== "function") {
-            reject(new Error("setSelectedDataAsync not available"));
-            return;
-        }
-
-        const START_TOKEN = "<!-- CARDBYTE_SIG_START -->";
-        const END_TOKEN = "<!-- CARDBYTE_SIG_END -->";
-
-        const signatureHtml = `${START_TOKEN}${html}${END_TOKEN}`;
-
-        item.body.setSelectedDataAsync(
-            signatureHtml,
-            {
-                coercionType: Office.CoercionType.Html,
-                asyncContext: null
-            },
-            (result) => {
-                if (result.status === Office.AsyncResultStatus.Succeeded) {
-                    resolve();
-                } else {
-                    reject(result.error);
-                }
-            }
-        );
+        if (typeof item.body.setSelectedDataAsync !== "function") { reject(new Error("setSelectedDataAsync not available")); return; }
+        item.body.setSelectedDataAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
+            if (r.status === Office.AsyncResultStatus.Succeeded) resolve(); else reject(r.error);
+        });
     });
 }
-
-async function applySignatureWithFallback(item, html) {
+/**
+ * Decides how to apply the signature based on its byte size.
+ *
+ * < 100 KB  → inject immediately via setSignatureAsync (normal path)
+ * ≥ 100 KB  → skip compose-time injection; show notification bar so the user
+ *             knows the signature will be appended at send time (onSendHandler).
+ *
+ * Returns true  if the signature was injected now.
+ * Returns false if it was deferred (heavy path).
+ */
+async function applySignatureWithFallback(item, html, send = false) {
+    const HEAVY_THRESHOLD = 100 * 1024; // 100 KB
     const htmlSize = new Blob([html]).size;
 
-    console.log("[CardByte] Signature size:", htmlSize);
+    console.log("[CardByte] Signature size:", htmlSize, "bytes");
 
-    if (htmlSize < 100 * 1024) {
-        // Native API
+    if (htmlSize < HEAVY_THRESHOLD) {
+        // ── Light path: inject immediately ──────────────────────────────────
+        removeHeavySignatureNotification(item); // clear any stale advisory
         await bodySetSignatureAsync(item, html);
-        return;
+        return true;
     }
 
+    // ── Heavy path: defer to send time, show advisory bar ──────────────────
     console.warn(
-        "[CardByte] Signature exceeds 100KB. Falling back to setSelectedDataAsync."
+        `[CardByte] Signature size ${htmlSize} bytes exceeds 100 KB threshold — deferring to send time.`
     );
 
-    // Clear Outlook signature first
-    try {
-        await bodySetSignatureAsync(item, "");
-    } catch (e) {
-        console.warn("Unable to clear signature:", e);
+    if (send) {
+        // Clear any previously injected signature so the compose body stays clean
+        try { await bodySetSelectedDataAsync(item, ""); } catch (_) { }
     }
 
-    await bodySetLargeSignatureAsync(item, html);
+    !send && showHeavySignatureNotification(item);
+    return false;
 }
 
 function moveCursorToTop(item) {
@@ -324,9 +315,7 @@ function moveCursorToTop(item) {
     });
 }
 
-// FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
-// sessionStorage) can still read the signature cached by the compose iframe.
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}) {
+async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}, send) {
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
 
@@ -341,7 +330,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             try {
                 if (attempt > 0) {
                     console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, then 2s
+                    await new Promise(r => setTimeout(r, 1000 * attempt));
                 }
                 const result = await renderSignatureOnServer(userEmail);
                 if (result != null) {
@@ -360,7 +349,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
 
         if (fetched != null) {
             CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);  // ← store compressed, not raw
+            setCachedSignature(fetched);
         }
 
         if (fetched == null) {
@@ -368,11 +357,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    // FIX: If signature is still null (server down, cache miss, no email, etc.)
-    // fall back to a minimal identity signature instead of inserting "null".
-    // Fallback only if everything above — fresh fetch, retries — all came up empty
     if (!fetched) {
-        // Last-ditch: try reading stale cache, bypassing both session and TTL checks
         const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (staleCache) {
             console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
@@ -393,15 +378,12 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    let finalSignature = _wrapSignature(fetched);
-    // `<div style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
-
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
-        finalSignature, item?.body
+        item?.body
     );
 
-    await applySignatureWithFallback(item, finalSignature);
+    await applySignatureWithFallback(item, fetched, send);
 }
 
 window.applySignature = async function (event = { completed: () => { } }, options = {}) {
@@ -410,8 +392,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
 
     try {
         if (!item) return;
-        // compose iframe — normal session check applies
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
     } finally {
@@ -425,10 +406,9 @@ window.onSendHandler = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return;
-        // FIX: skipSessionCheck:true because onSendHandler runs in a separate
-        // iframe with its own fresh sessionStorage, so the session ID never
-        // matches the one stored by applySignature — causing a false cache miss.
-        // await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
+        // Heavy-signature path: inject now at send time (bypasses TTL & session check
+        // since this iframe has its own fresh sessionStorage).
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true }, true);
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
