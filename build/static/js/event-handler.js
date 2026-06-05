@@ -258,29 +258,12 @@ function bodySetSignatureAsync(item, html) {
         });
     });
 }
+
 function bodySetSelectedDataAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.setSelectedDataAsync !== "function") { reject(new Error("setSelectedDataAsync not available")); return; }
         item.body.setSelectedDataAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
             if (r.status === Office.AsyncResultStatus.Succeeded) resolve(); else reject(r.error);
-        });
-    });
-}
-/**
- * Decides how to apply the signature based on its byte size.
- *
- * < 100 KB  → inject immediately via setSignatureAsync (normal path)
- * ≥ 100 KB  → skip compose-time injection; show notification bar so the user
- *             knows the signature will be appended at send time (onSendHandler).
- *
- * Returns true  if the signature was injected now.
- * Returns false if it was deferred (heavy path).
- */
-function bodyGetAsync(item) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.getAsync !== "function") { reject(new Error("getAsync not available")); return; }
-        item.body.getAsync(Office.CoercionType.Html, (r) => {
-            if (r.status === Office.AsyncResultStatus.Succeeded) resolve(r.value); else reject(r.error);
         });
     });
 }
@@ -290,7 +273,7 @@ async function applySignatureWithFallback(item, html, send = false) {
     const htmlSize = new Blob([html]).size;
 
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
-
+    await bodySetSignatureAsync(item, "");
     if (htmlSize < HEAVY_THRESHOLD) {
         // ── Light path: inject immediately via setSignatureAsync ─────────────
         removeHeavySignatureNotification(item);
@@ -309,7 +292,6 @@ async function applySignatureWithFallback(item, html, send = false) {
 
     // Send time: read current body → append signature → setSelectedDataAsync
     try {
-        const currentBody = await bodyGetAsync(item);
         const combined = html;
         await bodySetSelectedDataAsync(item, combined);
         removeHeavySignatureNotification(item);

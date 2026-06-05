@@ -7322,6 +7322,70 @@ function applySignatureCore(item, guardedEvent, forceReplace) {
     );
 }
 
+// ─── Signature unwrapping (send-time only) ────────────────────────────────────
+//
+// Removes the CB_SIG sentinel wrapper table that was added by _wrapSignature()
+// at compose time. Called exclusively by onSendHandler so the sent email never
+// contains the __CBSIG_START_7F2C9D4E__ / __CBSIG_END_7F2C9D4E__ tokens or
+// the invisible sentinel <td> cells.
+//
+// Strategy: same token-walk used by stripSignatures, but instead of removing
+// the entire block it extracts the INNER content — the <td> that holds the
+// actual signature HTML (the middle row of the three-row wrapper table).
+//
+// If the wrapper structure is not found (e.g. cache holds unwrapped HTML from
+// a legacy session), the input is returned as-is so the send path degrades
+// gracefully rather than failing.
+
+function _unwrapSignature(wrappedHtml) {
+    if (!wrappedHtml) return wrappedHtml;
+
+    var startIdx = wrappedHtml.indexOf(CONFIG.CB_SIG_START);
+    var endIdx = wrappedHtml.indexOf(CONFIG.CB_SIG_END);
+
+    if (startIdx === -1 || endIdx === -1) {
+        _diag.info("_unwrapSignature: tokens not found — returning as-is");
+        return wrappedHtml;
+    }
+
+    // The wrapper produced by _wrapSignature has exactly 3 rows:
+    //   row 0: <td ...>CB_SIG_START</td>
+    //   row 1: <td style="padding-top:...">ACTUAL SIGNATURE</td>
+    //   row 2: <td ...>CB_SIG_END</td>
+    //
+    // Find the </td> that closes the CB_SIG_START sentinel, then the <td
+    // that opens the content row, then the </td> that closes it.
+
+    var startTdClose = wrappedHtml.indexOf("</td>", startIdx);
+    if (startTdClose === -1) {
+        _diag.warn("_unwrapSignature: </td> after START not found — returning as-is");
+        return wrappedHtml;
+    }
+
+    var contentTdOpen = wrappedHtml.indexOf("<td", startTdClose + 5);
+    if (contentTdOpen === -1) {
+        _diag.warn("_unwrapSignature: content <td> not found — returning as-is");
+        return wrappedHtml;
+    }
+
+    var contentTdBodyStart = wrappedHtml.indexOf(">", contentTdOpen) + 1;
+    if (contentTdBodyStart <= 0) {
+        _diag.warn("_unwrapSignature: content <td> closing '>' not found — returning as-is");
+        return wrappedHtml;
+    }
+
+    // The content </td> is the one that comes before the CB_SIG_END token.
+    var contentTdClose = wrappedHtml.lastIndexOf("</td>", endIdx);
+    if (contentTdClose === -1 || contentTdClose <= contentTdBodyStart) {
+        _diag.warn("_unwrapSignature: content </td> not found — returning as-is");
+        return wrappedHtml;
+    }
+
+    var inner = wrappedHtml.substring(contentTdBodyStart, contentTdClose);
+    _diag.info("_unwrapSignature: extracted inner html | len=" + inner.length);
+    return inner;
+}
+
 // ─── Guarded event wrapper ────────────────────────────────────────────────────
 
 function makeGuardedEvent(event, timeoutMs) {
@@ -7397,10 +7461,14 @@ function onSendHandler(event) {
         _diag.info("onSendHandler: writing cached signature ("
             + cachedHtml.length + " chars) | forceReplace=true");
 
+        // ↓↓↓ ADD THIS LINE ↓↓↓
+        var cleanHtml = _unwrapSignature(cachedHtml);
+        // ↑↑↑ ADD THIS LINE ↑↑↑
+
         // forceReplace=true — unconditionally replace any stale / native sig
         // that Outlook re-injected between compose and send.
         // cachedHtml is already _wrapSignature()'d.
-        writeSignature(item, cachedHtml, function (ok) {
+        writeSignature(item, cleanHtml, function (ok) {
             if (!ok) _diag.warn("onSendHandler: writeSignature failed");
             writeDiagnostics(item, function () {
                 guarded.completed({ allowEvent: true });
