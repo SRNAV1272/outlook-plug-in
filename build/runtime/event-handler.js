@@ -404,18 +404,25 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     // let compressedSignature = await compressImagesInHtml(fetched);
     // compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
 
-    let finalSignature = `<div style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
+    let finalSignature = `<p style="margin:0;padding:0;line-height:40px;height:40px;">&nbsp;</p>${fetched}<p style="margin:0;padding:0;line-height:40px;height:40px;">&nbsp;</p>`;
 
     console.log("[CardByte] ════════════════════════════════════",
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
         finalSignature, item?.body
     );
 
-    await bodySetSignatureAsync(item, finalSignature);
-    // await moveCursorToTop(item);
+    // await bodySetSignatureAsync(item, finalSignature);
+    // Wrap setSignatureAsync with its own timeout
+    await Promise.race([
+        bodySetSignatureAsync(item, finalSignature),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("setSignatureAsync timeout")), 4000))
+    ]).catch(err => {
+        console.warn("[CardByte] setSignatureAsync did not complete in time:", err.message);
+        // Non-fatal — signature was already set at compose time
+    });
 }
 
-window.applySignature = async function (event = { completed: () => { } }, options = {}) {
+const applySignature = async function (event = { completed: () => { } }, options = {}) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
@@ -430,20 +437,37 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 };
 
-window.onSendHandler = async function (event = { completed: () => { } }) {
+const onSendHandler = async function (event = { completed: () => { } }) {
+    const TIMEOUT_MS = 4500; // safely under Outlook's ~5s limit
+    let completed = false;
+
+    const safeComplete = (opts) => {
+        if (completed) return;
+        completed = true;
+        event.completed(opts);
+    };
+
+    // Hard timeout — always fires event.completed
+    const timeoutId = setTimeout(() => {
+        console.warn("[CardByte] onSendHandler hard timeout — forcing event.completed");
+        safeComplete({ allowEvent: true });
+    }, TIMEOUT_MS);
+
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
     try {
         if (!item) return;
-        // FIX: skipSessionCheck:true because onSendHandler runs in a separate
-        // iframe with its own fresh sessionStorage, so the session ID never
-        // matches the one stored by applySignature — causing a false cache miss.
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
+        await _applySignatureCore(item, mailbox, {
+            fetchIfMissing: false,
+            skipTtl: true,
+            skipSessionCheck: true
+        });
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
-        event.completed({ allowEvent: true });
+        clearTimeout(timeoutId);
+        safeComplete({ allowEvent: true });
     }
 };
 
