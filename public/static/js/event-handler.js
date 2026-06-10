@@ -415,7 +415,7 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     // await moveCursorToTop(item);
 }
 
-window.applySignature = async function (event = { completed: () => { } }, options = {}) {
+const applySignature = async function (event = { completed: () => { } }, options = {}) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
@@ -430,7 +430,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 };
 
-window.onSendHandler = async function (event = { completed: () => { } }) {
+const onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
