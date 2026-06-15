@@ -276,7 +276,6 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
         removeHeavySignatureNotification(item);
         // Clear any Outlook-injected default signature first, then set ours.
         // Both calls are on the light path so setSignatureAsync is available.
-        await bodySetSignatureAsync(item, "");
         await bodySetSignatureAsync(item, html);
         return true;
     }
@@ -417,7 +416,12 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         if (!item) return;
         // Send iframe has its own fresh sessionStorage, so we skip both the
         // TTL and the session check and just read whatever is in localStorage.
-        // Step 1: Use setSignatureAsync("") to force cursor to bottom
+        // Step 1: Use setSignatureAsync("") to force cursor to bottom// Move cursor to top
+        await new Promise((resolve, reject) => {
+            item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, (r) => {
+                r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error);
+            });
+        });
         await bodySetSignatureAsync(item, "");
 
         await logDraftedContent(); // 👈 add this
