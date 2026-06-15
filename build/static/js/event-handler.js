@@ -417,7 +417,7 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         // Send iframe has its own fresh sessionStorage, so we skip both the
         // TTL and the session check and just read whatever is in localStorage.
 
-        await bodySetSignatureAsync(item, " ");
+        await bodySetSelectedDataAsync(item, " ");
 
         await logDraftedContent(); // 👈 add this
         await _applySignatureCore(
