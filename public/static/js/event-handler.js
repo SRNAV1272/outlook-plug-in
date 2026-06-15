@@ -385,19 +385,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         if (staleCache) {
             console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
             fetched = staleCache;
-        } else {
-            console.warn("[CardByte] No signature available — using fallback identity signature.");
-            fetched = `
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                  <tr>
-                    <td style="font-family:Arial,sans-serif;font-size:12px;">
-                      <strong>${userProfile.displayName || ""}</strong><br/>
-                      ${userProfile.emailAddress || ""}<br/>
-                      <span style="color:#999;">Sent via CardByte</span>
-                    </td>
-                  </tr>
-                </table>
-            `;
         }
     }
 
@@ -413,13 +400,23 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
 
     // await bodySetSignatureAsync(item, finalSignature);
     // Wrap setSignatureAsync with its own timeout
-    await Promise.race([
-        bodySetSignatureAsync(item, finalSignature),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("setSignatureAsync timeout")), 4000))
-    ]).catch(err => {
-        console.warn("[CardByte] setSignatureAsync did not complete in time:", err.message);
-        // Non-fatal — signature was already set at compose time
-    });
+    try {
+        if (fetched)
+            await Promise.race([
+                bodySetSignatureAsync(item, finalSignature),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("setSignatureAsync timeout")), 4000))
+            ]).catch(err => {
+                console.warn("[CardByte] setSignatureAsync did not complete in time:", err.message);
+                // Non-fatal — signature was already set at compose time
+            });
+        else {
+
+        }
+    } catch (e) {
+        console.error(e)
+    } finally {
+
+    }
 }
 
 const applySignature = async function (event = { completed: () => { } }, options = {}) {
