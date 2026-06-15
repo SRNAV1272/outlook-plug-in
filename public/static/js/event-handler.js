@@ -372,6 +372,19 @@ const applySignature = async function (event = { completed: () => { } }) {
     }
 };
 
+async function logCurrentBody() {
+    const item = Office?.context?.mailbox?.item;
+    if (!item) { console.error("[CardByte] No item found"); return; }
+
+    item.body.getAsync(Office.CoercionType.Html, (result) => {
+        if (result.status === Office.AsyncResultStatus.Succeeded) {
+            console.log("[CardByte] Current body HTML:", result.value);
+        } else {
+            console.error("[CardByte] getAsync failed:", result.error?.message);
+        }
+    });
+}
+
 const onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
@@ -379,6 +392,7 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         if (!item) return;
         // Send iframe has its own fresh sessionStorage, so we skip both the
         // TTL and the session check and just read whatever is in localStorage.
+        await logCurrentBody(); // 👈 add this
         await _applySignatureCore(
             item, mailbox,
             { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
@@ -387,7 +401,7 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
-        event.completed({ allowEvent: true });
+        // event.completed({ allowEvent: true });
     }
 };
 
