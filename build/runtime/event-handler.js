@@ -372,16 +372,40 @@ const applySignature = async function (event = { completed: () => { } }) {
     }
 };
 
-async function logCurrentBody() {
+async function logDraftedContent() {
     const item = Office?.context?.mailbox?.item;
     if (!item) { console.error("[CardByte] No item found"); return; }
 
     item.body.getAsync(Office.CoercionType.Html, (result) => {
-        if (result.status === Office.AsyncResultStatus.Succeeded) {
-            console.log("[CardByte] Current body HTML:", result.value);
-        } else {
+        if (result.status !== Office.AsyncResultStatus.Succeeded) {
             console.error("[CardByte] getAsync failed:", result.error?.message);
+            return;
         }
+
+        const fullHtml = result.value;
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(fullHtml, "text/html");
+
+        // Remove everything from the HR (quote divider) onwards
+        const hr = doc.querySelector("hr");
+        const divRply = doc.querySelector("#divRplyFwdMsg");
+        const quoteAnchor = doc.querySelector("a[name='_MailOriginal']");
+
+        const cutPoint = quoteAnchor || hr || divRply;
+
+        if (cutPoint) {
+            // Remove the cutpoint and all following siblings
+            let node = cutPoint;
+            while (node) {
+                const next = node.nextSibling;
+                node.parentNode.removeChild(node);
+                node = next;
+            }
+            cutPoint.remove?.();
+        }
+
+        const draftedHtml = doc.body.innerHTML.trim();
+        console.log("[CardByte] Drafted content only:", draftedHtml);
     });
 }
 
@@ -395,7 +419,7 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         // Step 1: Use setSignatureAsync("") to force cursor to bottom
         await bodySetSignatureAsync(item, "");
 
-        await logCurrentBody(); // 👈 add this
+        await logDraftedContent(); // 👈 add this
         await _applySignatureCore(
             item, mailbox,
             { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
