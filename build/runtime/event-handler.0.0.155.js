@@ -290,9 +290,14 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     }
 
     try {
-        await bodySetSelectedDataAsync(item, '<p>&ensp;</p>' + html + '<p>&ensp;</p>');
+        // Step 1: Use setSignatureAsync("") to force cursor to bottom
+        await bodySetSignatureAsync(item, "");
+
+        // Step 2: Now insert heavy signature at cursor (which is now at bottom)
+        await bodySetSelectedDataAsync(item, html);
+
         removeHeavySignatureNotification(item);
-        console.log("[CardByte] Heavy signature inserted at send time via setSelectedDataAsync.");
+        console.log("[CardByte] Heavy signature inserted at bottom via cursor trick.");
         return true;
     } catch (err) {
         console.error("[CardByte] Heavy path send-time insertion failed:", err);
