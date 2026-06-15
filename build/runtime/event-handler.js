@@ -268,43 +268,82 @@ function bodySetSelectedDataAsync(item, html) {
  * to insert immediately after. It is never called when no signature is available
  * (that branch exits early in _applySignatureCore before reaching here).
  */
+// async function applySignatureWithFallback(item, html, isSendTime = false) {
+//     const htmlSize = new Blob([html]).size;
+//     console.log("[CardByte] Signature size:", htmlSize, "bytes");
+
+//     if (htmlSize < HEAVY_THRESHOLD) {
+//         removeHeavySignatureNotification(item);
+//         // Clear any Outlook-injected default signature first, then set ours.
+//         // Both calls are on the light path so setSignatureAsync is available.
+//         await bodySetSignatureAsync(item, html);
+//         return true;
+//     }
+
+//     console.warn(`[CardByte] Signature is ${htmlSize} bytes (≥100 KB) — heavy path (isSendTime=${isSendTime}).`);
+
+//     if (!isSendTime) {
+//         await bodySetSignatureAsync(item, "");
+//         showHeavySignatureNotification(item, "Your signature is large and will be inserted at the time of send.");
+//         return false;
+//     }
+
+//     try {
+//         // Step 1: Use setSignatureAsync("") to force cursor to bottom
+//         await bodySetSignatureAsync(item, "");
+
+//         // Step 2: Now insert heavy signature at cursor (which is now at bottom)
+//         await bodySetSelectedDataAsync(item, html);
+
+//         removeHeavySignatureNotification(item);
+//         console.log("[CardByte] Heavy signature inserted at bottom via cursor trick.");
+//         return true;
+//     } catch (err) {
+//         console.error("[CardByte] Heavy path send-time insertion failed:", err);
+//         return false;
+//     }
+// }
+
+// ─── Core orchestration ───────────────────────────────────────────────────────
+
 async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
 
     if (htmlSize < HEAVY_THRESHOLD) {
+        // Light path — always use setSignatureAsync (compose or send time)
         removeHeavySignatureNotification(item);
-        // Clear any Outlook-injected default signature first, then set ours.
-        // Both calls are on the light path so setSignatureAsync is available.
         await bodySetSignatureAsync(item, html);
         return true;
     }
 
-    console.warn(`[CardByte] Signature is ${htmlSize} bytes (≥100 KB) — heavy path (isSendTime=${isSendTime}).`);
+    // ── Heavy path (≥ 100 KB) ────────────────────────────────────────────────
+    console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}.`);
 
-    if (!isSendTime) {
-        await bodySetSignatureAsync(item, "");
-        showHeavySignatureNotification(item, "Your signature is large and will be inserted at the time of send.");
+    if (isSendTime) {
+        // Send time: signature already in body from compose — skip entirely
+        console.log("[CardByte] Heavy signature at send time — skipping (already injected at compose time).");
+        removeHeavySignatureNotification(item);
         return false;
     }
 
+    // Compose/Reply/Forward: cursor trick + setSelectedDataAsync
     try {
-        // Step 1: Use setSignatureAsync("") to force cursor to bottom
+        // Step 1: setSignatureAsync("") moves cursor to bottom of compose area
         await bodySetSignatureAsync(item, "");
 
-        // Step 2: Now insert heavy signature at cursor (which is now at bottom)
+        // Step 2: inject heavy HTML at cursor position (bottom)
         await bodySetSelectedDataAsync(item, html);
 
         removeHeavySignatureNotification(item);
-        console.log("[CardByte] Heavy signature inserted at bottom via cursor trick.");
+        console.log("[CardByte] Heavy signature inserted at compose time via cursor trick.");
         return true;
     } catch (err) {
-        console.error("[CardByte] Heavy path send-time insertion failed:", err);
+        console.error("[CardByte] Heavy path compose-time insertion failed:", err);
+        showHeavySignatureNotification(item, "Your signature is large and could not be inserted. Please contact Admin.");
         return false;
     }
 }
-
-// ─── Core orchestration ───────────────────────────────────────────────────────
 
 /**
  * @param {object}  item
@@ -409,17 +448,34 @@ async function logDraftedContent() {
     });
 }
 
+// const onSendHandler = async function (event = { completed: () => { } }) {
+//     const mailbox = Office?.context?.mailbox;
+//     const item = mailbox?.item;
+//     try {
+//         if (!item) return;
+//         // Send iframe has its own fresh sessionStorage, so we skip both the
+//         // TTL and the session check and just read whatever is in localStorage.
+
+//         await bodySetSelectedDataAsync(item, " ");
+
+//         await logDraftedContent(); // 👈 add this
+//         await _applySignatureCore(
+//             item, mailbox,
+//             { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
+//             true
+//         );
+//     } catch (err) {
+//         console.error("[CardByte] Error in onSendHandler:", err);
+//     } finally {
+//         event.completed({ allowEvent: true });
+//     }
+// };
+
 const onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
     try {
         if (!item) return;
-        // Send iframe has its own fresh sessionStorage, so we skip both the
-        // TTL and the session check and just read whatever is in localStorage.
-
-        await bodySetSelectedDataAsync(item, " ");
-
-        await logDraftedContent(); // 👈 add this
         await _applySignatureCore(
             item, mailbox,
             { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
@@ -428,7 +484,7 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
-        // event.completed({ allowEvent: true });
+        event.completed({ allowEvent: true });
     }
 };
 
