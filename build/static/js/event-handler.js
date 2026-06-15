@@ -284,12 +284,14 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     console.warn(`[CardByte] Signature is ${htmlSize} bytes (≥100 KB) — heavy path (isSendTime=${isSendTime}).`);
 
     if (!isSendTime) {
-        await bodySetSignatureAsync(item, "");
         showHeavySignatureNotification(item, "Your signature is large and will be inserted at the time of send.");
         return false;
     }
 
     try {
+        // Step 1: Use setSignatureAsync("") to force cursor to bottom
+        await bodySetSignatureAsync(item, "");
+
         // Step 2: Now insert heavy signature at cursor (which is now at bottom)
         await bodySetSelectedDataAsync(item, html);
 
