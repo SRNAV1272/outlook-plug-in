@@ -392,6 +392,9 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         if (!item) return;
         // Send iframe has its own fresh sessionStorage, so we skip both the
         // TTL and the session check and just read whatever is in localStorage.
+        // Step 1: Use setSignatureAsync("") to force cursor to bottom
+        await bodySetSignatureAsync(item, "");
+
         await logCurrentBody(); // 👈 add this
         await _applySignatureCore(
             item, mailbox,
