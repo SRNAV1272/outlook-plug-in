@@ -290,9 +290,6 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     }
 
     try {
-        // Step 1: Use setSignatureAsync("") to force cursor to bottom
-        await bodySetSignatureAsync(item, "");
-
         // Step 2: Now insert heavy signature at cursor (which is now at bottom)
         await bodySetSelectedDataAsync(item, html);
 
