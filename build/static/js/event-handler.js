@@ -8,6 +8,10 @@ const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// Add this near the top with your other constants
+const NOTIF_KEY_HEAVY = "cardbyte_sig_unavailable";
+const NOTIF_KEY_NOT_AVAILABLE = "cardbyte_sig_not_available";
+
 
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
@@ -111,6 +115,35 @@ Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
     console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
 });
+
+function showHeavySignatureNotification(item) {
+    try {
+        if (typeof item?.notificationMessages?.addAsync !== "function") return;
+        item.notificationMessages.addAsync(
+            NOTIF_KEY_NOT_AVAILABLE,
+            {
+                type: Office.MailboxEnums.ItemNotificationMessageType.InformationalMessage,
+                message: "Signature is not available. Please contact with admin.",
+                icon: "Icon.16x16",   // must match an icon resource declared in your manifest
+                persistent: false
+            },
+            (result) => {
+                if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                    console.warn("[CardByte] Could not add notification:", result.error?.message);
+                }
+            }
+        );
+    } catch (err) {
+        console.warn("[CardByte] showHeavySignatureNotification failed:", err);
+    }
+}
+
+function removeHeavySignatureNotification(item) {
+    try {
+        if (typeof item?.notificationMessages?.removeAsync !== "function") return;
+        item.notificationMessages.removeAsync(NOTIF_KEY_NOT_AVAILABLE, () => { });
+    } catch (_) { }
+}
 
 function base64ToArrayBuffer(base64) {
     let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
@@ -385,19 +418,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         if (staleCache) {
             console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
             fetched = staleCache;
-        } else {
-            console.warn("[CardByte] No signature available — using fallback identity signature.");
-            fetched = `
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                  <tr>
-                    <td style="font-family:Arial,sans-serif;font-size:12px;">
-                      <strong>${userProfile.displayName || ""}</strong><br/>
-                      ${userProfile.emailAddress || ""}<br/>
-                      <span style="color:#999;">Sent via CardByte</span>
-                    </td>
-                  </tr>
-                </table>
-            `;
         }
     }
 
@@ -413,13 +433,24 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
 
     // await bodySetSignatureAsync(item, finalSignature);
     // Wrap setSignatureAsync with its own timeout
-    await Promise.race([
-        bodySetSignatureAsync(item, finalSignature),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("setSignatureAsync timeout")), 4000))
-    ]).catch(err => {
-        console.warn("[CardByte] setSignatureAsync did not complete in time:", err.message);
-        // Non-fatal — signature was already set at compose time
-    });
+    // Replace the current block that calls bodySetSignatureAsync:
+    try {
+        if (fetched) {
+            removeHeavySignatureNotification(item); // clear any previous warning
+            await Promise.race([
+                bodySetSignatureAsync(item, finalSignature),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error("setSignatureAsync timeout")), 4000)
+                )
+            ]).catch(err => {
+                console.warn("[CardByte] setSignatureAsync did not complete in time:", err.message);
+            });
+        } else {
+            showHeavySignatureNotification(item);
+        }
+    } catch (e) {
+        console.error(e);
+    }
 }
 
 const applySignature = async function (event = { completed: () => { } }, options = {}) {
