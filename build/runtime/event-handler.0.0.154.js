@@ -256,17 +256,17 @@ function bodySetSelectedDataAsync(item, html) {
 
 /**
  * Light path  (<100 KB): use setSignatureAsync directly — Outlook handles
- * placement natively.
+ * placement natively. We first clear any Outlook-default signature with
+ * setSignatureAsync("") before injecting our own, so the two never stack.
  *
  * Heavy path (≥100 KB):
  *   • Compose open → show notification bar only (don't block the compose window).
  *   • Send time    → inject via setSelectedDataAsync so the signature travels
  *                    with the message body.
  *
- * NOTE: The previous implementation called setSignatureAsync("") before every
- * injection. This was unnecessary on the light path (setSignatureAsync("")
- * followed immediately by setSignatureAsync(html) just doubles the async
- * round-trips) and has been removed.
+ * IMPORTANT: setSignatureAsync("") is called ONLY when we have a real signature
+ * to insert immediately after. It is never called when no signature is available
+ * (that branch exits early in _applySignatureCore before reaching here).
  */
 async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
@@ -274,6 +274,9 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
 
     if (htmlSize < HEAVY_THRESHOLD) {
         removeHeavySignatureNotification(item);
+        // Clear any Outlook-injected default signature first, then set ours.
+        // Both calls are on the light path so setSignatureAsync is available.
+        await bodySetSignatureAsync(item, "");
         await bodySetSignatureAsync(item, html);
         return true;
     }
@@ -281,12 +284,13 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     console.warn(`[CardByte] Signature is ${htmlSize} bytes (≥100 KB) — heavy path (isSendTime=${isSendTime}).`);
 
     if (!isSendTime) {
+        await bodySetSignatureAsync(item, "");
         showHeavySignatureNotification(item, "Your signature is large and will be inserted at the time of send.");
         return false;
     }
 
     try {
-        await bodySetSelectedDataAsync(item, html);
+        await bodySetSelectedDataAsync(item, '<p>&ensp;</p>' + html + '<p>&ensp;</p>');
         removeHeavySignatureNotification(item);
         console.log("[CardByte] Heavy signature inserted at send time via setSelectedDataAsync.");
         return true;
