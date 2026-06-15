@@ -418,10 +418,12 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         // TTL and the session check and just read whatever is in localStorage.
         // Step 1: Use setSignatureAsync("") to force cursor to bottom// Move cursor to top
         await new Promise((resolve, reject) => {
-            item.body.prependAsync("", { coercionType: Office.CoercionType.Html }, (r) => {
+            item.body.prependAsync("target", { coercionType: Office.CoercionType.Html }, (r) => {
                 r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error);
             });
         });
+        console.log("[CardByte] Prepend async has been added:");
+
         await bodySetSignatureAsync(item, "");
 
         await logDraftedContent(); // 👈 add this
