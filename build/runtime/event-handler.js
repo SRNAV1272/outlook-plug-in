@@ -219,14 +219,14 @@ const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
  * Shows an informational notification bar in Outlook (compose window).
  * Mirrors the CodeTwo-style advisory bar — informational, not an error.
  */
-function showHeavySignatureNotification(item) {
+function showHeavySignatureNotification(item, message) {
     try {
         if (typeof item?.notificationMessages?.addAsync !== "function") return;
         item.notificationMessages.addAsync(
             NOTIF_KEY_HEAVY,
             {
                 type: Office.MailboxEnums.ItemNotificationMessageType.InformationalMessage,
-                message: "Your signature is large and will be inserted at the time of send.",
+                message: message,
                 icon: "Icon.16x16",   // must match an icon resource declared in your manifest
                 persistent: true
             },
@@ -286,7 +286,7 @@ async function applySignatureWithFallback(item, html, send = false) {
 
     if (!send) {
         // Compose open: just show the notification bar, don't touch the body
-        showHeavySignatureNotification(item);
+        showHeavySignatureNotification(item, "Your signature is large and will be inserted at the time of send.");
         return false;
     }
 
@@ -362,19 +362,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         if (staleCache) {
             console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
             fetched = staleCache;
-        } else {
-            console.warn("[CardByte] No signature available — using fallback identity signature.");
-            fetched = `
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                  <tr>
-                    <td style="font-family:Arial,sans-serif;font-size:12px;">
-                      <strong>${userProfile.displayName || ""}</strong><br/>
-                      ${userProfile.emailAddress || ""}<br/>
-                      <span style="color:#999;">Sent via CardByte</span>
-                    </td>
-                  </tr>
-                </table>
-            `;
         }
     }
 
@@ -382,11 +369,16 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         fetched ? "Applying signature" : "No cached signature, will fetch from server",
         item?.body
     );
-
+    if (!fetched) {
+        console.error("[CardByte] No signature available to apply. Aborting.");
+        removeHeavySignatureNotification(item);
+        showHeavySignatureNotification(item, "Signature not available. Please contact Admin.");
+        return
+    }
     await applySignatureWithFallback(item, fetched, send);
 }
 
-window.applySignature = async function (event = { completed: () => { } }, options = {}) {
+const applySignature = async function (event = { completed: () => { } }, options = {}) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
@@ -400,7 +392,7 @@ window.applySignature = async function (event = { completed: () => { } }, option
     }
 };
 
-window.onSendHandler = async function (event = { completed: () => { } }) {
+const onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
