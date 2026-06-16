@@ -206,48 +206,6 @@ async function encryptEmail(email = "") {
     }
 }
 
-// async function renderSignatureOnServer(user) {
-//     const platform = Office.context.diagnostics.platform;
-//     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
-
-//     try {
-//         const encryptedMail = await encryptEmail(user);
-//         const primaryRes = await fetch(
-//             "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-//             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
-//         );
-//         if (primaryRes.ok) {
-//             const data = await primaryRes.text();
-//             const decryptedData = await handleAesDecrypt(data);
-//             console.log("Using NEW renderer");
-//             return JSON.parse(decryptedData)?.html || null;
-//         }
-//         console.warn("Primary failed. Falling back to legacy...");
-//     } catch (err) {
-//         console.warn("Primary crashed. Falling back to legacy...", err);
-//     }
-
-//     try {
-//         const secRes = await fetch(
-//             "https://newqa-enterprise.cardbyte.ai/email-signature/rules-config/get-active",
-//             {
-//                 method: "GET",
-//                 headers: {
-//                     'Content-Type': 'application/json',
-//                     username: encryptedMail,
-//                     "X-Platform": xPlatform
-//                 }
-//             }
-//         );
-//         console.log("Asdjasdashdkjasd", secRes)
-//     } catch (legacyError) {
-//         console.error("Both primary and legacy failed:", legacyError);
-//         return null;
-//     }
-// }
-
-// ─── Notification helpers ─────────────────────────────────────────────────────
-
 // ─── Fetch and cache rules (always runs, independent of primary renderer) ─────
 
 async function fetchAndCacheRules(encryptedMail, xPlatform) {
@@ -379,20 +337,7 @@ async function renderSignatureOnServer(user) {
     }
 
     console.warn("[CardByte] Primary returned null — attempting rules-based fallback");
-    // Primary failed — fall back to rules-based renderer
 
-    // if (!rulesJson) {
-    //     // Try stale rules cache as last resort
-    //     const staleRules = getCachedRules({ skipTtl: true });
-    //     if (staleRules) {
-    //         console.warn("[CardByte] Using stale cached rules as last resort");
-    //         return await fetchSignatureByRule(staleRules, encryptedMail, xPlatform);
-    //     }
-    //     console.error("[CardByte] No rules available — cannot render signature");
-    //     return null;
-    // }
-
-    // return await fetchSignatureByRule(rulesJson, encryptedMail, xPlatform);
 }
 
 const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
@@ -552,13 +497,181 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
     await applySignatureWithFallback(item, fetched, send);
 }
 
+// const applySignature = async function (event = { completed: () => { } }, options = {}) {
+//     const mailbox = Office?.context?.mailbox;
+//     const item = mailbox?.item;
+
+//     try {
+//         if (!item) return;
+//         await _applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
+//     } catch (err) {
+//         console.error("[CardByte] Error in applySignature:", err);
+//     } finally {
+//         event.completed();
+//     }
+// };
+
+// ─── Recipient-aware rule matcher ────────────────────────────────────────────
+
+/**
+ * Reads the To/CC recipients from the current compose item,
+ * evaluates them against the cached rulesJson, picks the highest-priority
+ * matching rule, and console-logs which signatureId should be used.
+ *
+ * Returns the matching rule object, or null if no rule applies.
+ */
+async function checkRecipientsAndFilterSignature(item) {
+    // ── 1. Load rules from cache (or re-fetch if missing) ──────────────────
+    let rulesJson = getCachedRules();
+
+    if (!rulesJson) {
+        console.warn("[CardByte] Rules not in cache — attempting live fetch...");
+        const mailbox = Office?.context?.mailbox;
+        const userEmail = mailbox?.userProfile?.emailAddress;
+        if (userEmail) {
+            const platform = Office.context.diagnostics.platform;
+            const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+            const encryptedMail = await encryptEmail(userEmail);
+            rulesJson = await fetchAndCacheRules(encryptedMail, xPlatform);
+        }
+
+        if (!rulesJson) {
+            console.warn("[CardByte] checkRecipientsAndFilterSignature: no rules available.");
+            return null;
+        }
+    }
+
+    // ── 2. Read To + CC recipients ──────────────────────────────────────────
+    const getRecipients = (field) =>
+        new Promise((resolve) => {
+            if (typeof field?.getAsync !== "function") return resolve([]);
+            field.getAsync((result) => {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    resolve(result.value || []);
+                } else {
+                    console.warn("[CardByte] Could not read recipients:", result.error?.message);
+                    resolve([]);
+                }
+            });
+        });
+
+    const [toRecipients, ccRecipients] = await Promise.all([
+        getRecipients(item?.to),
+        getRecipients(item?.cc),
+    ]);
+
+    const allRecipients = [...toRecipients, ...ccRecipients];
+    const recipientEmails = allRecipients.map((r) => (r.emailAddress || "").toLowerCase());
+
+    console.log("[CardByte] checkRecipientsAndFilterSignature — recipients:", recipientEmails);
+
+    if (recipientEmails.length === 0) {
+        console.warn("[CardByte] No recipients found — cannot match rules yet.");
+        return null;
+    }
+
+    // ── 3. Filter & sort enabled rules by priority ──────────────────────────
+    const enabledRules = (rulesJson?.rulesList || [])
+        .filter((r) => r.enabled)
+        .sort((a, b) => a.priority - b.priority);   // lower number = higher priority
+
+    if (enabledRules.length === 0) {
+        console.warn("[CardByte] No enabled rules to evaluate.");
+        return null;
+    }
+
+    // ── 4. Evaluate each rule against the recipient list ────────────────────
+    /**
+     * Checks whether a single recipient email satisfies a rule's ruleValue patterns.
+     * Supports:
+     *   "*"              → matches any recipient
+     *   "domain.com"     → matches anyone @domain.com
+     *   "user@domain.com"→ exact match
+     */
+    function recipientMatchesPattern(email, patterns = []) {
+        return patterns.some((pattern) => {
+            if (!pattern || pattern.trim() === "") return false;
+            const p = pattern.trim().toLowerCase();
+
+            if (p === "*") return true;                          // wildcard — all recipients
+
+            if (!p.includes("@")) {
+                // treat as domain match, e.g. "cardbyte.ai"
+                return email.endsWith("@" + p);
+            }
+
+            return email === p;                                  // exact email match
+        });
+    }
+
+    /**
+     * Determines whether a rule is satisfied given the full recipient list.
+     * ruleType "ALL"  → every enabled pattern must match at least one recipient
+     * ruleType "ANY"  → at least one recipient matches at least one pattern
+     *
+     * recipientType "internal" / "external" filtering is applied first if needed.
+     * (Extend here when you have the sender's domain available.)
+     */
+    function ruleMatchesRecipients(rule, emails) {
+        const { ruleType = "ANY", ruleValue = [] } = rule;
+
+        if (ruleType === "ALL") {
+            // All patterns must match at least one recipient
+            return ruleValue.every((pattern) =>
+                emails.some((email) => recipientMatchesPattern(email, [pattern]))
+            );
+        }
+
+        // Default: ANY — at least one email matches at least one pattern
+        return emails.some((email) => recipientMatchesPattern(email, ruleValue));
+    }
+
+    // ── 5. Find the first (highest-priority) matching rule ──────────────────
+    const matchedRule = enabledRules.find((rule) => ruleMatchesRecipients(rule, recipientEmails));
+
+    if (matchedRule) {
+        console.log(
+            `[CardByte] ✅ Matched rule: "${matchedRule.rule}" ` +
+            `(priority ${matchedRule.priority}, ruleId ${matchedRule.ruleId}) ` +
+            `→ signatureId: ${matchedRule.signatureId}`
+        );
+        console.log("[CardByte] Matched rule detail:", matchedRule);
+    } else {
+        console.warn("[CardByte] ❌ No rules matched the current recipient list:", recipientEmails);
+    }
+
+    return matchedRule || null;
+}
+
 const applySignature = async function (event = { completed: () => { } }, options = {}) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
     try {
         if (!item) return;
+
+        // ── Register recipient-change watcher (once per compose session) ──
+        if (!item._cbRecipientsHandlerRegistered) {
+            item.addHandlerAsync(
+                Office.EventType.RecipientsChanged,
+                async () => {
+                    console.log("[CardByte] Recipients changed — re-evaluating rules...");
+                    await checkRecipientsAndFilterSignature(item);
+                },
+                (result) => {
+                    if (result.status === Office.AsyncResultStatus.Succeeded) {
+                        item._cbRecipientsHandlerRegistered = true;
+                        console.log("[CardByte] RecipientsChanged handler registered.");
+                    } else {
+                        console.warn("[CardByte] RecipientsChanged registration failed:", result.error?.message);
+                    }
+                }
+            );
+        }
+
         await _applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
+        await checkRecipientsAndFilterSignature(item); // initial check on compose open
+
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
     } finally {
