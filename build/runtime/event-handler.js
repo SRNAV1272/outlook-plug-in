@@ -333,7 +333,7 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
         await bodySetSignatureAsync(item, "");
 
         // Step 2: inject heavy HTML at cursor position (bottom)
-        await bodySetSelectedDataAsync(item, html);
+        await bodySetSelectedDataAsync(item, '<p>&ensp;</p>' + html + '<p>&ensp;</p>');
 
         removeHeavySignatureNotification(item);
         console.log("[CardByte] Heavy signature inserted at compose time via cursor trick.");
