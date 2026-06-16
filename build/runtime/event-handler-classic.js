@@ -6699,13 +6699,21 @@
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 var CONFIG = {
+    BASE_URL: "https://newqa-enterprise.cardbyte.ai/email-signature",
     XHR_URL: "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+    RULES_URL: "https://newqa-enterprise.cardbyte.ai/email-signature/rules-config/get-active",
+    SIG_BY_ID_URL: "https://newqa-enterprise.cardbyte.ai/email-signature/rules-config/get/",
     XHR_TIMEOUT_MS: 6000,
 
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
     CACHE_KEY: "cardbyte_sig_html",
+    RULES_CACHE_KEY: "cardbyte_classic_rules",
+    RULES_CACHE_TIMESTAMP_KEY: "cardbyte_classic_rules_ts",
+    RULES_CACHE_TTL_MS: 5 * 60 * 1000,          // 5 min
+    SIG_BY_ID_CACHE_KEY: "cardbyte_classic_sig_by_id",
+    SIG_BY_ID_TTL_MS: 5 * 60 * 1000,            // 5 min
 
     WRAP_TOP_PX: 40,
     WRAP_BOTTOM_PX: 40,
@@ -6715,13 +6723,11 @@ var CONFIG = {
 
     DIAG_ENABLED: false,
 
-    CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,   // 6 hours
+    CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,       // 6 hours
+
+    RECIPIENT_POLL_MS: 2000,                      // OWA / Classic fallback poll interval
 
     // ── Signature boundary tokens ──────────────────────────────────────────
-    // Plain text nodes inside white-coloured <td> cells — survive Classic
-    // Outlook's HTML round-trip AND OWA's sanitizer without being stripped.
-    // Must match the tokens used in event-handler.js so both files share one
-    // stripping strategy.
     CB_SIG_START: "__CBSIG_START_7F2C9D4E__",
     CB_SIG_END: "__CBSIG_END_7F2C9D4E__"
 };
@@ -6795,8 +6801,17 @@ function decryptResponse(cipherB64) {
 }
 
 // ─── Cache (OfficeRuntime.storage) ────────────────────────────────────────────
+//
+// All three storage helpers (_sigCache, _rulesCache, _sigByIdCache) follow the
+// same pattern: an in-memory mirror (_mem*) is checked first (synchronous, zero
+// I/O), and OfficeRuntime.storage is used as the durable backing store shared
+// across compose / reply / forward windows that share the same SharedRuntime.
 
 var _memCache = {};
+var _memRulesCache = {};
+var _memSigByIdCache = {};   // { [signatureId]: { html, ts } }
+
+// ── Default signature cache (unchanged from original) ─────────────────────────
 
 function cacheGet(cb) {
     var mem = _memCache[CONFIG.CACHE_KEY];
@@ -6855,23 +6870,148 @@ function cacheClear(cb) {
     } catch (e) { _diag.warn("cacheClear threw: " + e.message); if (cb) cb(); }
 }
 
-// ─── Signature wrapping ───────────────────────────────────────────────────────
+// ── Rules cache ───────────────────────────────────────────────────────────────
 //
-// Wraps the raw backend HTML in a sentinel table that carries CB_SIG_START and
-// CB_SIG_END as plain text inside white 1-px cells.
-//
-// Why plain text tokens instead of HTML attributes or comments?
-//   • HTML comments → stripped by OWA's setSelectedDataAsync sanitizer.
-//   • Custom attributes (data-cb) → sometimes dropped by Classic Outlook's
-//     Trident/Word renderer on round-trip through getAsync → setAsync.
-//   • Plain text in a visually hidden cell (color:#ffffff, font-size:1px) →
-//     survives both renderers intact, is detectable with a simple indexOf,
-//     and never appears in the user-visible email body.
+// Stored as a plain JSON string under CONFIG.RULES_CACHE_KEY.
+// No integrity hash needed — rules are non-sensitive routing config.
 
-// Sentinel cell style: width:0 + overflow:hidden + max-height:0 ensures the
-// token text is fully suppressed even on Trident/Word, which ignores font-size:1px
-// and color:#ffffff alone. The token still survives the HTML round-trip as a
-// text node and is detectable with indexOf.
+function rulesCacheGet(cb) {
+    // 1. Memory hit
+    var mem = _memRulesCache[CONFIG.RULES_CACHE_KEY];
+    if (mem && mem.rulesJson) {
+        var age = Date.now() - (mem.ts || 0);
+        if (age < CONFIG.RULES_CACHE_TTL_MS) {
+            _diag.info("rulesCacheGet: memory hit (age=" + age + "ms)");
+            cb(mem.rulesJson);
+            return;
+        }
+        _diag.info("rulesCacheGet: memory TTL expired");
+        delete _memRulesCache[CONFIG.RULES_CACHE_KEY];
+    }
+
+    // 2. Storage hit
+    try {
+        OfficeRuntime.storage.getItem(CONFIG.RULES_CACHE_KEY).then(
+            function (raw) {
+                if (!raw) { cb(null); return; }
+                var entry;
+                try { entry = typeof raw === "string" ? JSON.parse(raw) : raw; }
+                catch (_) { _diag.error("rulesCacheGet: JSON parse failed"); cb(null); return; }
+                if (!entry || !entry.rulesJson) { cb(null); return; }
+                if (Date.now() - (entry.ts || 0) > CONFIG.RULES_CACHE_TTL_MS) {
+                    _diag.info("rulesCacheGet: storage TTL expired");
+                    cb(null);
+                    return;
+                }
+                _memRulesCache[CONFIG.RULES_CACHE_KEY] = entry;
+                _diag.info("rulesCacheGet: storage hit");
+                cb(entry.rulesJson);
+            },
+            function (err) { _diag.warn("rulesCacheGet storage read failed: " + err); cb(null); }
+        );
+    } catch (e) { _diag.warn("rulesCacheGet threw: " + e.message); cb(null); }
+}
+
+function rulesCacheSet(rulesJson, cb) {
+    var entry = { rulesJson: rulesJson, ts: Date.now() };
+    _memRulesCache[CONFIG.RULES_CACHE_KEY] = entry;
+    try {
+        OfficeRuntime.storage.setItem(CONFIG.RULES_CACHE_KEY, JSON.stringify(entry)).then(
+            function () { _diag.info("rulesCacheSet: saved"); if (cb) cb(); },
+            function (err) { _diag.warn("rulesCacheSet failed: " + err); if (cb) cb(); }
+        );
+    } catch (e) { _diag.warn("rulesCacheSet threw: " + e.message); if (cb) cb(); }
+}
+
+// ── Per-signatureId HTML cache ─────────────────────────────────────────────────
+//
+// Stored as a single JSON map under CONFIG.SIG_BY_ID_CACHE_KEY so all compose /
+// reply / forward windows sharing the same SharedRuntime localStorage key see
+// each other's fetched signatures immediately.
+//
+// Map shape: { [signatureId]: { html: string, ts: number } }
+
+function _readSigByIdMap(cb) {
+    // 1. Memory mirror
+    if (_memSigByIdCache._loaded) {
+        cb(_memSigByIdCache._map || {});
+        return;
+    }
+
+    // 2. Storage
+    try {
+        OfficeRuntime.storage.getItem(CONFIG.SIG_BY_ID_CACHE_KEY).then(
+            function (raw) {
+                var map = {};
+                if (raw) {
+                    try { map = JSON.parse(raw) || {}; }
+                    catch (_) { _diag.warn("_readSigByIdMap: JSON parse failed"); }
+                }
+                _memSigByIdCache._map = map;
+                _memSigByIdCache._loaded = true;
+                cb(map);
+            },
+            function (err) {
+                _diag.warn("_readSigByIdMap read failed: " + err);
+                cb({});
+            }
+        );
+    } catch (e) { _diag.warn("_readSigByIdMap threw: " + e.message); cb({}); }
+}
+
+function _writeSigByIdMap(map, cb) {
+    _memSigByIdCache._map = map;
+    _memSigByIdCache._loaded = true;
+    try {
+        OfficeRuntime.storage.setItem(CONFIG.SIG_BY_ID_CACHE_KEY, JSON.stringify(map)).then(
+            function () { if (cb) cb(); },
+            function (err) { _diag.warn("_writeSigByIdMap failed: " + err); if (cb) cb(); }
+        );
+    } catch (e) { _diag.warn("_writeSigByIdMap threw: " + e.message); if (cb) cb(); }
+}
+
+/**
+ * Returns the cached (pre-wrapped) HTML for a signatureId if fresh.
+ * Calls cb(html) on hit, cb(null) on miss / TTL expiry.
+ *
+ * @param {string|number} signatureId
+ * @param {function} cb  - (html: string|null) => void
+ */
+function sigByIdGet(signatureId, cb) {
+    var id = String(signatureId);
+    _readSigByIdMap(function (map) {
+        var entry = map[id];
+        if (!entry) { cb(null); return; }
+        if (Date.now() - entry.ts > CONFIG.SIG_BY_ID_TTL_MS) {
+            _diag.info("sigByIdGet: TTL expired for id=" + id);
+            cb(null);
+            return;
+        }
+        _diag.info("sigByIdGet: hit for id=" + id);
+        cb(entry.html);
+    });
+}
+
+/**
+ * Stores the (pre-wrapped) HTML for a signatureId.
+ *
+ * @param {string|number} signatureId
+ * @param {string} html
+ * @param {function} [cb]
+ */
+function sigByIdSet(signatureId, html, cb) {
+    var id = String(signatureId);
+    _readSigByIdMap(function (map) {
+        map[id] = { html: html, ts: Date.now() };
+        _writeSigByIdMap(map, function () {
+            _diag.info("sigByIdSet: cached id=" + id);
+            if (cb) cb();
+        });
+    });
+}
+
+// ─── Signature wrapping ───────────────────────────────────────────────────────
+
 var SENTINEL_TD_STYLE =
     "font-size:0px;color:#ffffff;line-height:0;max-height:0;"
     + "overflow:hidden;mso-hide:all;display:none;width:0;";
@@ -6900,20 +7040,6 @@ function _wrapSignature(html) {
 }
 
 // ─── Signature stripping ──────────────────────────────────────────────────────
-//
-// Removes ALL CardByte and native Outlook signature artifacts from a body HTML.
-//
-// STRATEGY — token-position walk instead of regex or DOMParser:
-//   Classic Outlook's Trident engine rewrites table nesting unpredictably, so
-//   we cannot rely on a fixed tag structure around the tokens. Instead:
-//
-//   1. Find CB_SIG_START with indexOf.
-//   2. Walk BACKWARDS with lastIndexOf("<table") to find the outermost table
-//      that encloses the token — this is the wrapper _wrapSignature produced.
-//   3. Find CB_SIG_END with indexOf.
-//   4. Walk FORWARDS with indexOf("</table>") to close the block.
-//   5. Excise [outerTableOpen … closingTag] from the string.
-//   6. Repeat until no more tokens remain (handles double-insert edge case).
 
 function stripSignatures(html) {
     if (!html) {
@@ -6923,7 +7049,6 @@ function stripSignatures(html) {
 
     _diag.info("=== stripSignatures START | inputLen=" + html.length + " ===");
 
-    // ── 1. Native Outlook div-based signatures ────────────────────────────────
     var before = html.length;
     html = html.replace(/<div[^>]*\bid=["']Signature["'][^>]*>[\s\S]*?<\/div>/gi, "");
     if (html.length !== before)
@@ -6934,13 +7059,11 @@ function stripSignatures(html) {
     if (html.length !== before)
         _diag.info("stripSignatures: removed div#appendonsend (" + (before - html.length) + " chars)");
 
-    // ── 2. Legacy V1 plain-text markers ──────────────────────────────────────
     before = html.length;
     html = html.replace(/__CARDBYTE_SIG_START_V1__[\s\S]*?__CARDBYTE_SIG_END_V1__/gi, "");
     if (html.length !== before)
         _diag.info("stripSignatures: removed V1 markers (" + (before - html.length) + " chars)");
 
-    // ── 3. CB_SIG token-walk (current format) ─────────────────────────────────
     var iterations = 0;
     var MAX_ITER = 10;
 
@@ -6962,29 +7085,18 @@ function stripSignatures(html) {
         var tableClose = html.indexOf("</table>", endIdx);
 
         if (tableOpen !== -1 && tableClose !== -1) {
-            var removed = tableClose + "</table>".length - tableOpen;
-            _diag.info("stripSignatures: removing CB_SIG block"
-                + " | tableOpen=" + tableOpen
-                + " | tableClose=" + tableClose
-                + " | removed=" + removed + " chars");
-
             html = html.substring(0, tableOpen)
                 + html.substring(tableClose + "</table>".length);
         } else {
-            _diag.warn("stripSignatures: table boundary not found"
-                + " | tableOpen=" + tableOpen
-                + " | tableClose=" + tableClose
-                + " — falling back to token-span cut");
-
+            _diag.warn("stripSignatures: table boundary not found — token-span cut");
             html = html.substring(0, startIdx)
                 + html.substring(endIdx + CONFIG.CB_SIG_END.length);
         }
     }
 
     if (iterations >= MAX_ITER)
-        _diag.error("stripSignatures: MAX_ITER reached — possible infinite loop, bailing");
+        _diag.error("stripSignatures: MAX_ITER reached — bailing");
 
-    // ── 4. Cosmetic clean-up ──────────────────────────────────────────────────
     html = html.replace(/(?:\s*<br\s*\/?>)+\s*$/gi, "");
     html = html.replace(/<div>\s*<\/div>/gi, "");
     html = html.replace(/<p>\s*<\/p>/gi, "");
@@ -7015,41 +7127,17 @@ function _setBody(item, html, cb) {
     });
 }
 
-// _insertSignature removed — see writeSignature PATH B comment for rationale.
-
 // ─── Core write path ──────────────────────────────────────────────────────────
 //
-// writeSignature(item, html, onDone, forceReplace)
-//
-// PATH A — small sig (<100 KB) + setSignatureAsync available.
-//   Calls setSignatureAsync directly; Outlook manages the signature slot.
-//
-// PATH B — large sig OR setSignatureAsync unavailable (Classic Outlook always
-//   lands here because setSignatureAsync is not present in Trident runtime).
-//   1. Optionally clear native signature slot.
-//   2. Read existing body.
-//   3. Dedup guard — skip if tokens already present (unless forceReplace).
-//   4. Strip all previous signatures from the existing body.
-//   5. Concatenate stripped body + wrapped signature into one string.
-//   6. Write the combined string in ONE setAsync call (no cursor juggling).
-//   7. Verify token presence in body after write.
-//
-// Why one setAsync instead of setAsync + setSelectedDataAsync?
-//   setAsync resets the cursor to position 0 (top of body). A subsequent
-//   setSelectedDataAsync therefore inserts at the TOP, prepending the
-//   signature instead of appending it. Combining into one setAsync call
-//   eliminates the cursor entirely and guarantees correct append order.
+// Identical to the original file.  The only change is that it now accepts
+// pre-wrapped HTML from both the default-signature path AND the rules path,
+// so callers are responsible for wrapping before calling writeSignature.
 
 function writeSignature(item, html, onDone, forceReplace) {
     var htmlKB = byteKB(html);
 
     _diag.info("=== writeSignature START | " + htmlKB.toFixed(1) + " KB"
         + " | forceReplace=" + !!forceReplace + " ===");
-
-    _diag.info("writeSignature: CB_SIG_START present in html: "
-        + (html.indexOf(CONFIG.CB_SIG_START) !== -1));
-    _diag.info("writeSignature: CB_SIG_END present in html: "
-        + (html.indexOf(CONFIG.CB_SIG_END) !== -1));
 
     // ── PATH A ────────────────────────────────────────────────────────────────
     if (typeof item.body.setSignatureAsync === "function" && htmlKB < 100) {
@@ -7071,8 +7159,7 @@ function writeSignature(item, html, onDone, forceReplace) {
     }
 
     // ── PATH B ────────────────────────────────────────────────────────────────
-    _diag.info("PATH B: combined setAsync body+sig ("
-        + htmlKB.toFixed(1) + " KB)");
+    _diag.info("PATH B: combined setAsync body+sig (" + htmlKB.toFixed(1) + " KB)");
 
     function step_clearSlot(next) {
         if (typeof item.body.setSignatureAsync !== "function") {
@@ -7080,34 +7167,21 @@ function writeSignature(item, html, onDone, forceReplace) {
             next();
             return;
         }
-        _diag.info("step_clearSlot: clearing native signature slot");
         item.body.setSignatureAsync("", { coercionType: Office.CoercionType.Html }, function (r) {
             if (r.status !== Office.AsyncResultStatus.Succeeded)
                 _diag.warn("step_clearSlot non-fatal: " + JSON.stringify(r.error));
-            else
-                _diag.info("step_clearSlot: cleared");
             next();
         });
     }
 
     function step_readBody(next) {
-        _diag.info("step_readBody: reading current body");
         _getBody(item, function (body, err) {
-            if (err) {
-                _diag.error("step_readBody failed: " + JSON.stringify(err));
-                onDone(false);
-                return;
-            }
-            _diag.info("step_readBody: length=" + body.length
-                + " | CB_SIG_START=" + (body.indexOf(CONFIG.CB_SIG_START) !== -1)
-                + " | CB_SIG_END=" + (body.indexOf(CONFIG.CB_SIG_END) !== -1));
+            if (err) { _diag.error("step_readBody failed: " + JSON.stringify(err)); onDone(false); return; }
             next(body);
         });
     }
 
     function step_stripAndInsert(existingBody) {
-
-        // ── Locate reply chain boundary FIRST ────────────────────────────────────
         var REPLY_PATTERNS = [
             /(<div>\s*<div[^>]+border-top\s*:\s*solid[^>]*>)/i,
             /(<div[^>]+style\s*=\s*["'][^"']*border-top\s*:\s*solid[^"']*["'][^>]*>)/i,
@@ -7130,59 +7204,33 @@ function writeSignature(item, html, onDone, forceReplace) {
             }
         }
 
-        _diag.info("step_stripAndInsert: reply boundary"
-            + " | pattern=" + patternUsed
+        _diag.info("step_stripAndInsert: boundary pattern=" + patternUsed
             + " | composeLen=" + composeArea.length
             + " | chainLen=" + chainArea.length);
 
-        // ── Dedup guard — compose area only ──────────────────────────────────────
         var sigInComposeArea =
             composeArea.indexOf(CONFIG.CB_SIG_START) !== -1 &&
             composeArea.indexOf(CONFIG.CB_SIG_END) !== -1;
 
         if (!forceReplace && sigInComposeArea) {
-            _diag.info("step_stripAndInsert: signature already present in compose area"
-                + " + forceReplace=false — skipping insert");
+            _diag.info("step_stripAndInsert: sig already present + forceReplace=false — skipping");
             onDone(true);
             return;
         }
 
-        // ── Strip previous signatures from COMPOSE AREA only ─────────────────────
-        // chainArea is intentionally left untouched — signatures in the quoted
-        // reply chain belong to the original sender and must be preserved.
         var cleanCompose = stripSignatures(composeArea);
-
-        _diag.info("step_stripAndInsert: cleanCompose=" + cleanCompose.length
-            + " chars (was " + composeArea.length + ")");
-
-        // ── Assemble: cleanCompose + wrapped signature + untouched chain ──────────
         var combined = cleanCompose + html + chainArea;
-        var combinedKB = byteKB(combined).toFixed(1);
-        _diag.info("step_stripAndInsert: writing combined body+sig | " + combinedKB + " KB");
+
+        _diag.info("step_stripAndInsert: writing combined | " + byteKB(combined).toFixed(1) + " KB");
 
         _setBody(item, combined, function (err) {
-            if (err) {
-                _diag.error("step_stripAndInsert: setBody (combined) failed: "
-                    + JSON.stringify(err));
-                onDone(false);
-                return;
-            }
-            _diag.info("step_stripAndInsert: setBody OK");
+            if (err) { _diag.error("step_stripAndInsert: setBody failed: " + JSON.stringify(err)); onDone(false); return; }
 
-            // ── Verify tokens survived the write ─────────────────────────────────
             _getBody(item, function (bodyAfter, err2) {
-                if (err2) {
-                    _diag.warn("step_stripAndInsert: verification read failed — assuming success");
-                    onDone(true);
-                    return;
-                }
+                if (err2) { _diag.warn("verification read failed — assuming success"); onDone(true); return; }
                 var startOk = bodyAfter.indexOf(CONFIG.CB_SIG_START) !== -1;
                 var endOk = bodyAfter.indexOf(CONFIG.CB_SIG_END) !== -1;
-                _diag.info("step_stripAndInsert: post-write verification"
-                    + " | bodyLen=" + bodyAfter.length
-                    + " | CB_SIG_START=" + startOk
-                    + " | CB_SIG_END=" + endOk);
-                _diag.info("=== writeSignature END | success=" + (startOk && endOk) + " ===");
+                _diag.info("post-write verification | CB_SIG_START=" + startOk + " | CB_SIG_END=" + endOk);
                 onDone(startOk && endOk);
             });
         });
@@ -7208,7 +7256,53 @@ function writeDiagnostics(item, onDone) {
         function () { onDone(); });
 }
 
-// ─── Backend fetch ────────────────────────────────────────────────────────────
+// ─── XHR helper ───────────────────────────────────────────────────────────────
+//
+// Generic XHR wrapper used by all three backend fetch functions.
+// Decrypts the response body and parses it as JSON.
+//
+// @param {string}   url
+// @param {object}   headers   - { headerName: value, ... }
+// @param {function} onSuccess - (parsedJson: object) => void
+// @param {function} onError   - (reason: string) => void
+
+function _xhrGetJson(url, headers, onSuccess, onError) {
+    var xhr;
+    try { xhr = new XMLHttpRequest(); }
+    catch (e) { _diag.error("_xhrGetJson ctor: " + e.message); onError("xhr-construct-error"); return; }
+
+    try {
+        xhr.open("GET", url, true);
+        xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
+        for (var h in headers) {
+            if (Object.prototype.hasOwnProperty.call(headers, h))
+                xhr.setRequestHeader(h, headers[h]);
+        }
+    } catch (e) { _diag.error("_xhrGetJson setup: " + e.message); onError("xhr-setup-error"); return; }
+
+    xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+            var plaintext = decryptResponse(xhr.responseText);
+            if (!plaintext) { onError("decrypt-failed"); return; }
+            var parsed;
+            try { parsed = JSON.parse(plaintext); }
+            catch (e) { _diag.warn("_xhrGetJson: JSON parse failed: " + e.message); onError("parse-error"); return; }
+            onSuccess(parsed);
+        } else {
+            _diag.warn("_xhrGetJson: HTTP " + xhr.status + " for " + url);
+            onError("http-" + xhr.status);
+        }
+    };
+
+    xhr.ontimeout = function () { onError("timeout"); };
+    xhr.onerror = function () { _diag.error("_xhrGetJson: onerror — CORS / network?"); onError("network-error"); };
+
+    try { xhr.send(); }
+    catch (e) { _diag.error("_xhrGetJson: send threw: " + e.message); onError("xhr-send-error"); }
+}
+
+// ─── Backend fetch — default signature ────────────────────────────────────────
 
 function resolveContext() {
     var email = "";
@@ -7227,66 +7321,358 @@ function fetchSignature(onSuccess, onError) {
     try { ctx = resolveContext(); }
     catch (e) { _diag.error(e.message); onError("context-error"); return; }
 
-    _diag.info("fetchSignature: email=" + ctx.email + " | platform=" + ctx.platform);
-
     var encrypted = encryptEmail(ctx.email);
     if (!encrypted) { onError("encrypt-failed"); return; }
 
+    _diag.info("fetchSignature: email=" + ctx.email);
+
+    _xhrGetJson(
+        CONFIG.XHR_URL,
+        { "username": encrypted, "X-Platform": ctx.platform },
+        function (parsed) {
+            var html = parsed && parsed.html;
+            if (!html) { _diag.warn("fetchSignature: missing html"); onError("missing-html"); return; }
+            _diag.info("fetchSignature: success | htmlLen=" + html.length);
+            onSuccess(html);
+        },
+        onError
+    );
+}
+
+// ─── Backend fetch — rules config ─────────────────────────────────────────────
+//
+// Mirrors fetchAndCacheRules() in event-handler.js.
+// On success calls cb(rulesJson); on failure calls cb(null).
+
+function fetchAndCacheRules(cb) {
+    var ctx;
+    try { ctx = resolveContext(); }
+    catch (e) { _diag.error("fetchAndCacheRules: " + e.message); cb(null); return; }
+
+    var encrypted = encryptEmail(ctx.email);
+    if (!encrypted) { _diag.warn("fetchAndCacheRules: encrypt failed"); cb(null); return; }
+
+    _diag.info("fetchAndCacheRules: fetching...");
+
+    // NOTE: Rules endpoint returns plain JSON (not AES-encrypted).
+    // We use a raw XHR here instead of _xhrGetJson which always decrypts.
     var xhr;
     try { xhr = new XMLHttpRequest(); }
-    catch (e) { _diag.error("XHR ctor: " + e.message); onError("xhr-construct-error"); return; }
+    catch (e) { _diag.error("fetchAndCacheRules XHR ctor: " + e.message); cb(null); return; }
 
-    try {
-        xhr.open("GET", CONFIG.XHR_URL, true);
-        xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
-        xhr.setRequestHeader("username", encrypted);
-        xhr.setRequestHeader("X-Platform", ctx.platform);
-    } catch (e) { _diag.error("XHR setup: " + e.message); onError("xhr-setup-error"); return; }
+    xhr.open("GET", CONFIG.RULES_URL, true);
+    xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.setRequestHeader("username", encrypted);
+    xhr.setRequestHeader("X-Platform", ctx.platform);
 
     xhr.onreadystatechange = function () {
         if (xhr.readyState !== 4) return;
-        _diag.info("fetchSignature: XHR status=" + xhr.status
-            + " | responseLen=" + (xhr.responseText || "").length);
-
         if (xhr.status >= 200 && xhr.status < 300) {
-            var plaintext = decryptResponse(xhr.responseText);
-            if (!plaintext) { onError("decrypt-failed"); return; }
-
             var parsed;
-            try { parsed = JSON.parse(plaintext); }
-            catch (e) { _diag.warn("fetchSignature: JSON parse failed: " + e.message); onError("parse-error"); return; }
+            try { parsed = JSON.parse(xhr.responseText); }
+            catch (e) { _diag.error("fetchAndCacheRules: parse failed: " + e.message); cb(null); return; }
 
-            var html = parsed && parsed.html;
-            if (!html) { _diag.warn("fetchSignature: missing html field"); onError("missing-html"); return; }
+            var rulesJson = parsed && parsed.rulesJson;
+            if (!rulesJson) { _diag.warn("fetchAndCacheRules: no rulesJson in response"); cb(null); return; }
 
-            _diag.info("fetchSignature: success | htmlLen=" + html.length);
-            onSuccess(html);
+            rulesCacheSet(rulesJson, function () {
+                _diag.info("fetchAndCacheRules: rules fetched and cached");
+                cb(rulesJson);
+            });
         } else {
-            _diag.warn("fetchSignature: HTTP " + xhr.status);
-            onError("http-" + xhr.status);
+            _diag.warn("fetchAndCacheRules: HTTP " + xhr.status);
+            cb(null);
         }
     };
 
-    xhr.ontimeout = function () {
-        _diag.warn("fetchSignature: XHR timed out after " + CONFIG.XHR_TIMEOUT_MS + "ms");
-        onError("timeout");
-    };
-    xhr.onerror = function () {
-        _diag.error("fetchSignature: XHR onerror — CORS / network block?");
-        onError("network-error");
-    };
+    xhr.ontimeout = function () { _diag.warn("fetchAndCacheRules: timeout"); cb(null); };
+    xhr.onerror = function () { _diag.error("fetchAndCacheRules: network error"); cb(null); };
 
-    try { xhr.send(); _diag.info("fetchSignature: xhr.send()"); }
-    catch (e) { _diag.error("fetchSignature: xhr.send threw: " + e.message); onError("xhr-send-error"); }
+    try { xhr.send(); }
+    catch (e) { _diag.error("fetchAndCacheRules: send threw: " + e.message); cb(null); }
+}
+
+// ─── Backend fetch — signature by id ──────────────────────────────────────────
+//
+// Fetches and decrypts the signature HTML for a specific signatureId.
+// Mirrors fetchSignatureById() in event-handler.js.
+// Calls cb(html) on success; cb(null) on failure.
+
+function fetchSignatureById(signatureId, cb) {
+    var id = String(signatureId);
+    var ctx;
+    try { ctx = resolveContext(); }
+    catch (e) { _diag.error("fetchSignatureById: " + e.message); cb(null); return; }
+
+    var encrypted = encryptEmail(ctx.email);
+    if (!encrypted) { _diag.warn("fetchSignatureById: encrypt failed"); cb(null); return; }
+
+    _diag.info("fetchSignatureById: fetching id=" + id);
+
+    _xhrGetJson(
+        CONFIG.SIG_BY_ID_URL + id,
+        { "username": encrypted, "X-Platform": ctx.platform },
+        function (parsed) {
+            var html = parsed && parsed.html;
+            if (!html) { _diag.warn("fetchSignatureById: missing html for id=" + id); cb(null); return; }
+            _diag.info("fetchSignatureById: success id=" + id + " | len=" + html.length);
+            cb(html);
+        },
+        function (reason) { _diag.warn("fetchSignatureById: failed id=" + id + " reason=" + reason); cb(null); }
+    );
+}
+
+// ─── Cache-first wrapper — getOrFetchSignatureById ────────────────────────────
+//
+// Mirrors getOrFetchSignatureById() in event-handler.js.
+//
+// Hit  → returns cached pre-wrapped HTML immediately.
+// Miss → fetches, wraps, stores in sigById map, calls cb(wrappedHtml).
+//
+// NOTE: the HTML is stored PRE-WRAPPED so writeSignature receives the same
+// shape regardless of whether it came from cache or a fresh fetch.
+
+function getOrFetchSignatureById(signatureId, cb) {
+    var id = String(signatureId);
+
+    sigByIdGet(id, function (cached) {
+        if (cached) {
+            _diag.info("getOrFetchSignatureById: cache hit id=" + id);
+            cb(cached);
+            return;
+        }
+
+        _diag.info("getOrFetchSignatureById: cache miss — fetching id=" + id);
+        fetchSignatureById(id, function (html) {
+            if (!html) { cb(null); return; }
+            var wrapped = _wrapSignature(html);
+            sigByIdSet(id, wrapped, function () { cb(wrapped); });
+        });
+    });
+}
+
+// ─── Prefetch all rule signatures ─────────────────────────────────────────────
+//
+// Mirrors prefetchAllRuleSignatures() in event-handler.js.
+// Reads the rules cache (must already be populated) and fires parallel
+// getOrFetchSignatureById calls for every enabled rule.
+// Fire-and-forget: failures are logged but do not block compose open.
+
+function prefetchAllRuleSignatures() {
+    rulesCacheGet(function (rulesJson) {
+        if (!rulesJson) {
+            _diag.info("prefetchAllRuleSignatures: rules not cached yet — skipping");
+            return;
+        }
+
+        var enabledRules = (rulesJson.rulesList || []).filter(function (r) {
+            return r.enabled && r.signatureId != null;
+        });
+
+        if (enabledRules.length === 0) return;
+
+        _diag.info("prefetchAllRuleSignatures: prefetching " + enabledRules.length + " rule(s)");
+
+        enabledRules.forEach(function (r) {
+            getOrFetchSignatureById(r.signatureId, function (html) {
+                if (html) _diag.info("prefetchAllRuleSignatures: ✅ id=" + r.signatureId);
+                else _diag.warn("prefetchAllRuleSignatures: ⚠️  null for id=" + r.signatureId);
+            });
+        });
+    });
+}
+
+// ─── Rules matching engine ────────────────────────────────────────────────────
+//
+// Pure functions — identical logic to the modern handler.
+
+function emailMatchesPattern(email, pattern) {
+    if (!pattern || !pattern.trim()) return false;
+    var p = pattern.trim().toLowerCase();
+    if (p === "*") return true;
+    if (p.indexOf("@") === -1) return email.slice(-(p.length + 1)) === "@" + p;
+    return email === p;
+}
+
+function ruleMatchesEmails(rule, emails) {
+    var ruleType = rule.ruleType || "ANY";
+    var ruleValue = rule.ruleValue || [];
+
+    if (ruleType === "ALL") {
+        return ruleValue.every(function (p) {
+            return emails.some(function (e) { return emailMatchesPattern(e, p); });
+        });
+    }
+    return emails.some(function (e) {
+        return ruleValue.some(function (p) { return emailMatchesPattern(e, p); });
+    });
+}
+
+/**
+ * Reads To + CC recipients and returns a sorted, deduplicated lowercase array.
+ * Calls cb(emails: string[]).
+ */
+function getAllRecipientEmails(item, cb) {
+    var results = [];
+    var pending = 2;
+
+    function collect(field) {
+        if (typeof field === "undefined" || field === null || typeof field.getAsync !== "function") {
+            if (--pending === 0) cb(_dedup(results));
+            return;
+        }
+        field.getAsync(function (r) {
+            if (r.status === Office.AsyncResultStatus.Succeeded && Array.isArray(r.value)) {
+                r.value.forEach(function (rec) {
+                    var addr = (rec.emailAddress || "").toLowerCase().trim();
+                    if (addr) results.push(addr);
+                });
+            }
+            if (--pending === 0) cb(_dedup(results));
+        });
+    }
+
+    collect(item && item.to);
+    collect(item && item.cc);
+}
+
+function _dedup(arr) {
+    var seen = {};
+    return arr.filter(function (v) {
+        if (seen[v]) return false;
+        seen[v] = true;
+        return true;
+    });
+}
+
+/**
+ * Evaluates cached rules against current recipients.
+ * Falls back to a live fetch if rules are not cached.
+ * Calls cb(matchedRule | null).
+ */
+function findMatchingRule(item, cb) {
+    rulesCacheGet(function (rulesJson) {
+        if (!rulesJson) {
+            _diag.warn("findMatchingRule: rules not cached — live fetch");
+            fetchAndCacheRules(function (fetched) {
+                if (!fetched) { _diag.warn("findMatchingRule: live fetch failed"); cb(null); return; }
+                _evalRules(item, fetched, cb);
+            });
+            return;
+        }
+        _evalRules(item, rulesJson, cb);
+    });
+}
+
+function _evalRules(item, rulesJson, cb) {
+    getAllRecipientEmails(item, function (emails) {
+        _diag.info("findMatchingRule: evaluating " + emails.length + " recipient(s)");
+
+        if (emails.length === 0) {
+            _diag.warn("findMatchingRule: no recipients — cannot match");
+            cb(null);
+            return;
+        }
+
+        var enabledRules = (rulesJson.rulesList || [])
+            .filter(function (r) { return r.enabled; })
+            .sort(function (a, b) { return a.priority - b.priority; });
+
+        var matched = null;
+        for (var i = 0; i < enabledRules.length; i++) {
+            if (ruleMatchesEmails(enabledRules[i], emails)) {
+                matched = enabledRules[i];
+                break;
+            }
+        }
+
+        if (matched) {
+            _diag.info("findMatchingRule: ✅ matched rule='" + matched.rule
+                + "' (priority=" + matched.priority
+                + ") signatureId=" + matched.signatureId);
+        } else {
+            _diag.warn("findMatchingRule: ❌ no rule matched");
+        }
+
+        cb(matched);
+    });
+}
+
+// ─── Recipient-change handler ─────────────────────────────────────────────────
+//
+// Called whenever the recipient set changes (via poll).
+// Finds the matching rule, resolves the signature (cache-first),
+// and injects it.  If no rule matches, the current signature is left as-is.
+
+function onRecipientsChanged(item) {
+    findMatchingRule(item, function (matched) {
+        if (!matched) return;
+
+        _diag.info("onRecipientsChanged: rule matched → signatureId=" + matched.signatureId);
+
+        getOrFetchSignatureById(matched.signatureId, function (wrappedHtml) {
+            if (!wrappedHtml) {
+                _diag.warn("onRecipientsChanged: signature null — keeping current");
+                return;
+            }
+            _diag.info("onRecipientsChanged: injecting rule-matched signature");
+            // forceReplace=true so the default signature is replaced by the
+            // rule-specific one even if the dedup guard would otherwise skip it.
+            writeSignature(item, wrappedHtml, function (ok) {
+                if (!ok) _diag.warn("onRecipientsChanged: writeSignature failed");
+                else _diag.info("onRecipientsChanged: ✅ rule signature injected");
+            }, true /* forceReplace */);
+        });
+    });
+}
+
+// ─── Recipient polling ────────────────────────────────────────────────────────
+//
+// Classic Outlook's Trident runtime does not support RecipientsChanged events,
+// so we poll on an interval exactly as the modern handler does for OWA.
+
+var _lastRecipientSnapshot = "";
+var _recipientPollTimer = null;
+
+function _serializeRecipients(emails) {
+    return emails.slice().sort().join(",");
+}
+
+function _pollRecipients() {
+    var item = _safeGetItem();
+    if (!item) return;
+
+    getAllRecipientEmails(item, function (emails) {
+        var snapshot = _serializeRecipients(emails);
+        if (snapshot === _lastRecipientSnapshot) return;   // no change
+
+        _lastRecipientSnapshot = snapshot;
+        _diag.info("pollRecipients: change detected → " + JSON.stringify(emails));
+
+        if (emails.length === 0) return;
+        onRecipientsChanged(item);
+    });
+}
+
+function startRecipientPolling() {
+    if (_recipientPollTimer) return;
+    _diag.info("startRecipientPolling: starting (interval=" + CONFIG.RECIPIENT_POLL_MS + "ms)");
+    _recipientPollTimer = setInterval(_pollRecipients, CONFIG.RECIPIENT_POLL_MS);
+}
+
+function stopRecipientPolling() {
+    if (_recipientPollTimer) {
+        clearInterval(_recipientPollTimer);
+        _recipientPollTimer = null;
+        _diag.info("stopRecipientPolling: stopped");
+    }
 }
 
 // ─── Apply signature flow ─────────────────────────────────────────────────────
 //
-// Mirrors _applySignatureCore() in the modern event-handler:
-//   1. Fetch fresh from backend.
-//   2. Wrap with CB_SIG tokens, cache, then write.
-//   3. On backend failure, fall back to cache.
-//   4. On both failures, log and complete without inserting.
+// applySignatureCore: default-signature path (unchanged from original),
+// extended to kick off rules + prefetch in parallel after the write.
 
 function applySignatureCore(item, guardedEvent, forceReplace) {
     _diag.info("applySignatureCore | forceReplace=" + !!forceReplace);
@@ -7294,7 +7680,6 @@ function applySignatureCore(item, guardedEvent, forceReplace) {
     fetchSignature(
         function (html) {
             _diag.info("applySignatureCore: fresh fetch OK | htmlLen=" + html.length);
-            // Wrap before caching so every write path uses the pre-wrapped version.
             var wrapped = _wrapSignature(html);
             cacheSet(wrapped, function () {
                 writeSignature(item, wrapped, function (ok) {
@@ -7307,14 +7692,12 @@ function applySignatureCore(item, guardedEvent, forceReplace) {
             _diag.warn("applySignatureCore: backend failed (" + reason + ") — trying cache");
             cacheGet(function (cachedHtml) {
                 if (cachedHtml) {
-                    _diag.info("applySignatureCore: cache hit | len=" + cachedHtml.length);
-                    // Cache already holds the wrapped version.
                     writeSignature(item, cachedHtml, function (ok) {
                         if (!ok) _diag.warn("applySignatureCore: writeSignature (cached) failed");
                         writeDiagnostics(item, function () { guardedEvent.completed(); });
                     }, forceReplace);
                 } else {
-                    _diag.error("applySignatureCore: backend miss + cache miss — no signature available");
+                    _diag.error("applySignatureCore: backend + cache miss — no signature");
                     writeDiagnostics(item, function () { guardedEvent.completed(); });
                 }
             });
@@ -7323,19 +7706,6 @@ function applySignatureCore(item, guardedEvent, forceReplace) {
 }
 
 // ─── Signature unwrapping (send-time only) ────────────────────────────────────
-//
-// Removes the CB_SIG sentinel wrapper table that was added by _wrapSignature()
-// at compose time. Called exclusively by onSendHandler so the sent email never
-// contains the __CBSIG_START_7F2C9D4E__ / __CBSIG_END_7F2C9D4E__ tokens or
-// the invisible sentinel <td> cells.
-//
-// Strategy: same token-walk used by stripSignatures, but instead of removing
-// the entire block it extracts the INNER content — the <td> that holds the
-// actual signature HTML (the middle row of the three-row wrapper table).
-//
-// If the wrapper structure is not found (e.g. cache holds unwrapped HTML from
-// a legacy session), the input is returned as-is so the send path degrades
-// gracefully rather than failing.
 
 function _unwrapSignature(wrappedHtml) {
     if (!wrappedHtml) return wrappedHtml;
@@ -7348,38 +7718,17 @@ function _unwrapSignature(wrappedHtml) {
         return wrappedHtml;
     }
 
-    // The wrapper produced by _wrapSignature has exactly 3 rows:
-    //   row 0: <td ...>CB_SIG_START</td>
-    //   row 1: <td style="padding-top:...">ACTUAL SIGNATURE</td>
-    //   row 2: <td ...>CB_SIG_END</td>
-    //
-    // Find the </td> that closes the CB_SIG_START sentinel, then the <td
-    // that opens the content row, then the </td> that closes it.
-
     var startTdClose = wrappedHtml.indexOf("</td>", startIdx);
-    if (startTdClose === -1) {
-        _diag.warn("_unwrapSignature: </td> after START not found — returning as-is");
-        return wrappedHtml;
-    }
+    if (startTdClose === -1) return wrappedHtml;
 
     var contentTdOpen = wrappedHtml.indexOf("<td", startTdClose + 5);
-    if (contentTdOpen === -1) {
-        _diag.warn("_unwrapSignature: content <td> not found — returning as-is");
-        return wrappedHtml;
-    }
+    if (contentTdOpen === -1) return wrappedHtml;
 
     var contentTdBodyStart = wrappedHtml.indexOf(">", contentTdOpen) + 1;
-    if (contentTdBodyStart <= 0) {
-        _diag.warn("_unwrapSignature: content <td> closing '>' not found — returning as-is");
-        return wrappedHtml;
-    }
+    if (contentTdBodyStart <= 0) return wrappedHtml;
 
-    // The content </td> is the one that comes before the CB_SIG_END token.
     var contentTdClose = wrappedHtml.lastIndexOf("</td>", endIdx);
-    if (contentTdClose === -1 || contentTdClose <= contentTdBodyStart) {
-        _diag.warn("_unwrapSignature: content </td> not found — returning as-is");
-        return wrappedHtml;
-    }
+    if (contentTdClose === -1 || contentTdClose <= contentTdBodyStart) return wrappedHtml;
 
     var inner = wrappedHtml.substring(contentTdBodyStart, contentTdClose);
     _diag.info("_unwrapSignature: extracted inner html | len=" + inner.length);
@@ -7430,8 +7779,44 @@ function applySignature(event) {
         guarded.completed();
         return;
     }
+
+    // ── Step 1: inject default signature ─────────────────────────────────────
+    //
+    // applySignatureCore calls guarded.completed() when done, so we hook into
+    // the flow by wrapping guardedEvent with a thin shim that, after the write
+    // is finished, also fires off the rules machinery before signalling Office.
+
+    var shimEvent = {
+        completed: function () {
+            // ── Step 2: fetch + cache rules in parallel with compose open ─────
+            fetchAndCacheRules(function (rulesJson) {
+                if (rulesJson) {
+                    // Pre-warm the sigById cache for every enabled rule so the
+                    // first recipient-change lookup costs zero network time.
+                    prefetchAllRuleSignatures();
+                }
+
+                // ── Step 3: check recipients already present ──────────────────
+                // (e.g. compose opened from a contact card with To pre-filled)
+                getAllRecipientEmails(item, function (emails) {
+                    if (emails.length > 0) {
+                        _lastRecipientSnapshot = _serializeRecipients(emails);
+                        onRecipientsChanged(item);
+                    }
+                });
+
+                // ── Step 4: start polling ─────────────────────────────────────
+                startRecipientPolling();
+            });
+
+            // Signal Office that the LaunchEvent handler is done.
+            // Polling continues independently in the background.
+            guarded.completed();
+        }
+    };
+
     // forceReplace=false — respect dedup guard on first compose open.
-    applySignatureCore(item, guarded, false);
+    applySignatureCore(item, shimEvent, false);
 }
 
 function onSendHandler(event) {
@@ -7447,34 +7832,27 @@ function onSendHandler(event) {
         return;
     }
 
-    // onSendHandler runs in the same Trident context as applySignature in
-    // Classic Outlook (no separate iframe), so OfficeRuntime.storage is shared.
-    cacheGet(function (cachedHtml) {
-        if (!cachedHtml) {
-            _diag.info("onSendHandler: no cached signature — passing through");
-            writeDiagnostics(item, function () {
-                guarded.completed({ allowEvent: true });
-            });
-            return;
-        }
+    // Stop polling — compose session is ending
+    stopRecipientPolling();
 
-        _diag.info("onSendHandler: writing cached signature ("
-            + cachedHtml.length + " chars) | forceReplace=true");
+    // cacheGet(function (cachedHtml) {
+    //     if (!cachedHtml) {
+    //         _diag.info("onSendHandler: no cached signature — passing through");
+    //         writeDiagnostics(item, function () {
+    //             guarded.completed({ allowEvent: true });
+    //         });
+    //         return;
+    //     }
 
-        // ↓↓↓ ADD THIS LINE ↓↓↓
-        var cleanHtml = _unwrapSignature(cachedHtml);
-        // ↑↑↑ ADD THIS LINE ↑↑↑
+    //     var cleanHtml = _unwrapSignature(cachedHtml);
 
-        // forceReplace=true — unconditionally replace any stale / native sig
-        // that Outlook re-injected between compose and send.
-        // cachedHtml is already _wrapSignature()'d.
-        writeSignature(item, cleanHtml, function (ok) {
-            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-            writeDiagnostics(item, function () {
-                guarded.completed({ allowEvent: true });
-            });
-        }, true /* forceReplace */);
-    });
+    //     writeSignature(item, cleanHtml, function (ok) {
+    //         if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+    //         writeDiagnostics(item, function () {
+    //             guarded.completed({ allowEvent: true });
+    //         });
+    //     }, true /* forceReplace */);
+    // });
 }
 
 function onFromChangedHandler(event) {
@@ -7486,8 +7864,10 @@ function onFromChangedHandler(event) {
     var item = _safeGetItem();
     if (!item) { guarded.completed(); return; }
 
+    // Clear both caches — new sender may have different default + different rules
     cacheClear(function () {
-        // forceReplace=true — replace the previous sender's signature.
+        delete _memRulesCache[CONFIG.RULES_CACHE_KEY];
+        // forceReplace=true — replace the previous sender's signature
         applySignatureCore(item, guarded, true);
     });
 }
