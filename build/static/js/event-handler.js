@@ -12,6 +12,11 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const RULES_CACHE_KEY = "cardbyte_cached_rules";
 const RULES_CACHE_TIMESTAMP_KEY = "cardbyte_cached_rules_ts";
 const RULES_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_SAFE_HTML_SIZE = 500_000;
+const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
+const HEAVY_THRESHOLD = 100 * 1024; // 100 KB
+const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
+const MAX_RETRIES = 2;
 
 function getCachedRules({ skipTtl = false } = {}) {
     try {
