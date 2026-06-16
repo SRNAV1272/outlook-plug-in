@@ -268,51 +268,43 @@ function bodySetSelectedDataAsync(item, html) {
     });
 }
 
-async function applySignatureWithFallback(item, html, send = false) {
-    const HEAVY_THRESHOLD = 100 * 1024; // 100 KB
+async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
-
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
-    await bodySetSignatureAsync(item, "");
+
     if (htmlSize < HEAVY_THRESHOLD) {
-        // ── Light path: inject immediately via setSignatureAsync ─────────────
+        // Light path — always use setSignatureAsync (compose or send time)
         removeHeavySignatureNotification(item);
         await bodySetSignatureAsync(item, html);
         return true;
     }
 
-    // ── Heavy path ───────────────────────────────────────────────────────────
-    console.warn(`[CardByte] Signature size ${htmlSize} bytes exceeds 100 KB — heavy path (send=${send}).`);
+    // ── Heavy path (≥ 100 KB) ────────────────────────────────────────────────
+    console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}.`);
 
-    if (!send) {
-        // Compose open: just show the notification bar, don't touch the body
-        showHeavySignatureNotification(item, "Your signature is large and will be inserted at the time of send.");
+    if (isSendTime) {
+        // Send time: signature already in body from compose — skip entirely
+        console.log("[CardByte] Heavy signature at send time — skipping (already injected at compose time).");
+        removeHeavySignatureNotification(item);
         return false;
     }
 
-    // Send time: read current body → append signature → setSelectedDataAsync
+    // Compose/Reply/Forward: cursor trick + setSelectedDataAsync
     try {
-        const combined = html;
-        await bodySetSelectedDataAsync(item, combined);
+        // Step 1: setSignatureAsync("") moves cursor to bottom of compose area
+        await bodySetSignatureAsync(item, "");
+
+        // Step 2: inject heavy HTML at cursor position (bottom)
+        await bodySetSelectedDataAsync(item, html);
+
         removeHeavySignatureNotification(item);
-        console.log("[CardByte] Heavy signature inserted at send time via setSelectedDataAsync.");
+        console.log("[CardByte] Heavy signature inserted at compose time via cursor trick.");
         return true;
     } catch (err) {
-        console.error("[CardByte] Heavy path send-time insertion failed:", err);
+        console.error("[CardByte] Heavy path compose-time insertion failed:", err);
+        showHeavySignatureNotification(item, "Your signature is large and could not be inserted. Please contact Admin.");
         return false;
     }
-}
-
-function moveCursorToTop(item) {
-    return new Promise((resolve) => {
-        try {
-            if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-            item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-            });
-        } catch { resolve(); }
-    });
 }
 
 async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}, send) {
@@ -395,12 +387,13 @@ const applySignature = async function (event = { completed: () => { } }, options
 const onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
-
     try {
         if (!item) return;
-        // Heavy-signature path: inject now at send time (bypasses TTL & session check
-        // since this iframe has its own fresh sessionStorage).
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true }, true);
+        await _applySignatureCore(
+            item, mailbox,
+            { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
+            true
+        );
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
