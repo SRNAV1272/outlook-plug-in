@@ -306,34 +306,30 @@ function bodySetSelectedDataAsync(item, html) {
 
 // ─── Core orchestration ───────────────────────────────────────────────────────
 
+const GAP = '<p style="margin:0;padding:0;line-height:1.5;">&ensp;</p>';
+
 async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
 
     if (htmlSize < HEAVY_THRESHOLD) {
-        // Light path — always use setSignatureAsync (compose or send time)
         removeHeavySignatureNotification(item);
-        await bodySetSignatureAsync(item, html);
+        await bodySetSignatureAsync(item, GAP + html);  // ← gap prepended
         return true;
     }
 
-    // ── Heavy path (≥ 100 KB) ────────────────────────────────────────────────
+    // ── Heavy path ───────────────────────────────────────────────────────────
     console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}.`);
 
     if (isSendTime) {
-        // Send time: signature already in body from compose — skip entirely
-        console.log("[CardByte] Heavy signature at send time — skipping (already injected at compose time).");
+        console.log("[CardByte] Heavy signature at send time — skipping.");
         removeHeavySignatureNotification(item);
         return false;
     }
 
-    // Compose/Reply/Forward: cursor trick + setSelectedDataAsync
     try {
-        // Step 1: setSignatureAsync("") moves cursor to bottom of compose area
         await bodySetSignatureAsync(item, "");
-
-        // Step 2: inject heavy HTML at cursor position (bottom)
-        await bodySetSelectedDataAsync(item, '<p>&ensp;</p>' + html + '<p>&ensp;</p>');
+        await bodySetSelectedDataAsync(item, GAP + html + '<p style="margin:0;padding:0;line-height:1.5;">&ensp;</p>');
 
         removeHeavySignatureNotification(item);
         console.log("[CardByte] Heavy signature inserted at compose time via cursor trick.");
