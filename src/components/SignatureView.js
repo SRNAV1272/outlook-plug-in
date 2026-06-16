@@ -187,6 +187,19 @@ export default function SignatureView({
                     }
                 }
             );
+
+            const secRes = await fetch(
+                "https://newqa-enterprise.cardbyte.ai/email-signature/rules-config/get-active",
+                {
+                    method: "GET",
+                    headers: {
+                        'Content-Type': 'application/json',
+                        username: encryptedMail,
+                        "X-Platform": xPlatform
+                    }
+                }
+            );
+            console.log("Asdjasdashdkjasd", secRes)
             if (primaryRes.ok) {
                 const data = await primaryRes.text();
                 const decryptedData = await handleAesDecrypt(data);
@@ -203,21 +216,6 @@ export default function SignatureView({
             console.warn("[CardByte] Primary failed → legacy fallback");
         } catch (err) { console.warn("[CardByte] Primary crashed:", err); }
 
-        try {
-            const legacyRes = await fetch(
-                "https://qa-renderer.cardbyte.ai/render-signature",
-                { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: userEmail }) }
-            );
-            if (!legacyRes.ok) throw new Error("Legacy renderer failed");
-            const legacyData = await legacyRes.json();
-            const html = legacyData?.finalHtml || null;
-            console.log("[CardByte] Using LEGACY renderer");
-            setShowLegacy(true);
-
-            // ── Write legacy result to globalThis cache too ───────────────
-            if (html) setMemCache(html);
-            return html;
-        } catch (err) { console.error("[CardByte] Both renderers failed:", err); return null; }
     }
 
     /* ── Fetch effect — skips entirely when cachedSignature was provided ── */
