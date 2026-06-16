@@ -735,11 +735,11 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         // Stop polling — compose session is ending
         stopRecipientPolling();
 
-        await applySignatureCore(
-            item, mailbox,
-            { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
-            true  // isSendTime
-        );
+        // await applySignatureCore(
+        //     item, mailbox,
+        //     { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
+        //     true  // isSendTime
+        // );
     } catch (err) {
         console.error("[CardByte] onSendHandler error:", err);
     } finally {
