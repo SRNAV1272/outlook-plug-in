@@ -133,9 +133,68 @@ function getMaxHtmlSize() {
     return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
 }
 
+// ─── Recipient change watcher — registered once, survives compose session ────
+
+let _recipientsHandlerRegistered = false;
+
+function registerRecipientsChangedHandler() {
+    const item = Office?.context?.mailbox?.item;
+
+    if (!item) {
+        // Item not ready yet — retry in 300ms (OWA lazy-loads the item)
+        console.log("[CardByte] Item not ready — retrying RecipientsChanged registration...");
+        setTimeout(registerRecipientsChangedHandler, 300);
+        return;
+    }
+
+    if (_recipientsHandlerRegistered) return;
+
+    if (isMobile()) {
+        console.log("[CardByte] RecipientsChanged not supported on mobile — skipping.");
+        return;
+    }
+
+    if (typeof item.addHandlerAsync !== "function") {
+        console.warn("[CardByte] addHandlerAsync not available on this platform.");
+        return;
+    }
+
+    item.addHandlerAsync(
+        Office.EventType.RecipientsChanged,
+        async (eventArgs) => {
+            console.log("[CardByte] 🔔 RecipientsChanged fired:", eventArgs);
+            const currentItem = Office?.context?.mailbox?.item;
+            if (!currentItem) return;
+            const matched = await checkRecipientsAndFilterSignature(currentItem);
+            if (matched) {
+                console.log(
+                    `[CardByte] 🎯 Active rule → "${matched.rule}" | signatureId: ${matched.signatureId}`
+                );
+            }
+        },
+        { asyncContext: null },
+        (result) => {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+                _recipientsHandlerRegistered = true;
+                console.log("[CardByte] ✅ RecipientsChanged handler registered successfully.");
+            } else {
+                console.warn(
+                    "[CardByte] ❌ RecipientsChanged registration failed:",
+                    result.error?.message
+                );
+                // Retry once on failure (OWA timing issue)
+                setTimeout(registerRecipientsChangedHandler, 500);
+            }
+        }
+    );
+}
+
 Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
     console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
+
+    // Delay slightly to let OWA fully hydrate the mailbox item
+    setTimeout(registerRecipientsChangedHandler, 500);
 });
 
 function base64ToArrayBuffer(base64) {
@@ -650,27 +709,15 @@ const applySignature = async function (event = { completed: () => { } }, options
     try {
         if (!item) return;
 
-        // ── Register recipient-change watcher (once per compose session) ──
-        if (!item._cbRecipientsHandlerRegistered) {
-            item.addHandlerAsync(
-                Office.EventType.RecipientsChanged,
-                async () => {
-                    console.log("[CardByte] Recipients changed — re-evaluating rules...");
-                    await checkRecipientsAndFilterSignature(item);
-                },
-                (result) => {
-                    if (result.status === Office.AsyncResultStatus.Succeeded) {
-                        item._cbRecipientsHandlerRegistered = true;
-                        console.log("[CardByte] RecipientsChanged handler registered.");
-                    } else {
-                        console.warn("[CardByte] RecipientsChanged registration failed:", result.error?.message);
-                    }
-                }
+        await _applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
+
+        // Initial recipient check after signature is applied
+        const matched = await checkRecipientsAndFilterSignature(item);
+        if (matched) {
+            console.log(
+                `[CardByte] 🎯 Initial rule match → "${matched.rule}" | signatureId: ${matched.signatureId}`
             );
         }
-
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
-        await checkRecipientsAndFilterSignature(item); // initial check on compose open
 
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
