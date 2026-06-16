@@ -12,10 +12,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const RULES_CACHE_KEY = "cardbyte_cached_rules";
 const RULES_CACHE_TIMESTAMP_KEY = "cardbyte_cached_rules_ts";
 const RULES_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-// const MAX_SAFE_HTML_SIZE = 500_000;
-// const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const HEAVY_THRESHOLD = 100 * 1024; // 100 KB
-// const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
 const MAX_RETRIES = 2;
 
 function getCachedRules({ skipTtl = false } = {}) {
@@ -251,32 +248,11 @@ async function encryptEmail(email = "") {
 
 // ─── Notification helpers ─────────────────────────────────────────────────────
 
-async function renderSignatureOnServer(user) {
-    const platform = Office.context.diagnostics.platform;
-    const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+// ─── Fetch and cache rules (always runs, independent of primary renderer) ─────
 
-    const encryptedMail = await encryptEmail(user);
-
-    // ── Primary renderer ──────────────────────────────────────────────────────
+async function fetchAndCacheRules(encryptedMail, xPlatform) {
     try {
-        const primaryRes = await fetch(
-            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
-        );
-        if (primaryRes.ok) {
-            const data = await primaryRes.text();
-            const decryptedData = await handleAesDecrypt(data);
-            console.log("[CardByte] Using NEW renderer");
-            return JSON.parse(decryptedData)?.html || null;
-        }
-        console.warn("[CardByte] Primary failed. Falling back to legacy...");
-    } catch (err) {
-        console.warn("[CardByte] Primary crashed. Falling back to legacy...", err);
-    }
-
-    // ── Legacy renderer — rules-based ─────────────────────────────────────────
-    try {
-        const secRes = await fetch(
+        const res = await fetch(
             "https://newqa-enterprise.cardbyte.ai/email-signature/rules-config/get-active",
             {
                 method: "GET",
@@ -288,38 +264,78 @@ async function renderSignatureOnServer(user) {
             }
         );
 
-        if (!secRes.ok) {
-            console.error("[CardByte] Legacy endpoint returned", secRes.status);
+        if (!res.ok) {
+            console.warn("[CardByte] Rules fetch returned", res.status);
             return null;
         }
 
-        const rawText = await secRes.text();
-        // const decryptedText = await handleAesDecrypt(rawText);
+        const rawText = await res.text();
         const parsed = JSON.parse(rawText);
         const rulesJson = parsed?.rulesJson;
 
         if (!rulesJson) {
-            console.warn("[CardByte] Legacy response had no rulesJson");
+            console.warn("[CardByte] Rules response had no rulesJson");
             return null;
         }
 
-        // ── Persist rules for future use ──────────────────────────────────────
         setCachedRules(rulesJson);
-        console.log("[CardByte] rulesJson cached:", rulesJson);
+        console.log("[CardByte] rulesJson fetched and cached:", rulesJson);
+        return rulesJson;
 
-        // ── Pick highest-priority enabled rule and fetch its signature HTML ───
-        const enabledRules = (rulesJson.rulesList || [])
-            .filter(r => r.enabled)
-            .sort((a, b) => a.priority - b.priority);   // lower number = higher priority
+    } catch (err) {
+        console.error("[CardByte] fetchAndCacheRules failed:", err);
+        return null;
+    }
+}
 
-        if (enabledRules.length === 0) {
-            console.warn("[CardByte] No enabled rules found in rulesJson");
+// ─── Fetch signature HTML from primary renderer ───────────────────────────────
+
+async function fetchPrimarySignature(encryptedMail, xPlatform) {
+    try {
+        const res = await fetch(
+            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            {
+                method: "GET",
+                headers: { username: encryptedMail, "X-Platform": xPlatform }
+            }
+        );
+
+        if (!res.ok) {
+            console.warn("[CardByte] Primary renderer returned", res.status);
             return null;
         }
 
-        const topRule = enabledRules[0];
-        console.log(`[CardByte] Applying rule "${topRule.rule}" (priority ${topRule.priority}), signatureId: ${topRule.signatureId}`);
+        const data = await res.text();
+        const decryptedData = await handleAesDecrypt(data);
+        const html = JSON.parse(decryptedData)?.html || null;
 
+        if (html) console.log("[CardByte] Primary renderer succeeded");
+        else console.warn("[CardByte] Primary renderer returned empty html");
+
+        return html;
+
+    } catch (err) {
+        console.warn("[CardByte] Primary renderer crashed:", err);
+        return null;
+    }
+}
+
+// ─── Fetch signature HTML for the highest-priority enabled rule ───────────────
+
+async function fetchSignatureByRule(rulesJson, encryptedMail, xPlatform) {
+    const enabledRules = (rulesJson?.rulesList || [])
+        .filter(r => r.enabled)
+        .sort((a, b) => a.priority - b.priority);   // lower number = higher priority
+
+    if (enabledRules.length === 0) {
+        console.warn("[CardByte] No enabled rules found in rulesJson");
+        return null;
+    }
+
+    const topRule = enabledRules[0];
+    console.log(`[CardByte] Top rule: "${topRule.rule}" (priority ${topRule.priority}), signatureId: ${topRule.signatureId}`);
+
+    try {
         const sigRes = await fetch(
             `https://newqa-enterprise.cardbyte.ai/email-signature/rules-config/get/${topRule.signatureId}`,
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
@@ -334,16 +350,49 @@ async function renderSignatureOnServer(user) {
         const sigDecrypted = await handleAesDecrypt(sigRaw);
         const sigHtml = JSON.parse(sigDecrypted)?.html || null;
 
-        if (!sigHtml) {
-            console.warn("[CardByte] Signature HTML was empty for signatureId:", topRule.signatureId);
-        }
-
+        if (!sigHtml) console.warn("[CardByte] Signature HTML empty for signatureId:", topRule.signatureId);
         return sigHtml;
 
-    } catch (legacyError) {
-        console.error("[CardByte] Both primary and legacy failed:", legacyError);
+    } catch (err) {
+        console.error("[CardByte] fetchSignatureByRule crashed:", err);
         return null;
     }
+}
+
+// ─── Orchestrator — runs primary + rules fetch in parallel ───────────────────
+
+async function renderSignatureOnServer(user) {
+    const platform = Office.context.diagnostics.platform;
+    const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+    const encryptedMail = await encryptEmail(user);
+
+    // Fire both in parallel — rules cache regardless of which renderer wins
+    const [primaryHtml, rulesJson] = await Promise.all([
+        fetchPrimarySignature(encryptedMail, xPlatform),
+        fetchAndCacheRules(encryptedMail, xPlatform)
+    ]);
+
+    // Primary wins if it returned HTML
+    if (primaryHtml) {
+        console.log("[CardByte] Using primary renderer result", primaryHtml, rulesJson);
+        return primaryHtml;
+    }
+
+    console.warn("[CardByte] Primary returned null — attempting rules-based fallback");
+    // Primary failed — fall back to rules-based renderer
+
+    // if (!rulesJson) {
+    //     // Try stale rules cache as last resort
+    //     const staleRules = getCachedRules({ skipTtl: true });
+    //     if (staleRules) {
+    //         console.warn("[CardByte] Using stale cached rules as last resort");
+    //         return await fetchSignatureByRule(staleRules, encryptedMail, xPlatform);
+    //     }
+    //     console.error("[CardByte] No rules available — cannot render signature");
+    //     return null;
+    // }
+
+    // return await fetchSignatureByRule(rulesJson, encryptedMail, xPlatform);
 }
 
 const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
