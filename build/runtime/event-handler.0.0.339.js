@@ -27,6 +27,12 @@ const RULES_CACHE_KEY = "cardbyte_cached_rules";
 const RULES_CACHE_TIMESTAMP_KEY = "cardbyte_cached_rules_ts";
 const RULES_CACHE_TTL_MS = 5 * 60 * 1000;
 
+// ── Per-signatureId HTML cache ─────────────────────────────────────────────
+// Shape: { [signatureId]: { html: string, ts: number } }
+// Shared across all compose/reply/forward windows via SharedRuntime localStorage.
+const SIG_BY_ID_CACHE_KEY = "cardbyte_sig_by_id";
+const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;   // same TTL as other caches
+
 const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
 const RECIPIENT_POLL_MS = 2000;   // poll interval for OWA fallback
 
@@ -100,7 +106,6 @@ async function aesDecrypt(encryptedText, keyB64 = AES_KEY) {
     try {
         const keyBuf = base64ToArrayBuffer(keyB64);
         if (keyBuf.byteLength !== 16 && keyBuf.byteLength !== 32) {
-            // Wrong key length — try fallback to default key if we were given a custom one
             return keyB64 !== AES_KEY ? aesDecrypt(encryptedText, AES_KEY) : encryptedText;
         }
         const ivBuf = base64ToArrayBuffer(AES_IV);
@@ -155,7 +160,7 @@ function getOrCreateSessionId() {
     return sid;
 }
 
-// ─── Signature cache ─────────────────────────────────────────────────────────
+// ─── Default signature cache ──────────────────────────────────────────────────
 
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
     if (skipSessionCheck) return store.get(CACHE_KEY);
@@ -201,6 +206,84 @@ function getCachedRules({ skipTtl = false } = {}) {
 function setCachedRules(rulesJson) {
     store.setJson(RULES_CACHE_KEY, rulesJson);
     store.set(RULES_CACHE_TIMESTAMP_KEY, Date.now().toString());
+}
+
+// ─── Per-signatureId HTML cache ───────────────────────────────────────────────
+//
+// Stored as a single JSON map under SIG_BY_ID_CACHE_KEY so all compose /
+// reply / forward windows sharing the same SharedRuntime localStorage key
+// see each other's fetched signatures immediately.
+//
+//  Map shape: { [signatureId]: { html: string, ts: number } }
+
+/**
+ * Reads the full map from localStorage (returns {} on miss / parse error).
+ * @returns {{ [id: string]: { html: string, ts: number } }}
+ */
+function _readSigByIdMap() {
+    return store.getJson(SIG_BY_ID_CACHE_KEY) || {};
+}
+
+/**
+ * Writes the full map back to localStorage.
+ * @param {{ [id: string]: { html: string, ts: number } }} map
+ */
+function _writeSigByIdMap(map) {
+    store.setJson(SIG_BY_ID_CACHE_KEY, map);
+}
+
+/**
+ * Returns the cached HTML for a signatureId if it exists and is still fresh.
+ * Returns null on miss or TTL expiry (does NOT purge — caller decides).
+ *
+ * @param {string|number} signatureId
+ * @param {{ skipTtl?: boolean }} opts
+ * @returns {string|null}
+ */
+function getSigById(signatureId, { skipTtl = false } = {}) {
+    const id = String(signatureId);
+    const map = _readSigByIdMap();
+    const entry = map[id];
+    if (!entry) return null;
+    if (!skipTtl && Date.now() - entry.ts > SIG_BY_ID_TTL_MS) {
+        console.log(`[CardByte] sigById cache TTL expired for id=${id}`);
+        return null;
+    }
+    return entry.html;
+}
+
+/**
+ * Writes (or updates) the HTML for a signatureId into the shared map.
+ *
+ * @param {string|number} signatureId
+ * @param {string} html
+ */
+function setSigById(signatureId, html) {
+    const id = String(signatureId);
+    const map = _readSigByIdMap();
+    map[id] = { html, ts: Date.now() };
+    _writeSigByIdMap(map);
+    console.log(`[CardByte] sigById cached: id=${id}`);
+}
+
+/**
+ * Removes any entries from the map whose TTL has expired.
+ * Call opportunistically (e.g. at startup) to keep localStorage lean.
+ */
+function purgeStaleSigById() {
+    const map = _readSigByIdMap();
+    const now = Date.now();
+    let purged = 0;
+    for (const id of Object.keys(map)) {
+        if (now - map[id].ts > SIG_BY_ID_TTL_MS) {
+            delete map[id];
+            purged++;
+        }
+    }
+    if (purged > 0) {
+        _writeSigByIdMap(map);
+        console.log(`[CardByte] purgeStaleSigById: removed ${purged} stale entries`);
+    }
 }
 
 // =============================================================================
@@ -280,7 +363,10 @@ async function fetchPrimarySignature(encryptedMail, xPlatform) {
     }
 }
 
-/** Fetches the signature HTML for a specific signatureId. */
+/**
+ * Fetches the signature HTML for a specific signatureId directly from the
+ * network — no cache logic here; use getOrFetchSignatureById for that.
+ */
 async function fetchSignatureById(signatureId, encryptedMail, xPlatform) {
     try {
         const res = await fetch(`${BASE_URL}/rules-config/get/${signatureId}`, {
@@ -298,9 +384,46 @@ async function fetchSignatureById(signatureId, encryptedMail, xPlatform) {
 }
 
 /**
+ * Cache-first wrapper around fetchSignatureById.
+ *
+ * Hit  → returns cached HTML immediately (no network call).
+ * Miss → fetches from API, stores result in the shared sigById map, returns HTML.
+ *
+ * All compose / reply / forward windows in the same SharedRuntime share the
+ * same localStorage entry, so the first window to fetch a given signatureId
+ * makes all subsequent windows instant cache hits.
+ *
+ * @param {string|number} signatureId
+ * @param {string} encryptedMail   - pre-encrypted user email for the API header
+ * @param {string} xPlatform       - "MAC" | "WINDOWS"
+ * @param {{ skipTtl?: boolean }} opts
+ * @returns {Promise<string|null>}
+ */
+async function getOrFetchSignatureById(signatureId, encryptedMail, xPlatform, { skipTtl = false } = {}) {
+    const id = String(signatureId);
+
+    // ── 1. Cache hit ────────────────────────────────────────────────────────
+    const cached = getSigById(id, { skipTtl });
+    if (cached) {
+        console.log(`[CardByte] ✅ sigById cache hit: id=${id}`);
+        return cached;
+    }
+
+    // ── 2. Network fetch ────────────────────────────────────────────────────
+    console.log(`[CardByte] 🌐 sigById cache miss — fetching id=${id}`);
+    const html = await fetchSignatureById(id, encryptedMail, xPlatform);
+
+    // ── 3. Store on success ─────────────────────────────────────────────────
+    if (html) setSigById(id, html);
+
+    return html;
+}
+
+/**
  * Main signature resolver:
  *  1. Runs primary renderer + rules fetch in parallel.
- *  2. Returns primary HTML if available, otherwise null.
+ *  2. Returns primary HTML if available, otherwise falls back to the
+ *     highest-priority enabled rule (using the shared sigById cache).
  *  Side-effect: always populates the rules cache.
  */
 async function resolveSignatureFromServer(userEmail) {
@@ -319,7 +442,6 @@ async function resolveSignatureFromServer(userEmail) {
 
     console.warn("[CardByte] Primary returned null — falling back to top-priority rule");
 
-    // Rules-based fallback: pick the highest-priority enabled rule
     const enabledRules = (rulesJson?.rulesList || [])
         .filter(r => r.enabled)
         .sort((a, b) => a.priority - b.priority);
@@ -331,7 +453,49 @@ async function resolveSignatureFromServer(userEmail) {
 
     const topRule = enabledRules[0];
     console.log(`[CardByte] Fallback rule: "${topRule.rule}" (priority ${topRule.priority}), signatureId: ${topRule.signatureId}`);
-    return fetchSignatureById(topRule.signatureId, encryptedMail, xPlatform);
+
+    // Use cache-first fetch so the result is immediately available to all windows
+    return getOrFetchSignatureById(topRule.signatureId, encryptedMail, xPlatform);
+}
+
+/**
+ * Prefetches and caches the HTML for every enabled rule's signatureId in
+ * parallel. Called at compose-open time so recipient-change lookups are instant.
+ *
+ * Errors per-signature are swallowed — a failed prefetch just means a slightly
+ * slower first lookup for that id, not a broken signature.
+ *
+ * @param {string} userEmail
+ */
+async function prefetchAllRuleSignatures(userEmail) {
+    const rulesJson = getCachedRules({ skipTtl: false });
+    if (!rulesJson) {
+        console.log("[CardByte] prefetchAllRuleSignatures: rules not cached yet — skipping");
+        return;
+    }
+
+    const enabledRules = (rulesJson?.rulesList || [])
+        .filter(r => r.enabled && r.signatureId != null);
+
+    if (enabledRules.length === 0) return;
+
+    const xPlatform = getXPlatform();
+    const encryptedMail = await encryptEmail(userEmail);
+
+    console.log(`[CardByte] 🔄 Prefetching signatures for ${enabledRules.length} rule(s)...`);
+
+    await Promise.allSettled(
+        enabledRules.map(r =>
+            getOrFetchSignatureById(r.signatureId, encryptedMail, xPlatform)
+                .then(html => {
+                    if (html) console.log(`[CardByte] ✅ Prefetched signatureId=${r.signatureId}`);
+                    else console.warn(`[CardByte] ⚠️  Prefetch returned null for signatureId=${r.signatureId}`);
+                })
+                .catch(err => console.warn(`[CardByte] Prefetch error for signatureId=${r.signatureId}:`, err))
+        )
+    );
+
+    console.log("[CardByte] Prefetch complete");
 }
 
 // =============================================================================
@@ -355,7 +519,6 @@ async function getAllRecipientEmails(item) {
         getRecipientsAsync(item?.cc),
     ]);
     const emails = [...to, ...cc].map(r => (r.emailAddress || "").toLowerCase()).filter(Boolean);
-    // Deduplicate
     return [...new Set(emails)];
 }
 
@@ -565,7 +728,8 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
 
 /**
  * Called whenever the recipient list changes (via event or poll).
- * Finds the matching rule, fetches that signature if needed, and injects it.
+ * Finds the matching rule, resolves that signature via the shared sigById
+ * cache (zero network if already prefetched), and injects it.
  */
 async function onRecipientsChanged(item) {
     const matched = await findMatchingRule(item);
@@ -577,7 +741,8 @@ async function onRecipientsChanged(item) {
     const xPlatform = getXPlatform();
     const encryptedMail = await encryptEmail(userEmail);
 
-    const ruleHtml = await fetchSignatureById(matched.signatureId, encryptedMail, xPlatform);
+    // Cache-first: will be a hit if prefetchAllRuleSignatures ran at compose open
+    const ruleHtml = await getOrFetchSignatureById(matched.signatureId, encryptedMail, xPlatform);
     if (!ruleHtml) {
         console.warn("[CardByte] Rule signature fetch returned null — keeping current signature");
         return;
@@ -682,6 +847,10 @@ function registerRecipientsChangedHandler() {
 Office.onReady(() => {
     console.log("✅ Office.onReady fired");
     console.log(`[CardByte] Platform: ${detectPlatform()}`);
+
+    // Opportunistically purge stale per-id entries left from previous sessions
+    purgeStaleSigById();
+
     // Delay slightly to let OWA fully hydrate the mailbox item
     setTimeout(registerRecipientsChangedHandler, 500);
 });
@@ -701,17 +870,28 @@ const applySignature = async function (event = { completed: () => { } }) {
     try {
         if (!item) return;
 
-        // Inject default signature
+        const userEmail = mailbox?.userProfile?.emailAddress;
+
+        // Inject default signature (fetches rules + primary in parallel)
         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
 
-        // Initial recipient check (handles the case where compose opens with a pre-filled To field)
+        // Prefetch all rule signatures in the background so recipient-change
+        // lookups across this and any other open compose windows are instant.
+        // Fire-and-forget — failures are logged but don't block the compose open.
+        if (userEmail) {
+            prefetchAllRuleSignatures(userEmail).catch(err =>
+                console.warn("[CardByte] Background prefetch failed:", err)
+            );
+        }
+
+        // Initial recipient check (handles compose opening with a pre-filled To)
         const emails = await getAllRecipientEmails(item);
         if (emails.length > 0) {
             _lastRecipientSnapshot = serializeRecipients(emails);
             await onRecipientsChanged(item);
         }
 
-        // Start polling as OWA/fallback safety net
+        // Start polling as OWA / fallback safety net
         startRecipientPolling();
 
     } catch (err) {
