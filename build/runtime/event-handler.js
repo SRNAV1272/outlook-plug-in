@@ -537,21 +537,42 @@ function emailMatchesPattern(email, pattern) {
 /**
  * Returns true if the rule's ruleValue patterns are satisfied by the recipient list.
  *
- * ruleType "ALL"  → every pattern must match at least one recipient.
- * ruleType "DOMAIN" | "ANY" (default) → at least one recipient matches at least one pattern.
+ * For NON-external rules (internal / all):
+ *   ruleType "ALL"  → every pattern must match at least one recipient.
+ *   ruleType "DOMAIN" | "ANY" (default) → at least one recipient matches at least one pattern.
  *
- * Note: the API uses ruleType "DOMAIN" for domain-based rules but the matching
- * logic is identical to "ANY" — one pattern hit is sufficient.
+ * For EXTERNAL rules (when externalEmails is provided):
+ *   ruleValue is an EXCLUSION list — the rule fires only when ALL external
+ *   recipients are NOT matched by any pattern in ruleValue.
+ *   e.g. ruleValue: ["gmail.com"] means:
+ *     "apply this signature to every external domain EXCEPT gmail.com"
+ *   → fires only if no external recipient's domain appears in ruleValue.
+ *
+ * @param {object}      rule
+ * @param {string[]}    emails         - full recipient list (To + CC), lowercase
+ * @param {string[]|null} externalEmails - non-null only for external-classified rules;
+ *                                        internal recipients already stripped out
  */
-function ruleMatchesEmails(rule, emails) {
-    const ruleType = (rule.ruleType || "ANY").toUpperCase();
+function ruleMatchesEmails(rule, emails, externalEmails = null) {
     const ruleValue = rule.ruleValue || [];
 
+    // ── External exclusion logic ──────────────────────────────────────────────
+    if (externalEmails !== null) {
+        if (externalEmails.length === 0) return false; // no external recipients — nothing to match
+
+        // Rule fires only when NO external recipient is covered by any exclusion pattern
+        const anyExcluded = externalEmails.some(email =>
+            ruleValue.some(pattern => emailMatchesPattern(email, pattern))
+        );
+        return !anyExcluded;
+    }
+
+    // ── Standard inclusion logic (internal / all rules) ───────────────────────
+    const ruleType = (rule.ruleType || "ANY").toUpperCase();
+
     if (ruleType === "ALL") {
-        // Every pattern must be satisfied by at least one recipient
         return ruleValue.every(p => emails.some(e => emailMatchesPattern(e, p)));
     }
-    // DOMAIN / ANY / anything else: one recipient + one pattern is enough
     return emails.some(e => ruleValue.some(p => emailMatchesPattern(e, p)));
 }
 
@@ -586,18 +607,24 @@ function classifyRecipientType(recipientEmails, userEmail) {
  *
  * Evaluation hierarchy (highest tier wins; priority number breaks ties within a tier):
  *
- *   Tier 1 — context exact  + recipientType exact  (e.g. "reply"   + "internal")
- *   Tier 2 — context exact  + recipientType all    (e.g. "reply"   + "all")
- *   Tier 3 — context all    + recipientType exact  (e.g. "all"     + "external")
- *   Tier 4 — context all    + recipientType all    (e.g. "all"     + "all")
+ *   Tier 1 — context exact  + recipientType exact  (e.g. "reply"  + "internal" / "external")
+ *   Tier 2 — context exact  + recipientType all    (e.g. "reply"  + "all")
+ *   Tier 3 — context all    + recipientType exact  (e.g. "all"    + "internal" / "external")
+ *   Tier 4 — context all    + recipientType all    (e.g. "all"    + "all")
  *
- * "all" on either dimension is a fallback — it only wins when no rule with a
- * more-specific value on that dimension matches.
+ * "all" on either dimension is a fallback — used only when no rule with a
+ * more-specific value on that dimension passes its match check.
  *
  * Within the same tier the rule with the lowest priority number wins.
  *
+ * External recipientType matching:
+ *   Internal recipients (same domain as user) are stripped before pattern
+ *   matching. ruleValue acts as an EXCLUSION list — the rule fires only when
+ *   ALL remaining external recipients are NOT covered by any pattern in ruleValue.
+ *   If no matching external rule exists the engine falls through to the next tier.
+ *
  * @param {object[]} enabledRules      - pre-filtered to enabled only (any order)
- * @param {string[]} recipientEmails   - lowercase deduplicated emails
+ * @param {string[]} recipientEmails   - lowercase deduplicated emails (To + CC)
  * @param {"compose"|"reply"} composeContext
  * @param {string}   userEmail
  * @returns {object|null}
@@ -606,28 +633,36 @@ function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail
     const classified = classifyRecipientType(recipientEmails, userEmail);
     console.log(`[CardByte] Recipient type: ${classified} | Context: ${composeContext}`);
 
+    // Pre-compute external-only list once — reused for every external rule check
+    const userDomain = (userEmail.split("@")[1] || "").toLowerCase();
+    const externalEmails = userDomain
+        ? recipientEmails.filter(e => (e.split("@")[1] || "").toLowerCase() !== userDomain)
+        : [...recipientEmails];
+
     // Tier buckets: index 0 = highest (exact+exact) … index 3 = lowest (all+all)
-    // Each bucket holds the single best (lowest priority number) rule seen so far.
-    const buckets = [null, null, null, null]; // tier 1–4 mapped to indices 0–3
+    const buckets = [null, null, null, null];
 
     for (const rule of enabledRules) {
 
-        // ── Pattern filter (ruleValue / ruleType matching) ────────────────────
-        if (!ruleMatchesEmails(rule, recipientEmails)) continue;
-
         // ── Context dimension ─────────────────────────────────────────────────
         const ctx = (rule.context || "all").toLowerCase();
-        const ctxExact = ctx === composeContext;   // true → tier col 0; false if ctx==="all" → col 1
+        const ctxExact = ctx === composeContext;
         const ctxAll = ctx === "all";
 
-        if (!ctxExact && !ctxAll) continue;        // e.g. rule is "compose" but we're in "reply"
+        if (!ctxExact && !ctxAll) continue; // e.g. rule is "compose" but we're in "reply"
 
         // ── RecipientType dimension ───────────────────────────────────────────
         const rt = (rule.recipientType || "all").toLowerCase();
-        const rtExact = rt === classified;          // true → tier row 0
+        const rtExact = rt === classified;
         const rtAll = rt === "all";
 
-        if (!rtExact && !rtAll) continue;           // e.g. rule is "internal" but recipients are external
+        if (!rtExact && !rtAll) continue;   // e.g. rule is "internal" but recipients are external
+
+        // ── Pattern filter ────────────────────────────────────────────────────
+        // External rules: pass externalEmails → exclusion logic
+        // All other rules: pass null → standard inclusion logic
+        const emailsCtx = rt === "external" ? externalEmails : null;
+        if (!ruleMatchesEmails(rule, recipientEmails, emailsCtx)) continue;
 
         // ── Assign tier ───────────────────────────────────────────────────────
         //   ctxExact + rtExact → 0
@@ -636,7 +671,7 @@ function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail
         //   ctxAll   + rtAll   → 3
         const tier = (ctxExact ? 0 : 2) + (rtExact ? 0 : 1);
 
-        // ── Keep lowest priority number within this tier ───────────────────────
+        // ── Keep lowest priority number within this tier ──────────────────────
         if (buckets[tier] === null || rule.priority < buckets[tier].priority) {
             buckets[tier] = rule;
         }
@@ -648,6 +683,7 @@ function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail
     if (bestRule) {
         console.log(
             `[CardByte] ✅ Best rule: "${bestRule.rule}"`,
+            `| tier=${buckets.findIndex(b => b === bestRule) + 1}`,
             `| priority=${bestRule.priority}`,
             `| context=${bestRule.context}`,
             `| recipientType=${bestRule.recipientType}`,
@@ -658,7 +694,8 @@ function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail
             "[CardByte] ❌ No rule matched",
             "| context:", composeContext,
             "| recipientType:", classified,
-            "| recipients:", recipientEmails
+            "| externalEmails:", externalEmails,
+            "| allRecipients:", recipientEmails
         );
     }
 
