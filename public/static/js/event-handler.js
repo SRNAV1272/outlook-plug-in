@@ -598,7 +598,7 @@ function getComposeType(item) {
                 return;
             }
             const raw = (result.value?.composeType || "").toLowerCase();
-            const normalized = raw === "newmail" ? "NEW" : (raw === "reply" || raw === "forward") ? "REPLY_FORWARD" : null;
+            const normalized = raw === "newmail" ? "compose" : (raw === "reply" || raw === "forward") ? "reply" : null;
             _composeTypeByItem.set(item, normalized);
             console.log("[CardByte] composeType resolved:", raw, "→", normalized);
             resolve(normalized);
@@ -608,7 +608,7 @@ function getComposeType(item) {
 
 /** True if the rule's composeType segment matches the current compose type. */
 function ruleMatchesComposeType(rule, composeType) {
-    const want = normalizeRuleComposeType(rule.composeType);
+    const want = normalizeRuleComposeType(rule.context);
     if (want === "ALL") return true;
     if (!composeType) return true; // couldn't determine — don't exclude the rule on an unknown
     return want === composeType;
@@ -638,7 +638,7 @@ function classifyRecipients(senderEmail, recipientEmails) {
     const senderDomain = getDomain(senderEmail);
     if (!senderDomain || recipientEmails.length === 0) return null;
     const allInternal = recipientEmails.every(e => getDomain(e) === senderDomain);
-    return allInternal ? "INTERNAL" : "EXTERNAL";
+    return allInternal ? "internal" : "external";
 }
 
 /** True if the rule's recipientType segment matches the resolved classification. */
@@ -692,8 +692,8 @@ async function findMatchingRule(item) {
 
     const enabledRules = (rulesJson?.rulesList || [])
         .filter(r => r.enabled)
-        .filter(r => ruleMatchesComposeType(r, composeType))
-        .filter(r => ruleMatchesRecipientType(r, recipientType))
+        .filter(r => r?.context === composeType)
+        .filter(r => r?.recipientType === recipientType)
         .sort((a, b) => a.priority - b.priority); // ascending — lower number = higher priority
 
     console.log("[CardByte] Selector engine inputs:", { composeType, recipientType, emails, enabledRules, rulesJson });
