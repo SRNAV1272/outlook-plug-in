@@ -1,6 +1,56 @@
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js
-//  Optimised & consolidated — June 2026
+//  CardByte Outlook Add-in — event-handler.js  (v2 — integrated rule engine)
+//  Merges the expressive SignatureRuleEngine (condition trees, visibility rules,
+//  audit log) from signature-rule-engine.js into the production architecture
+//  of the original event-handler.js (localStorage, AES-CBC, prefetch, injection).
+//
+//  Rule shape your API must now return from /rules-config/get-active:
+//  {
+//    rulesJson: {
+//      rulesList: [
+//        {
+//          ruleId:        "rule_001",
+//          rule:          "Sales — External New Compose",   // display name
+//          priority:      10,
+//          enabled:       true,
+//          context:       "compose" | "reply" | "all",
+//          recipientType: "internal" | "external" | "all",  // legacy tier filter
+//          ruleValue:     ["*"] | ["domain.com"] | ["user@x.com"],
+//          action: {
+//            signatureId:    "sig_sales_external",
+//            visibilityRules: [
+//              { element: "phone_number", showIf: { field: "user.phone", op: "exists" } },
+//              { element: "calendly_link", showIf: { field: "user.role",  op: "eq", value: "AE" } }
+//            ]
+//          },
+//          conditions: {          // optional expressive tree — takes precedence over
+//            operator: "AND",     // context/recipientType/ruleValue when present
+//            groups: [
+//              { operator: "OR", conditions: [
+//                  { field: "user.department", op: "eq", value: "Sales" },
+//                  { field: "user.department", op: "eq", value: "Business Development" }
+//              ]},
+//              { field: "mail.isExternal",  op: "eq", value: true },
+//              { field: "mail.type",        op: "eq", value: "new_compose" }
+//            ]
+//          }
+//        }
+//      ],
+//      defaults: {
+//        global: "sig_global_default",
+//        scoped: [
+//          { field: "user.department", value: "Sales",       signatureId: "sig_sales_default" },
+//          { field: "user.domain",     value: "cardbyte.ai", signatureId: "sig_internal_default" }
+//        ]
+//      }
+//    }
+//  }
+//
+//  Resolution order (per compose window):
+//    1. Expressive condition tree match (if rule.conditions present)
+//    2. Legacy tier match (context × recipientType × ruleValue pattern)
+//    3. Scoped default (department / domain)
+//    4. Global default (always guaranteed)
 // =============================================================================
 
 "use strict";
@@ -16,7 +66,7 @@ const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const MAX_RETRIES = 2;
 
-// localStorage / sessionStorage keys
+// localStorage keys
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
@@ -27,21 +77,22 @@ const RULES_CACHE_KEY = "cardbyte_cached_rules";
 const RULES_CACHE_TIMESTAMP_KEY = "cardbyte_cached_rules_ts";
 const RULES_CACHE_TTL_MS = 5 * 60 * 1000;
 
-// ── Per-signatureId HTML cache ─────────────────────────────────────────────
-// Shape: { [signatureId]: { html: string, ts: number } }
-// Shared across all compose/reply/forward windows via SharedRuntime localStorage.
+// Per-signatureId HTML cache — { [signatureId]: { html, ts } }
 const SIG_BY_ID_CACHE_KEY = "cardbyte_sig_by_id";
 const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;
 
 const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
-const RECIPIENT_POLL_MS = 2000;   // poll interval for OWA fallback
+const RECIPIENT_POLL_MS = 2000;
 
-// ─── In-memory signature cache (fastest path) ────────────────────────────────
+// Context-assembly hard timeout (ms) — mirrors reference engine
+const CONTEXT_TIMEOUT_MS = 800;
 
+// In-memory signature cache (fastest path)
 let CACHED_SIGNATURE_HTML = null;
 
+
 // =============================================================================
-//  PLATFORM DETECTION
+//  PLATFORM DETECTION  (unchanged from v1)
 // =============================================================================
 
 function detectPlatform() {
@@ -75,13 +126,13 @@ const isOWA = () => detectPlatform() === "owa";
 const isMac = () => detectPlatform() === "mac";
 const getMaxHtmlSize = () => isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
 
-// Returns "MAC" or "WINDOWS" for X-Platform header
 function getXPlatform() {
     return Office.context.diagnostics.platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 }
 
+
 // =============================================================================
-//  CRYPTO — AES-CBC via Web Crypto API
+//  CRYPTO — AES-CBC  (unchanged from v1)
 // =============================================================================
 
 function base64ToArrayBuffer(base64) {
@@ -137,8 +188,9 @@ async function encryptEmail(email = "") {
     }
 }
 
+
 // =============================================================================
-//  STORAGE HELPERS — localStorage wrappers with try/catch
+//  STORAGE HELPERS  (unchanged from v1)
 // =============================================================================
 
 const store = {
@@ -148,8 +200,6 @@ const store = {
     getJson: (key) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch (_) { return null; } },
     setJson: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch (_) { } },
 };
-
-// ─── Session ID ───────────────────────────────────────────────────────────────
 
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
@@ -164,17 +214,14 @@ function getOrCreateSessionId() {
 
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
     if (skipSessionCheck) return store.get(CACHE_KEY);
-
     const currentSid = getOrCreateSessionId();
     if (store.get(CACHE_SESSION_KEY) !== currentSid) {
-        console.log("[CardByte] New session — clearing signature cache");
         store.remove(CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY);
         return null;
     }
     if (!skipTtl) {
         const ts = parseInt(store.get(CACHE_TIMESTAMP_KEY) || "0", 10);
         if (Date.now() - ts > CACHE_TTL_MS) {
-            console.log("[CardByte] Signature cache TTL expired");
             store.remove(CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY);
             return null;
         }
@@ -195,7 +242,6 @@ function getCachedRules({ skipTtl = false } = {}) {
     if (!skipTtl) {
         const ts = parseInt(store.get(RULES_CACHE_TIMESTAMP_KEY) || "0", 10);
         if (Date.now() - ts > RULES_CACHE_TTL_MS) {
-            console.log("[CardByte] Rules cache TTL expired");
             store.remove(RULES_CACHE_KEY, RULES_CACHE_TIMESTAMP_KEY);
             return null;
         }
@@ -209,25 +255,16 @@ function setCachedRules(rulesJson) {
 }
 
 // ─── Per-signatureId HTML cache ───────────────────────────────────────────────
-//
-// Stored as a single JSON map under SIG_BY_ID_CACHE_KEY so all compose /
-// reply / forward windows sharing the same SharedRuntime localStorage key
-// see each other's fetched signatures immediately.
-//
-//  Map shape: { [signatureId]: { html: string, ts: number } }
 
 function _readSigByIdMap() { return store.getJson(SIG_BY_ID_CACHE_KEY) || {}; }
-function _writeSigByIdMap(map) { store.setJson(SIG_BY_ID_CACHE_KEY, map); }
+function _writeSigByIdMap(m) { store.setJson(SIG_BY_ID_CACHE_KEY, m); }
 
 function getSigById(signatureId, { skipTtl = false } = {}) {
     const id = String(signatureId);
     const map = _readSigByIdMap();
     const entry = map[id];
     if (!entry) return null;
-    if (!skipTtl && Date.now() - entry.ts > SIG_BY_ID_TTL_MS) {
-        console.log(`[CardByte] sigById cache TTL expired for id=${id}`);
-        return null;
-    }
+    if (!skipTtl && Date.now() - entry.ts > SIG_BY_ID_TTL_MS) return null;
     return entry.html;
 }
 
@@ -236,7 +273,6 @@ function setSigById(signatureId, html) {
     const map = _readSigByIdMap();
     map[id] = { html, ts: Date.now() };
     _writeSigByIdMap(map);
-    console.log(`[CardByte] sigById cached: id=${id}`);
 }
 
 function purgeStaleSigById() {
@@ -246,29 +282,23 @@ function purgeStaleSigById() {
     for (const id of Object.keys(map)) {
         if (now - map[id].ts > SIG_BY_ID_TTL_MS) { delete map[id]; purged++; }
     }
-    if (purged > 0) {
-        _writeSigByIdMap(map);
-        console.log(`[CardByte] purgeStaleSigById: removed ${purged} stale entries`);
-    }
+    if (purged > 0) _writeSigByIdMap(map);
 }
 
+
 // =============================================================================
-//  NOTIFICATION HELPERS
+//  NOTIFICATION HELPERS  (unchanged from v1)
 // =============================================================================
 
 function showNotification(item, message) {
     try {
         if (typeof item?.notificationMessages?.addAsync !== "function") return;
-        item.notificationMessages.addAsync(
-            NOTIF_KEY_HEAVY,
-            {
-                type: Office.MailboxEnums.ItemNotificationMessageType.InformationalMessage,
-                message,
-                icon: "Icon.16x16",
-                persistent: true,
-            },
-            (r) => { if (r.status !== Office.AsyncResultStatus.Succeeded) console.warn("[CardByte] Notification failed:", r.error?.message); }
-        );
+        item.notificationMessages.addAsync(NOTIF_KEY_HEAVY, {
+            type: Office.MailboxEnums.ItemNotificationMessageType.InformationalMessage,
+            message,
+            icon: "Icon.16x16",
+            persistent: true,
+        }, (r) => { if (r.status !== Office.AsyncResultStatus.Succeeded) console.warn("[CardByte] Notification failed:", r.error?.message); });
     } catch (err) { console.warn("[CardByte] showNotification error:", err); }
 }
 
@@ -279,17 +309,16 @@ function removeNotification(item) {
     } catch (_) { }
 }
 
+
 // =============================================================================
-//  API LAYER
+//  API LAYER  (unchanged from v1)
 // =============================================================================
 
-/** Decrypts a raw API response text and extracts the `html` field. */
 async function decryptHtmlResponse(rawText) {
     const decrypted = await aesDecrypt(rawText);
     return JSON.parse(decrypted)?.html || null;
 }
 
-/** Fetches and caches the active rules config. */
 async function fetchAndCacheRules(encryptedMail, xPlatform) {
     try {
         const res = await fetch(`${BASE_URL}/rules-config/get-active`, {
@@ -297,13 +326,10 @@ async function fetchAndCacheRules(encryptedMail, xPlatform) {
             headers: { "Content-Type": "application/json", username: encryptedMail, "X-Platform": xPlatform },
         });
         if (!res.ok) { console.warn("[CardByte] Rules fetch returned", res.status); return null; }
-
         const parsed = JSON.parse(await res.text());
         const rulesJson = parsed?.rulesJson;
         if (!rulesJson) { console.warn("[CardByte] Rules response had no rulesJson"); return null; }
-
         setCachedRules(rulesJson);
-        console.log("[CardByte] rulesJson fetched and cached");
         return rulesJson;
     } catch (err) {
         console.error("[CardByte] fetchAndCacheRules failed:", err);
@@ -311,7 +337,6 @@ async function fetchAndCacheRules(encryptedMail, xPlatform) {
     }
 }
 
-/** Fetches the default (primary) signature HTML. */
 async function fetchPrimarySignature(encryptedMail, xPlatform) {
     try {
         const res = await fetch(`${BASE_URL}/html/outlook/get-active`, {
@@ -319,20 +344,13 @@ async function fetchPrimarySignature(encryptedMail, xPlatform) {
             headers: { username: encryptedMail, "X-Platform": xPlatform },
         });
         if (!res.ok) { console.warn("[CardByte] Primary renderer returned", res.status); return null; }
-        const html = await decryptHtmlResponse(await res.text());
-        if (html) console.log("[CardByte] Primary renderer succeeded");
-        else console.warn("[CardByte] Primary renderer returned empty html");
-        return html;
+        return await decryptHtmlResponse(await res.text());
     } catch (err) {
         console.warn("[CardByte] Primary renderer crashed:", err);
         return null;
     }
 }
 
-/**
- * Fetches the signature HTML for a specific signatureId directly from the
- * network — no cache logic here; use getOrFetchSignatureById for that.
- */
 async function fetchSignatureById(signatureId, encryptedMail, xPlatform) {
     try {
         const res = await fetch(`${BASE_URL}/rules-config/get/${signatureId}`, {
@@ -340,33 +358,17 @@ async function fetchSignatureById(signatureId, encryptedMail, xPlatform) {
             headers: { username: encryptedMail, "X-Platform": xPlatform },
         });
         if (!res.ok) { console.error("[CardByte] Signature fetch failed:", res.status); return null; }
-        const html = await decryptHtmlResponse(await res.text());
-        if (!html) console.warn("[CardByte] Signature HTML empty for signatureId:", signatureId);
-        return html;
+        return await decryptHtmlResponse(await res.text());
     } catch (err) {
         console.error("[CardByte] fetchSignatureById crashed:", err);
         return null;
     }
 }
 
-/**
- * Cache-first wrapper around fetchSignatureById.
- *
- * Hit  → returns cached HTML immediately (no network call).
- * Miss → fetches from API, stores result in the shared sigById map, returns HTML.
- *
- * All compose / reply / forward windows in the same SharedRuntime share the
- * same localStorage entry, so the first window to fetch a given signatureId
- * makes all subsequent windows instant cache hits.
- */
 async function getOrFetchSignatureById(signatureId, encryptedMail, xPlatform, { skipTtl = false } = {}) {
     const id = String(signatureId);
-
     const cached = getSigById(id, { skipTtl });
-    if (cached) {
-        console.log(`[CardByte] ✅ sigById cache hit: id=${id}`);
-        return cached;
-    }
+    if (cached) { console.log(`[CardByte] ✅ sigById cache hit: id=${id}`); return cached; }
 
     console.log(`[CardByte] 🌐 sigById cache miss — fetching id=${id}`);
     const html = await fetchSignatureById(id, encryptedMail, xPlatform);
@@ -374,52 +376,40 @@ async function getOrFetchSignatureById(signatureId, encryptedMail, xPlatform, { 
     return html;
 }
 
-/**
- * Ensures rules are in cache, fetching live if not.
- * Returns rulesJson or null. Shared by applySignature + findMatchingRule
- * so we never duplicate the live-fetch logic.
- */
 async function ensureRulesCached(userEmail) {
     let rulesJson = getCachedRules();
     if (rulesJson) return rulesJson;
 
     console.warn("[CardByte] Rules not in cache — live fetch...");
     if (!userEmail) return null;
-
     const enc = await encryptEmail(userEmail);
-    rulesJson = await fetchAndCacheRules(enc, getXPlatform());
-    if (!rulesJson) console.warn("[CardByte] ensureRulesCached: live fetch returned null");
-    return rulesJson;
+    return await fetchAndCacheRules(enc, getXPlatform());
 }
 
 /**
- * Prefetches and caches the HTML for every enabled rule's signatureId in
- * parallel. Called at compose-open time so recipient-change lookups are instant.
+ * Prefetch HTML for every enabled rule's signatureId in parallel.
+ * Reads signatureId from rule.action.signatureId (new shape) with fallback
+ * to top-level rule.signatureId (legacy shape).
  */
 async function prefetchAllRuleSignatures(userEmail) {
     const rulesJson = getCachedRules({ skipTtl: false });
-    if (!rulesJson) {
-        console.log("[CardByte] prefetchAllRuleSignatures: rules not cached yet — skipping");
-        return;
-    }
+    if (!rulesJson) return;
 
     const enabledRules = (rulesJson?.rulesList || [])
-        .filter(r => r.enabled && r.signatureId != null);
+        .filter(r => r.enabled)
+        .map(r => ({ signatureId: r.action?.signatureId ?? r.signatureId }))
+        .filter(r => r.signatureId != null);
 
     if (enabledRules.length === 0) return;
 
     const xPlatform = getXPlatform();
     const encryptedMail = await encryptEmail(userEmail);
 
-    console.log(`[CardByte] 🔄 Prefetching signatures for ${enabledRules.length} rule(s)...`);
+    console.log(`[CardByte] 🔄 Prefetching ${enabledRules.length} rule signature(s)...`);
 
     await Promise.allSettled(
         enabledRules.map(r =>
             getOrFetchSignatureById(r.signatureId, encryptedMail, xPlatform)
-                .then(html => {
-                    if (html) console.log(`[CardByte] ✅ Prefetched signatureId=${r.signatureId}`);
-                    else console.warn(`[CardByte] ⚠️  Prefetch returned null for signatureId=${r.signatureId}`);
-                })
                 .catch(err => console.warn(`[CardByte] Prefetch error for signatureId=${r.signatureId}:`, err))
         )
     );
@@ -427,11 +417,11 @@ async function prefetchAllRuleSignatures(userEmail) {
     console.log("[CardByte] Prefetch complete");
 }
 
+
 // =============================================================================
-//  RECIPIENT HELPERS
+//  RECIPIENT HELPERS  (fixed: uses getAsync correctly, as in v1)
 // =============================================================================
 
-/** Reads a recipient field asynchronously; resolves to an empty array on failure. */
 function getRecipientsAsync(field) {
     return new Promise((resolve) => {
         if (typeof field?.getAsync !== "function") return resolve([]);
@@ -441,7 +431,6 @@ function getRecipientsAsync(field) {
     });
 }
 
-/** Reads To + CC and returns a deduplicated array of lowercase email strings. */
 async function getAllRecipientEmails(item) {
     const [to, cc] = await Promise.all([
         getRecipientsAsync(item?.to),
@@ -451,21 +440,12 @@ async function getAllRecipientEmails(item) {
     return [...new Set(emails)];
 }
 
+
 // =============================================================================
-//  COMPOSE CONTEXT DETECTION
+//  COMPOSE CONTEXT DETECTION  (unchanged from v1)
 // =============================================================================
 
-/**
- * Resolves the compose context for the current item: "compose" | "reply".
- *
- * Uses getComposeTypeAsync when available (New Outlook / OWA).
- * Falls back to conversationId presence for Classic Outlook.
- *
- * Result is cached per LaunchEvent invocation in _composeContext so the async
- * Office call only happens once per compose window. Reset to null at the top
- * of applySignature() so each new window gets a fresh detection.
- */
-let _composeContext = null;   // "compose" | "reply" | null (uninitialised)
+let _composeContext = null;
 
 async function getOrDetectComposeContext() {
     if (_composeContext !== null) return _composeContext;
@@ -486,288 +466,489 @@ async function getOrDetectComposeContext() {
                 );
             });
         } else {
-            // Classic Outlook: conversationId is set on replies/forwards, null on new mail
             resolve(item.conversationId ? "reply" : "compose");
         }
     });
 
-    console.log(`[CardByte] Compose context detected: ${_composeContext}`);
+    console.log(`[CardByte] Compose context: ${_composeContext}`);
     return _composeContext;
 }
 
+
 // =============================================================================
-//  RULES MATCHING ENGINE
+//  CONTEXT ASSEMBLY  ← NEW (ported from signature-rule-engine.js)
+//
+//  Builds the structured context object that the rule engine needs.
+//  Assembles user profile (from rulesJson.userProfile if the API returns it,
+//  or from Office mailbox) and mail metadata in one shot, with a hard timeout.
 // =============================================================================
 
 /**
- * Returns true if `email` satisfies `pattern`.
- * Patterns: "*" (wildcard) | "domain.com" (domain match) | "user@domain.com" (exact)
+ * Assemble the full { user, mail } context object.
+ * Falls back to a minimal default context on timeout.
+ *
+ * @param {string[]} recipientEmails  - already resolved by getAllRecipientEmails()
+ * @param {string}   composeContext   - "compose" | "reply"
+ * @param {object}   rulesJson        - cached rules payload (may contain userProfile)
+ * @returns {object}
  */
-function emailMatchesPattern(email, pattern) {
-    if (!pattern?.trim()) return false;
-    const p = pattern.trim().toLowerCase();
-    if (p === "*") return true;
-    if (!p.includes("@")) return email.endsWith("@" + p);
-    return email === p;
+async function buildContext(recipientEmails, composeContext, rulesJson) {
+    const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("context_timeout")), CONTEXT_TIMEOUT_MS)
+    );
+
+    try {
+        const mailbox = Office?.context?.mailbox;
+        const userEmail = mailbox?.userProfile?.emailAddress ?? "";
+        const orgDomain = userEmail.split("@")[1] ?? "";
+
+        // The API may return a userProfile block alongside rulesJson.
+        // If absent we fall back to Office mailbox data.
+        const profile = rulesJson?.userProfile ?? {};
+
+        const context = await Promise.race([
+            Promise.resolve({
+                user: {
+                    email: userEmail,
+                    name: profile.name ?? mailbox?.userProfile?.displayName ?? "",
+                    department: profile.department ?? "",
+                    role: profile.role ?? "",
+                    location: profile.location ?? "",
+                    phone: profile.phone ?? "",
+                    domain: profile.domain ?? orgDomain,
+                    customAttributes: profile.customAttributes ?? {},
+                },
+                mail: {
+                    type: composeContext === "reply" ? "reply" : "new_compose",
+                    recipientDomains: recipientEmails.map(e => e.split("@")[1]).filter(Boolean),
+                    isExternal: recipientEmails.some(e => (e.split("@")[1] ?? "") !== orgDomain),
+                    isReply: composeContext === "reply",
+                    isForward: false,   // getComposeTypeAsync doesn't distinguish reply/forward
+                },
+            }),
+            timeoutPromise,
+        ]);
+
+        return context;
+    } catch (err) {
+        console.warn("[CardByte] buildContext timed out or failed:", err.message);
+        const email = Office?.context?.mailbox?.userProfile?.emailAddress ?? "";
+        return {
+            user: { email, domain: email.split("@")[1] ?? "" },
+            mail: { type: "new_compose", recipientDomains: [], isExternal: false },
+            _fallback: true,
+        };
+    }
 }
 
 /**
- * Returns true if the rule's ruleValue patterns are satisfied by the recipient list.
- *
- * For NON-external rules (internal / all):
- *   ruleType "ALL"  → every pattern must match at least one recipient.
- *   ruleType "DOMAIN" | "ANY" (default) → at least one recipient matches at least one pattern.
- *
- * For EXTERNAL rules (when externalEmails is provided):
- *   ruleValue is an EXCLUSION list — the rule fires only when ALL external
- *   recipients are NOT matched by any pattern in ruleValue.
- *   e.g. ruleValue: ["gmail.com"] means:
- *     "apply this signature to every external domain EXCEPT gmail.com"
- *   → fires only if no external recipient's domain appears in ruleValue.
- *
- * @param {object}        rule
- * @param {string[]}      emails          - full recipient list (To + CC), lowercase
- * @param {string[]|null} externalEmails  - non-null only for external-classified rules;
- *                                          internal recipients already stripped out
+ * Flatten { user: { department: "Sales" } } → { "user.department": "Sales" }.
+ * Array fields are stored under the key AND as "key[]" for array_contains ops.
  */
-function ruleMatchesEmails(rule, emails, externalEmails = null) {
-    const ruleValue = rule.ruleValue || [];
-
-    // ── External exclusion logic ──────────────────────────────────────────────
-    if (externalEmails !== null) {
-        if (externalEmails.length === 0) return false;
-        // Rule fires only when NO external recipient is covered by any exclusion pattern
-        const anyExcluded = externalEmails.some(email =>
-            ruleValue.some(pattern => emailMatchesPattern(email, pattern))
-        );
-        return !anyExcluded;
-    }
-
-    // ── Standard inclusion logic (internal / all rules) ───────────────────────
-    const ruleType = (rule.ruleType || "ANY").toUpperCase();
-    if (ruleType === "ALL") {
-        return ruleValue.every(p => emails.some(e => emailMatchesPattern(e, p)));
-    }
-    return emails.some(e => ruleValue.some(p => emailMatchesPattern(e, p)));
-}
-
-/**
- * Classifies the recipient list as "internal", "external", or "all".
- *
- * internal → every recipient shares the user's domain
- * external → at least one recipient is on a different domain (mixed = external)
- * all      → fallback when userEmail or recipients are unavailable
- *
- * @param {string[]} recipientEmails  - lowercase email strings
- * @param {string}   userEmail        - logged-in user's email address
- * @returns {"internal"|"external"|"all"}
- */
-function classifyRecipientType(recipientEmails, userEmail) {
-    if (!userEmail || recipientEmails.length === 0) return "all";
-
-    const userDomain = userEmail.split("@")[1]?.toLowerCase() || "";
-    if (!userDomain) return "all";
-
-    for (const email of recipientEmails) {
-        const domain = email.split("@")[1]?.toLowerCase() || "";
-        if (domain !== userDomain) return "external";   // short-circuit
-    }
-    return "internal";
-}
-
-/**
- * Selects the single best rule for the current compose window.
- *
- * Evaluation hierarchy (highest tier wins; priority number breaks ties within a tier):
- *
- *   Tier 1 — context exact  + recipientType exact  (e.g. "reply"  + "internal" / "external")
- *   Tier 2 — context exact  + recipientType all    (e.g. "reply"  + "all")
- *   Tier 3 — context all    + recipientType exact  (e.g. "all"    + "internal" / "external")
- *   Tier 4 — context all    + recipientType all    (e.g. "all"    + "all")
- *
- * "all" on either dimension is a fallback — used only when no rule with a
- * more-specific value on that dimension passes its match check.
- *
- * Within the same tier the rule with the lowest priority number wins.
- *
- * External recipientType matching:
- *   Internal recipients (same domain as user) are stripped before pattern
- *   matching. ruleValue acts as an EXCLUSION list — the rule fires only when
- *   ALL remaining external recipients are NOT covered by any pattern in ruleValue.
- *   Falls through to the next tier if no external rule matches.
- *
- * @param {object[]}          enabledRules      - pre-filtered to enabled only (any order)
- * @param {string[]}          recipientEmails   - lowercase deduplicated emails (To + CC)
- * @param {"compose"|"reply"} composeContext
- * @param {string}            userEmail
- * @returns {object|null}
- */
-function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail) {
-    const classified = classifyRecipientType(recipientEmails, userEmail);
-    console.log(`[CardByte] Recipient type: ${classified} | Context: ${composeContext}`);
-
-    // Pre-compute external-only list once — reused for every external rule check
-    const userDomain = (userEmail.split("@")[1] || "").toLowerCase();
-    const externalEmails = userDomain
-        ? recipientEmails.filter(e => (e.split("@")[1] || "").toLowerCase() !== userDomain)
-        : [...recipientEmails];
-
-    // Tier buckets: index 0 = highest (exact+exact) … index 3 = lowest (all+all)
-    const buckets = [null, null, null, null];
-
-    for (const rule of enabledRules) {
-
-        // ── Context dimension ─────────────────────────────────────────────────
-        const ctx = (rule.context || "all").toLowerCase();
-        const ctxExact = ctx === composeContext;
-        const ctxAll = ctx === "all";
-
-        if (!ctxExact && !ctxAll) continue;   // e.g. rule is "compose" but we're in "reply"
-
-        // ── RecipientType dimension ───────────────────────────────────────────
-        const rt = (rule.recipientType || "all").toLowerCase();
-        const rtExact = rt === classified;
-        const rtAll = rt === "all";
-
-        if (!rtExact && !rtAll) continue;     // e.g. rule is "internal" but recipients are external
-
-        // ── Pattern filter ────────────────────────────────────────────────────
-        // External rules → exclusion logic against externalEmails only
-        // All other rules → standard inclusion logic against full list
-        const emailsCtx = rt === "external" ? externalEmails : null;
-        if (!ruleMatchesEmails(rule, recipientEmails, emailsCtx)) continue;
-
-        // ── Assign tier ───────────────────────────────────────────────────────
-        //   ctxExact + rtExact → 0
-        //   ctxExact + rtAll   → 1
-        //   ctxAll   + rtExact → 2
-        //   ctxAll   + rtAll   → 3
-        const tier = (ctxExact ? 0 : 2) + (rtExact ? 0 : 1);
-
-        // ── Keep lowest priority number within this tier ──────────────────────
-        if (buckets[tier] === null || rule.priority < buckets[tier].priority) {
-            buckets[tier] = rule;
+function flattenContext(obj, prefix = "", out = {}) {
+    for (const key of Object.keys(obj)) {
+        const val = obj[key];
+        const fullKey = prefix ? `${prefix}.${key}` : key;
+        if (Array.isArray(val)) {
+            out[fullKey] = val;
+            out[fullKey + "[]"] = val;   // enable array_contains lookup
+        } else if (val !== null && typeof val === "object") {
+            flattenContext(val, fullKey, out);
+        } else {
+            out[fullKey] = val;
         }
     }
-
-    // ── Return the best rule from the highest non-empty tier ─────────────────
-    const bestRule = buckets.find(b => b !== null) ?? null;
-
-    if (bestRule) {
-        console.log(
-            `[CardByte] ✅ Best rule: "${bestRule.rule}"`,
-            `| tier=${buckets.findIndex(b => b === bestRule) + 1}`,
-            `| priority=${bestRule.priority}`,
-            `| context=${bestRule.context}`,
-            `| recipientType=${bestRule.recipientType}`,
-            `| signatureId=${bestRule.signatureId}`
-        );
-    } else {
-        console.warn(
-            "[CardByte] ❌ No rule matched",
-            "| context:", composeContext,
-            "| recipientType:", classified,
-            "| externalEmails:", externalEmails,
-            "| allRecipients:", recipientEmails
-        );
-    }
-
-    return bestRule;
+    return out;
 }
 
-/**
- * Finds the best context-default rule to apply at compose-open time,
- * BEFORE the user has typed any recipients.
- *
- * Only considers rules that:
- *   - have recipientType "all"  (no domain/email specificity needed)
- *   - have ruleValue containing "*" (wildcard — intended as catch-all)
- *   - match the current composeContext (exact match wins; "all" is fallback)
- *
- * Tier 0 = context exact match, Tier 1 = context "all" fallback.
- * Within each tier, lowest priority number wins.
- *
- * @param {object[]}          enabledRules   - pre-filtered to enabled only
- * @param {"compose"|"reply"} composeContext
- * @returns {object|null}
- */
-function findContextDefaultRule(enabledRules, composeContext) {
-    // buckets[0] = context exact match, buckets[1] = context "all" fallback
-    const buckets = [null, null];
 
-    for (const rule of enabledRules) {
-        // Must be a catch-all recipient type
-        const rt = (rule.recipientType || "all").toLowerCase();
-        if (rt !== "all") continue;
+// =============================================================================
+//  SIGNATURE RULE ENGINE  ← MERGED
+//
+//  Combines:
+//  • Reference engine: expressive AND/OR condition trees, 10 leaf ops,
+//    regex precompilation, field index, visibility resolution
+//  • Actual engine: legacy tier matching (context × recipientType × ruleValue)
+//    as a fallback when a rule has no `conditions` tree
+// =============================================================================
 
-        // Must have wildcard in ruleValue — marks it as a catch-all
-        if (!(rule.ruleValue || []).includes("*")) continue;
-
-        // Context filter
-        const ctx = (rule.context || "all").toLowerCase();
-        const ctxExact = ctx === composeContext;
-        const ctxAll = ctx === "all";
-
-        if (!ctxExact && !ctxAll) continue;
-
-        const bucket = ctxExact ? 0 : 1;
-        if (buckets[bucket] === null || rule.priority < buckets[bucket].priority) {
-            buckets[bucket] = rule;
+class SignatureRuleEngine {
+    /**
+     * @param {object[]} rules    - from rulesJson.rulesList (enabled only)
+     * @param {object}   defaults - { global: "sig_id", scoped: [...] }
+     */
+    constructor(rules, defaults) {
+        if (!defaults?.global) {
+            throw new Error("[CardByte] global default signature is not configured.");
         }
+
+        this.defaults = defaults;
+
+        // Sort by priority ascending; precompile; build index
+        this.rules = rules
+            .filter(r => r.enabled !== false)
+            .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
+            .map(r => this._precompile(r));
+
+        this._index = this._buildIndex(this.rules);
     }
 
-    const best = buckets.find(b => b !== null) ?? null;
+    // ── Precompilation ──────────────────────────────────────────────────────
 
-    if (best) {
-        console.log(
-            `[CardByte] 🎯 Context default rule: "${best.rule}"`,
-            `| context=${best.context}`,
-            `| priority=${best.priority}`,
-            `| signatureId=${best.signatureId}`
-        );
-    } else {
-        console.warn(`[CardByte] No context default rule found for context: ${composeContext}`);
+    /** Walk condition trees and compile regex patterns once at construction. */
+    _precompile(rule) {
+        if (!rule.conditions) return rule;
+        const walk = (node) => {
+            if (node.field && node.op === "regex" && typeof node.value === "string") {
+                node._compiled = new RegExp(node.value, "i");
+            }
+            (node.conditions ?? node.groups ?? []).forEach(walk);
+        };
+        walk(rule.conditions);
+        return rule;
     }
 
-    return best;
-}
+    // ── Index (for expressive-tree path only) ───────────────────────────────
 
-/**
- * Public entry point for rule evaluation (recipient-change path).
- *
- * Runs getAllRecipientEmails and getOrDetectComposeContext in parallel.
- * Live-fetches rules from the API only when the cache is cold.
- *
- * @param {object} item  - Office mailbox item
- * @returns {Promise<object|null>}  best matching rule, or null
- */
-async function findMatchingRule(item) {
-    const userEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
+    /** Build O(1) lookup index on three high-selectivity fields. */
+    _buildIndex(rules) {
+        const idx = { "user.department": {}, "user.domain": {}, "mail.type": {} };
+        const unindexed = [];
 
-    // ── Rules: cache-first, single live fetch on miss ────────────────────────
-    const rulesJson = await ensureRulesCached(userEmail);
-    if (!rulesJson) {
-        console.warn("[CardByte] findMatchingRule: no rules available");
+        for (const rule of rules) {
+            if (!rule.conditions) { unindexed.push(rule); continue; }
+            let indexed = false;
+            for (const field of Object.keys(idx)) {
+                const val = this._findTopLevelEq(rule.conditions, field);
+                if (val !== null) {
+                    (idx[field][val] ??= []).push(rule);
+                    indexed = true;
+                }
+            }
+            if (!indexed) unindexed.push(rule);
+        }
+
+        return { byField: idx, unindexed };
+    }
+
+    _findTopLevelEq(node, field) {
+        if (node.field === field && node.op === "eq") return String(node.value);
+        for (const child of (node.conditions ?? node.groups ?? [])) {
+            const found = this._findTopLevelEq(child, field);
+            if (found !== null) return found;
+        }
         return null;
     }
 
-    // ── Recipients + context in parallel ─────────────────────────────────────
-    const [recipientEmails, composeContext] = await Promise.all([
-        getAllRecipientEmails(item),
-        getOrDetectComposeContext(),
-    ]);
+    _getCandidates(context) {
+        const seen = new Set();
+        const result = [];
+        const add = (rule) => { if (!seen.has(rule.ruleId ?? rule.rule)) { seen.add(rule.ruleId ?? rule.rule); result.push(rule); } };
 
-    if (recipientEmails.length === 0) {
-        console.warn("[CardByte] No recipients yet — cannot match rules");
+        const dept = context.user?.department;
+        const domain = context.user?.domain;
+        const mtype = context.mail?.type;
+
+        (this._index.byField["user.department"][dept] ?? []).forEach(add);
+        (this._index.byField["user.domain"][domain] ?? []).forEach(add);
+        (this._index.byField["mail.type"][mtype] ?? []).forEach(add);
+        this._index.unindexed.forEach(add);
+
+        return result.sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+    }
+
+    // ── Expressive condition tree evaluator ─────────────────────────────────
+
+    _evaluate(node, flatCtx) {
+        if (node.field) return this._evalLeaf(node, flatCtx);
+        const children = node.conditions ?? node.groups ?? [];
+        if (node.operator === "AND") return children.every(c => this._evaluate(c, flatCtx));
+        if (node.operator === "OR") return children.some(c => this._evaluate(c, flatCtx));
+        console.warn("[CardByte] Unknown operator:", node.operator);
+        return false;
+    }
+
+    _evalLeaf({ field, op, value, _compiled }, flatCtx) {
+        const actual = flatCtx[field];
+
+        switch (op) {
+            case "eq": return actual === value;
+            case "neq": return actual !== value;
+            case "in": return Array.isArray(value) && value.includes(actual);
+            case "not_in": return Array.isArray(value) && !value.includes(actual);
+            case "contains": return typeof actual === "string" &&
+                actual.toLowerCase().includes(String(value).toLowerCase());
+            case "not_contains": return typeof actual === "string" &&
+                !actual.toLowerCase().includes(String(value).toLowerCase());
+            case "starts_with": return typeof actual === "string" &&
+                actual.toLowerCase().startsWith(String(value).toLowerCase());
+            case "exists": return actual !== undefined && actual !== null && actual !== "";
+            case "not_exists": return actual === undefined || actual === null || actual === "";
+            case "regex": return (_compiled ?? new RegExp(value, "i")).test(String(actual ?? ""));
+            case "array_contains":
+                // Both the flat array ("mail.recipientDomains") and the "[]" alias are stored
+                return Array.isArray(flatCtx[field + "[]"])
+                    ? flatCtx[field + "[]"].includes(value)
+                    : Array.isArray(actual) ? actual.includes(value) : false;
+            default:
+                console.warn("[CardByte] Unknown op:", op);
+                return false;
+        }
+    }
+
+    // ── Legacy tier matcher (for rules without a conditions tree) ───────────
+
+    /**
+     * Mirrors the selectBestRule / ruleMatchesEmails logic from v1 but
+     * operates on a single rule against a pre-built context — called only
+     * when rule.conditions is absent.
+     */
+    _matchLegacyRule(rule, context, flatCtx) {
+        const composeContext = context.mail?.isReply ? "reply" : "compose";
+        const recipientEmails = flatCtx["mail.recipientDomains[]"] ?? [];
+        const userEmail = context.user?.email ?? "";
+        const userDomain = context.user?.domain ?? "";
+
+        // Context dimension
+        const ctx = (rule.context || "all").toLowerCase();
+        if (ctx !== "all" && ctx !== composeContext) return false;
+
+        // RecipientType dimension
+        const classified = this._classifyRecipients(recipientEmails, userDomain);
+        const rt = (rule.recipientType || "all").toLowerCase();
+        if (rt !== "all" && rt !== classified) return false;
+
+        // Pattern filter
+        const ruleValue = rule.ruleValue || [];
+        const externalOnly = rt === "external"
+            ? recipientEmails.filter(e => (e.split("@")[1] ?? "") !== userDomain)
+            : null;
+
+        return this._legacyRuleMatchesEmails(rule, recipientEmails, externalOnly);
+    }
+
+    _classifyRecipients(recipientEmails, userDomain) {
+        if (!userDomain || recipientEmails.length === 0) return "all";
+        for (const email of recipientEmails) {
+            const d = email.split("@")[1]?.toLowerCase() ?? "";
+            if (d !== userDomain) return "external";
+        }
+        return "internal";
+    }
+
+    _legacyEmailMatchesPattern(email, pattern) {
+        if (!pattern?.trim()) return false;
+        const p = pattern.trim().toLowerCase();
+        if (p === "*") return true;
+        if (!p.includes("@")) return email.endsWith("@" + p);
+        return email === p;
+    }
+
+    _legacyRuleMatchesEmails(rule, emails, externalEmails = null) {
+        const ruleValue = rule.ruleValue || [];
+
+        if (externalEmails !== null) {
+            if (externalEmails.length === 0) return false;
+            return !externalEmails.some(email =>
+                ruleValue.some(pattern => this._legacyEmailMatchesPattern(email, pattern))
+            );
+        }
+
+        const ruleType = (rule.ruleType || "ANY").toUpperCase();
+        if (ruleType === "ALL") {
+            return ruleValue.every(p => emails.some(e => this._legacyEmailMatchesPattern(e, p)));
+        }
+        return emails.some(e => ruleValue.some(p => this._legacyEmailMatchesPattern(e, p)));
+    }
+
+    // ── Visibility ──────────────────────────────────────────────────────────
+
+    /**
+     * Resolve per-element show/hide rules within a signature template.
+     * Returns "all" if no visibility rules are defined.
+     *
+     * @returns {"all" | { [elementClass]: boolean }}
+     */
+    _resolveVisibility(visibilityRules, flatCtx) {
+        if (!visibilityRules?.length) return "all";
+        return visibilityRules.reduce((acc, vr) => {
+            acc[vr.element] = this._evaluate(vr.showIf, flatCtx);
+            return acc;
+        }, {});
+    }
+
+    // ── Result builder ──────────────────────────────────────────────────────
+
+    _buildResult(action, flatCtx, resolvedBy, matchedRuleId = null) {
+        return {
+            signatureId: action.signatureId,
+            visibleElements: this._resolveVisibility(action.visibilityRules ?? [], flatCtx),
+            resolvedBy,
+            matchedRuleId,
+        };
+    }
+
+    // ── Default resolution ──────────────────────────────────────────────────
+
+    _resolveScopedDefault(flatCtx) {
+        for (const entry of (this.defaults.scoped ?? [])) {
+            if (flatCtx[entry.field] === entry.value) {
+                return this._buildResult(
+                    { signatureId: entry.signatureId, visibilityRules: [] },
+                    flatCtx,
+                    "scoped_default"
+                );
+            }
+        }
         return null;
     }
 
-    const enabledRules = (rulesJson?.rulesList || []).filter(r => r.enabled);
-    return selectBestRule(enabledRules, recipientEmails, composeContext, userEmail || "");
+    _resolveGlobalDefault() {
+        return {
+            signatureId: this.defaults.global,
+            visibleElements: "all",
+            resolvedBy: "global_default",
+            matchedRuleId: null,
+        };
+    }
+
+    // ── Main entry point ────────────────────────────────────────────────────
+
+    /**
+     * Resolve which signature and visibility to apply for the given context.
+     *
+     * Resolution order:
+     *   1. Expressive condition tree (if rule.conditions present)
+     *   2. Legacy tier match (context × recipientType × ruleValue)
+     *   3. Scoped default
+     *   4. Global default
+     *
+     * @param {object} context - from buildContext()
+     * @returns {{ signatureId, visibleElements, resolvedBy, matchedRuleId }}
+     */
+    resolve(context) {
+        const flatCtx = flattenContext(context);
+
+        // Tier 1 + 2: rule match
+        for (const rule of this._getCandidates(context)) {
+            let matched = false;
+
+            if (rule.conditions) {
+                // Expressive path — AND/OR tree with 10 ops
+                matched = this._evaluate(rule.conditions, flatCtx);
+            } else {
+                // Legacy path — context × recipientType × ruleValue
+                matched = this._matchLegacyRule(rule, context, flatCtx);
+            }
+
+            if (matched) {
+                const action = rule.action ?? { signatureId: rule.signatureId, visibilityRules: [] };
+                const result = this._buildResult(action, flatCtx, "rule", rule.ruleId ?? rule.rule);
+                console.log(
+                    `[CardByte] ✅ Rule matched: "${rule.rule || rule.ruleId}"`,
+                    `| resolvedBy=${result.resolvedBy}`,
+                    `| signatureId=${result.signatureId}`,
+                    `| path=${rule.conditions ? "expressive" : "legacy"}`
+                );
+                return result;
+            }
+        }
+
+        // Tier 3: scoped default
+        const scoped = this._resolveScopedDefault(flatCtx);
+        if (scoped) {
+            console.log(`[CardByte] 📎 Scoped default: signatureId=${scoped.signatureId}`);
+            return scoped;
+        }
+
+        // Tier 4: global default
+        console.log(`[CardByte] 🌐 Global default: signatureId=${this.defaults.global}`);
+        return this._resolveGlobalDefault();
+    }
 }
 
+
 // =============================================================================
-//  SIGNATURE INJECTION
+//  SIGNATURE RENDERER  ← NEW (ported from signature-rule-engine.js)
+//
+//  Applied AFTER HTML is fetched/decrypted — merges user data into placeholders
+//  and hides visibility-false elements before injection.
+// =============================================================================
+
+/**
+ * Merge user data into the signature HTML template.
+ *
+ * Template placeholders:  {{user.name}}, {{user.phone}}, {{mail.isExternal}}, etc.
+ * Visibility:  elements with class `sig-{elementClass}` are hidden when
+ *              visibleElements[elementClass] === false.
+ *
+ * @param {string}        html            - raw signature HTML (already AES-decrypted)
+ * @param {object}        flatCtx         - flattened context object
+ * @param {"all"|object}  visibleElements - from engine.resolve()
+ * @returns {string}                      - ready-to-inject HTML
+ */
+function renderSignature(html, flatCtx, visibleElements) {
+    if (!html) return "";
+
+    // 1. Replace {{user.name}} etc.
+    let rendered = html.replace(/\{\{([\w.]+)\}\}/g, (_, path) => {
+        const val = flatCtx[path];
+        return (val !== undefined && val !== null) ? String(val) : "";
+    });
+
+    // 2. Apply visibility rules (DOM manipulation in a sandboxed DOMParser)
+    if (visibleElements !== "all" && typeof DOMParser !== "undefined") {
+        try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(rendered, "text/html");
+
+            for (const [elementClass, isVisible] of Object.entries(visibleElements)) {
+                if (!isVisible) {
+                    doc.querySelectorAll(`.sig-${elementClass}`).forEach(el => {
+                        el.style.display = "none";
+                    });
+                }
+            }
+
+            rendered = doc.body.innerHTML;
+        } catch (err) {
+            console.warn("[CardByte] renderSignature visibility pass failed:", err);
+            // Return the placeholder-replaced HTML without visibility changes
+        }
+    }
+
+    return rendered;
+}
+
+
+// =============================================================================
+//  ANALYTICS / AUDIT LOG  ← NEW (ported from signature-rule-engine.js)
+//
+//  Fire-and-forget POST — never blocks signature injection.
+// =============================================================================
+
+function logResolution(context, result) {
+    const payload = {
+        userId: context.user?.email,
+        mailType: context.mail?.type,
+        isExternal: context.mail?.isExternal,
+        signatureId: result.signatureId,
+        resolvedBy: result.resolvedBy,
+        matchedRuleId: result.matchedRuleId,
+        timestamp: Date.now(),
+    };
+
+    fetch(`${BASE_URL}/signature-audit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+    }).catch(() => { });
+}
+
+
+// =============================================================================
+//  SIGNATURE INJECTION  (updated: accepts visibleElements from engine)
 // =============================================================================
 
 function bodySetSignatureAsync(item, html) {
@@ -788,11 +969,6 @@ function bodySetSelectedDataAsync(item, html) {
     });
 }
 
-/**
- * Injects HTML into the compose body.
- * Light (<100 KB): uses setSignatureAsync directly.
- * Heavy (≥100 KB): cursor trick at compose time; skipped at send time (already there).
- */
 async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
@@ -806,16 +982,14 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}`);
 
     if (isSendTime) {
-        console.log("[CardByte] Heavy signature at send time — skipping (already in body)");
         removeNotification(item);
         return false;
     }
 
     try {
-        await bodySetSignatureAsync(item, "");          // move cursor to bottom
-        await bodySetSelectedDataAsync(item, html);     // inject at cursor
+        await bodySetSignatureAsync(item, "");
+        await bodySetSelectedDataAsync(item, html);
         removeNotification(item);
-        console.log("[CardByte] Heavy signature inserted via cursor trick");
         return true;
     } catch (err) {
         console.error("[CardByte] Heavy path insertion failed:", err);
@@ -824,39 +998,23 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     }
 }
 
+
 // =============================================================================
-//  CORE SIGNATURE ORCHESTRATOR
+//  CORE SIGNATURE ORCHESTRATOR  (fallback path — primary renderer)
 // =============================================================================
 
-/**
- * Resolves the correct signature HTML and injects it into the compose body.
- * Used only as a last-resort fallback (primary renderer path).
- *
- * @param {object}  item       - Office mailbox item
- * @param {object}  mailbox    - Office mailbox
- * @param {object}  opts
- * @param {boolean} isSendTime - true when called from onSendHandler
- */
 async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) {
     const { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, overrideHtml = null } = opts;
     const userEmail = mailbox?.userProfile?.emailAddress;
 
-    // ── 1. Determine which HTML to use ─────────────────────────────────────
-    let html = overrideHtml;
-
-    if (!html) html = getCachedSignature({ skipTtl, skipSessionCheck });
+    let html = overrideHtml ?? getCachedSignature({ skipTtl, skipSessionCheck });
 
     if (!html && fetchIfMissing && userEmail) {
         let attempt = 0;
         while (attempt <= MAX_RETRIES) {
             try {
-                if (attempt > 0) {
-                    console.warn(`[CardByte] Retry ${attempt}/${MAX_RETRIES}...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt));
-                }
-                const result = await fetchPrimarySignature(
-                    await encryptEmail(userEmail), getXPlatform()
-                );
+                if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * attempt));
+                const result = await fetchPrimarySignature(await encryptEmail(userEmail), getXPlatform());
                 if (result != null) {
                     html = result;
                     CACHED_SIGNATURE_HTML = html;
@@ -870,19 +1028,13 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
         }
     }
 
-    // ── 2. Last resort: stale cache ─────────────────────────────────────────
     if (!html) {
         const stale = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-        if (stale) {
-            console.warn("[CardByte] Using stale cache as last resort");
-            html = stale;
-        }
+        if (stale) { console.warn("[CardByte] Using stale cache as last resort"); html = stale; }
     }
 
-    // ── 3. Inject or bail ──────────────────────────────────────────────────
     if (!html) {
         console.error("[CardByte] No signature available — aborting");
-        removeNotification(item);
         showNotification(item, "Signature not available. Please contact Admin.");
         return;
     }
@@ -890,46 +1042,69 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
     await applySignatureWithFallback(item, html, isSendTime);
 }
 
+
 // =============================================================================
-//  RECIPIENT-CHANGE HANDLER — applies the rule-matched signature
+//  RECIPIENT-CHANGE HANDLER  (updated: uses engine + renderSignature)
 // =============================================================================
 
 /**
- * Called whenever the recipient list changes (via event or poll).
- * Finds the matching rule, resolves that signature via the shared sigById
- * cache (zero network if already prefetched), and injects it.
+ * Called whenever the recipient list changes (native event or poll).
+ * Resolves the best rule via SignatureRuleEngine, fetches the HTML (cache-first),
+ * applies renderSignature() for visibility + placeholders, then injects.
  */
 async function onRecipientsChanged(item) {
-    const matched = await findMatchingRule(item);
-    if (!matched) return;
+    const mailbox = Office?.context?.mailbox;
+    const userEmail = mailbox?.userProfile?.emailAddress;
 
-    console.log(`[CardByte] 🎯 Rule matched → "${matched.rule}" | signatureId: ${matched.signatureId}`);
+    const [rulesJson, recipientEmails, composeContext] = await Promise.all([
+        ensureRulesCached(userEmail),
+        getAllRecipientEmails(item),
+        getOrDetectComposeContext(),
+    ]);
 
-    const userEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
+    if (!rulesJson || recipientEmails.length === 0) return;
+
+    const context = await buildContext(recipientEmails, composeContext, rulesJson);
+
+    const defaults = rulesJson.defaults ?? { global: rulesJson.defaultSignatureId ?? "" };
+    if (!defaults.global) {
+        console.warn("[CardByte] No global default configured — cannot run engine");
+        return;
+    }
+
+    const engine = new SignatureRuleEngine(
+        (rulesJson.rulesList || []).filter(r => r.enabled !== false),
+        defaults
+    );
+
+    const result = engine.resolve(context);
+    const flatCtx = flattenContext(context);
     const xPlatform = getXPlatform();
     const encryptedMail = await encryptEmail(userEmail);
 
-    // Cache-first: will be a hit if prefetchAllRuleSignatures ran at compose open
-    const ruleHtml = await getOrFetchSignatureById(matched.signatureId, encryptedMail, xPlatform);
-    if (!ruleHtml) {
+    const rawHtml = await getOrFetchSignatureById(result.signatureId, encryptedMail, xPlatform);
+    if (!rawHtml) {
         console.warn("[CardByte] Rule signature fetch returned null — keeping current signature");
         return;
     }
 
+    const renderedHtml = renderSignature(rawHtml, flatCtx, result.visibleElements);
+
     console.log("[CardByte] Injecting rule-matched signature");
-    await applySignatureWithFallback(item, ruleHtml, false);
+    await applySignatureWithFallback(item, renderedHtml, false);
+
+    logResolution(context, result);
 }
 
+
 // =============================================================================
-//  RECIPIENT POLLING — OWA fallback (RecipientsChanged is unreliable in OWA)
+//  RECIPIENT POLLING — OWA fallback
 // =============================================================================
 
 let _lastRecipientSnapshot = "";
 let _recipientPollTimer = null;
 
-function serializeRecipients(emails) {
-    return [...emails].sort().join(",");
-}
+function serializeRecipients(emails) { return [...emails].sort().join(","); }
 
 async function pollRecipients() {
     const item = Office?.context?.mailbox?.item;
@@ -938,7 +1113,7 @@ async function pollRecipients() {
     const emails = await getAllRecipientEmails(item);
     const snapshot = serializeRecipients(emails);
 
-    if (snapshot === _lastRecipientSnapshot) return;   // no change
+    if (snapshot === _lastRecipientSnapshot) return;
     _lastRecipientSnapshot = snapshot;
 
     console.log("[CardByte] 🔄 Recipient change detected via poll:", emails);
@@ -949,19 +1124,16 @@ async function pollRecipients() {
 
 function startRecipientPolling() {
     if (_recipientPollTimer) return;
-    console.log("[CardByte] 📡 Starting recipient polling...");
     _recipientPollTimer = setInterval(pollRecipients, RECIPIENT_POLL_MS);
 }
 
 function stopRecipientPolling() {
-    if (_recipientPollTimer) {
-        clearInterval(_recipientPollTimer);
-        _recipientPollTimer = null;
-    }
+    if (_recipientPollTimer) { clearInterval(_recipientPollTimer); _recipientPollTimer = null; }
 }
 
+
 // =============================================================================
-//  NATIVE RecipientsChanged EVENT — desktop / new Outlook
+//  NATIVE RecipientsChanged EVENT
 // =============================================================================
 
 let _recipientsHandlerRegistered = false;
@@ -970,17 +1142,11 @@ function registerRecipientsChangedHandler() {
     const item = Office?.context?.mailbox?.item;
 
     if (!item) {
-        console.log("[CardByte] Item not ready — retrying RecipientsChanged registration...");
         setTimeout(registerRecipientsChangedHandler, 300);
         return;
     }
 
-    if (_recipientsHandlerRegistered) return;
-
-    if (isMobile()) {
-        console.log("[CardByte] RecipientsChanged not supported on mobile — skipping");
-        return;
-    }
+    if (_recipientsHandlerRegistered || isMobile()) return;
 
     if (typeof item.addHandlerAsync !== "function") {
         console.warn("[CardByte] addHandlerAsync not available");
@@ -989,8 +1155,7 @@ function registerRecipientsChangedHandler() {
 
     item.addHandlerAsync(
         Office.EventType.RecipientsChanged,
-        async (eventArgs) => {
-            console.log("[CardByte] 🔔 RecipientsChanged (native):", eventArgs);
+        async () => {
             const currentItem = Office?.context?.mailbox?.item;
             if (!currentItem) return;
             await onRecipientsChanged(currentItem);
@@ -1008,20 +1173,17 @@ function registerRecipientsChangedHandler() {
     );
 }
 
+
 // =============================================================================
 //  OFFICE READY
 // =============================================================================
 
 Office.onReady(() => {
-    console.log("✅ Office.onReady fired");
-    console.log(`[CardByte] Platform: ${detectPlatform()}`);
-
-    // Opportunistically purge stale per-id entries left from previous sessions
+    console.log("[CardByte] Office.onReady fired | platform:", detectPlatform());
     purgeStaleSigById();
-
-    // Delay slightly to let OWA fully hydrate the mailbox item
     setTimeout(registerRecipientsChangedHandler, 500);
 });
+
 
 // =============================================================================
 //  PUBLIC ENTRY POINTS
@@ -1031,18 +1193,16 @@ Office.onReady(() => {
  * applySignature — LaunchEvent handler (new compose / reply / forward)
  *
  * Resolution order at open time:
- *   1. Rules engine with actual recipients (if To is pre-filled)
- *   2. Context-default rule — best wildcard rule matching compose/reply context
- *   3. Primary renderer (last resort — context-unaware server response)
+ *   1. Expressive rule engine with actual recipients (if To is pre-filled)
+ *   2. Expressive rule engine with wildcard context-default rule
+ *   3. Primary renderer fallback (last resort)
  *
- * After injecting the opening signature, kicks off:
+ * After injecting, kicks off:
  *   - Background prefetch of all rule signatures
  *   - Recipient polling (OWA safety net)
- *   - Native RecipientsChanged handler (desktop / New Outlook)
+ *   - Native RecipientsChanged handler
  */
 const applySignature = async function (event = { completed: () => { } }) {
-    // Reset per-window state so each new compose/reply/forward gets a fresh
-    // context detection and recipient snapshot.
     _composeContext = null;
     _lastRecipientSnapshot = "";
     _recipientsHandlerRegistered = false;
@@ -1055,66 +1215,66 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         const userEmail = mailbox?.userProfile?.emailAddress;
 
-        // ── Detect context + fetch rules + read recipients in parallel ────────
-        // All three are needed before we can make a rule decision.
         const [composeContext, rulesJson, emails] = await Promise.all([
             getOrDetectComposeContext(),
             ensureRulesCached(userEmail),
             getAllRecipientEmails(item),
         ]);
 
-        const enabledRules = (rulesJson?.rulesList || []).filter(r => r.enabled);
         const xPlatform = getXPlatform();
         const encryptedMail = await encryptEmail(userEmail);
 
+        const defaults = rulesJson?.defaults ?? { global: rulesJson?.defaultSignatureId ?? "" };
+        let engine = null;
+
+        // Build engine only when we have rules + a configured global default
+        if (rulesJson && defaults.global) {
+            try {
+                engine = new SignatureRuleEngine(
+                    (rulesJson.rulesList || []).filter(r => r.enabled !== false),
+                    defaults
+                );
+            } catch (err) {
+                console.error("[CardByte] Engine construction failed:", err);
+            }
+        }
+
         let appliedViaRule = false;
 
-        // ── Step 1: full rule match if To is pre-filled ───────────────────────
-        if (emails.length > 0) {
-            _lastRecipientSnapshot = serializeRecipients(emails);
+        if (engine) {
+            // ── Step 1: full rule match if To is pre-filled ─────────────────
+            const recipientsForMatch = emails.length > 0 ? emails : [];
+            if (recipientsForMatch.length > 0) {
+                _lastRecipientSnapshot = serializeRecipients(recipientsForMatch);
+            }
 
-            const matched = selectBestRule(enabledRules, emails, composeContext, userEmail || "");
-            if (matched) {
-                const ruleHtml = await getOrFetchSignatureById(matched.signatureId, encryptedMail, xPlatform);
-                if (ruleHtml) {
-                    await applySignatureWithFallback(item, ruleHtml, false);
-                    appliedViaRule = true;
-                    console.log(`[CardByte] ✅ Opening sig from full rule match: "${matched.rule}"`);
-                }
+            const context = await buildContext(recipientsForMatch, composeContext, rulesJson);
+            const result = engine.resolve(context);
+            const flatCtx = flattenContext(context);
+
+            const rawHtml = await getOrFetchSignatureById(result.signatureId, encryptedMail, xPlatform);
+            if (rawHtml) {
+                const renderedHtml = renderSignature(rawHtml, flatCtx, result.visibleElements);
+                await applySignatureWithFallback(item, renderedHtml, false);
+                appliedViaRule = true;
+                console.log(`[CardByte] ✅ Opening sig: resolvedBy=${result.resolvedBy} | id=${result.signatureId}`);
+                logResolution(context, result);
             }
         }
 
-        // ── Step 2: context-default rule (no recipients yet) ──────────────────
-        // Picks the best wildcard rule that matches the current compose context
-        // e.g. "Compose" sig for new mail, "Replies/Forward" sig for reply.
+        // ── Step 3: primary renderer fallback ──────────────────────────────
         if (!appliedViaRule) {
-            const contextRule = findContextDefaultRule(enabledRules, composeContext);
-            if (contextRule) {
-                const ruleHtml = await getOrFetchSignatureById(contextRule.signatureId, encryptedMail, xPlatform);
-                if (ruleHtml) {
-                    await applySignatureWithFallback(item, ruleHtml, false);
-                    appliedViaRule = true;
-                    console.log(`[CardByte] ✅ Opening sig from context-default rule: "${contextRule.rule}"`);
-                }
-            }
-        }
-
-        // ── Step 3: primary renderer fallback (last resort) ───────────────────
-        // Only reached if rules are unavailable or no rule matches at all.
-        if (!appliedViaRule) {
-            console.warn("[CardByte] No rule matched at open — falling back to primary renderer");
+            console.warn("[CardByte] No rule match at open — falling back to primary renderer");
             await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
         }
 
-        // ── Background: prefetch all rule signatures ───────────────────────────
-        // Fire-and-forget — ensures recipient-change lookups are instant.
+        // ── Background work ─────────────────────────────────────────────────
         if (userEmail) {
             prefetchAllRuleSignatures(userEmail).catch(err =>
                 console.warn("[CardByte] Background prefetch failed:", err)
             );
         }
 
-        // ── Kick off recipient change detection ───────────────────────────────
         startRecipientPolling();
         registerRecipientsChangedHandler();
 
@@ -1126,8 +1286,7 @@ const applySignature = async function (event = { completed: () => { } }) {
 };
 
 /**
- * onSendHandler — AppendOnSend / OnMessageSend handler
- * Re-applies the cached signature at send time (handles heavy-sig edge cases).
+ * onSendHandler — AppendOnSend / OnMessageSend
  */
 const onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
@@ -1135,21 +1294,14 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return;
-
-        // Stop polling — compose session is ending
         stopRecipientPolling();
-
-        // await applySignatureCore(
-        //     item, mailbox,
-        //     { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
-        //     true  // isSendTime
-        // );
     } catch (err) {
         console.error("[CardByte] onSendHandler error:", err);
     } finally {
         event.completed({ allowEvent: true });
     }
 };
+
 
 // =============================================================================
 //  REGISTER OFFICE ACTIONS
@@ -1158,7 +1310,7 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("applySignature", applySignature);
     Office.actions.associate("onSendHandler", onSendHandler);
-    console.log("[CardByte] Office.actions registered: applySignature, onSendHandler");
+    console.log("[CardByte] Office.actions registered");
 } else {
-    console.log("[CardByte] Office.actions not available — LaunchEvent path inactive (Outlook 2016/2019)");
+    console.log("[CardByte] Office.actions not available — Outlook 2016/2019");
 }
