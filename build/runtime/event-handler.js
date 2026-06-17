@@ -692,7 +692,7 @@ async function findMatchingRule(item) {
 
     const enabledRules = (rulesJson?.rulesList || [])
         .filter(r => r.enabled)
-        .filter(r => r?.context === composeType)
+        .filter(r => r?.context === composeType || r?.context === "all")
         .filter(r => r?.recipientType === recipientType)
         .sort((a, b) => a.priority - b.priority); // ascending — lower number = higher priority
 
