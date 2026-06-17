@@ -584,17 +584,17 @@ function classifyRecipientType(recipientEmails, userEmail) {
 /**
  * Selects the single best rule for the current compose window.
  *
- * Evaluation order (highest to lowest priority):
- *   1. context filter  — rule.context must be "all" or match composeContext
- *   2. pattern filter  — ruleMatchesEmails must return true
- *   3. recipientType specificity
- *        score 2 → rule.recipientType exactly matches classified type (internal/external)
- *        score 1 → rule.recipientType === "all"
- *        score 0 → mismatch → excluded
- *   4. priority tiebreak — lower rule.priority number wins
+ * Evaluation hierarchy (highest tier wins; priority number breaks ties within a tier):
  *
- * Single-pass: the array is sorted once after scoring; no nested loops or
- * redundant passes.
+ *   Tier 1 — context exact  + recipientType exact  (e.g. "reply"   + "internal")
+ *   Tier 2 — context exact  + recipientType all    (e.g. "reply"   + "all")
+ *   Tier 3 — context all    + recipientType exact  (e.g. "all"     + "external")
+ *   Tier 4 — context all    + recipientType all    (e.g. "all"     + "all")
+ *
+ * "all" on either dimension is a fallback — it only wins when no rule with a
+ * more-specific value on that dimension matches.
+ *
+ * Within the same tier the rule with the lowest priority number wins.
  *
  * @param {object[]} enabledRules      - pre-filtered to enabled only (any order)
  * @param {string[]} recipientEmails   - lowercase deduplicated emails
@@ -606,36 +606,60 @@ function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail
     const classified = classifyRecipientType(recipientEmails, userEmail);
     console.log(`[CardByte] Recipient type: ${classified} | Context: ${composeContext}`);
 
-    let bestRule = null;
-    let bestScore = -1;
-    let bestPri = Infinity;
+    // Tier buckets: index 0 = highest (exact+exact) … index 3 = lowest (all+all)
+    // Each bucket holds the single best (lowest priority number) rule seen so far.
+    const buckets = [null, null, null, null]; // tier 1–4 mapped to indices 0–3
 
     for (const rule of enabledRules) {
 
-        // ── 1. Context filter ────────────────────────────────────────────────
-        const ctx = (rule.context || "all").toLowerCase();
-        if (ctx !== "all" && ctx !== composeContext) continue;
-
-        // ── 2. Pattern filter ────────────────────────────────────────────────
+        // ── Pattern filter (ruleValue / ruleType matching) ────────────────────
         if (!ruleMatchesEmails(rule, recipientEmails)) continue;
 
-        // ── 3. recipientType specificity score ───────────────────────────────
-        const rt = (rule.recipientType || "all").toLowerCase();
-        const score = rt === classified ? 2 : rt === "all" ? 1 : 0;
-        if (score === 0) continue;   // recipientType mismatch — skip
+        // ── Context dimension ─────────────────────────────────────────────────
+        const ctx = (rule.context || "all").toLowerCase();
+        const ctxExact = ctx === composeContext;   // true → tier col 0; false if ctx==="all" → col 1
+        const ctxAll = ctx === "all";
 
-        // ── 4. Keep if better score, or same score with lower priority number ─
-        if (score > bestScore || (score === bestScore && rule.priority < bestPri)) {
-            bestRule = rule;
-            bestScore = score;
-            bestPri = rule.priority;
+        if (!ctxExact && !ctxAll) continue;        // e.g. rule is "compose" but we're in "reply"
+
+        // ── RecipientType dimension ───────────────────────────────────────────
+        const rt = (rule.recipientType || "all").toLowerCase();
+        const rtExact = rt === classified;          // true → tier row 0
+        const rtAll = rt === "all";
+
+        if (!rtExact && !rtAll) continue;           // e.g. rule is "internal" but recipients are external
+
+        // ── Assign tier ───────────────────────────────────────────────────────
+        //   ctxExact + rtExact → 0
+        //   ctxExact + rtAll   → 1
+        //   ctxAll   + rtExact → 2
+        //   ctxAll   + rtAll   → 3
+        const tier = (ctxExact ? 0 : 2) + (rtExact ? 0 : 1);
+
+        // ── Keep lowest priority number within this tier ───────────────────────
+        if (buckets[tier] === null || rule.priority < buckets[tier].priority) {
+            buckets[tier] = rule;
         }
     }
 
+    // ── Return the best rule from the highest non-empty tier ─────────────────
+    const bestRule = buckets.find(b => b !== null) ?? null;
+
     if (bestRule) {
-        console.log(`[CardByte] ✅ Best rule: "${bestRule.rule}" | priority=${bestRule.priority} | recipientType=${bestRule.recipientType} | signatureId=${bestRule.signatureId}`);
+        console.log(
+            `[CardByte] ✅ Best rule: "${bestRule.rule}"`,
+            `| priority=${bestRule.priority}`,
+            `| context=${bestRule.context}`,
+            `| recipientType=${bestRule.recipientType}`,
+            `| signatureId=${bestRule.signatureId}`
+        );
     } else {
-        console.warn("[CardByte] ❌ No rule matched — context:", composeContext, "| type:", classified, "| recipients:", recipientEmails);
+        console.warn(
+            "[CardByte] ❌ No rule matched",
+            "| context:", composeContext,
+            "| recipientType:", classified,
+            "| recipients:", recipientEmails
+        );
     }
 
     return bestRule;
