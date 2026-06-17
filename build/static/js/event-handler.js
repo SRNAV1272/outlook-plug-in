@@ -526,54 +526,16 @@ async function getAllRecipientEmails(item) {
 // =============================================================================
 //  RULES MATCHING ENGINE
 // =============================================================================
-
-/**
- * Returns true if `email` satisfies `pattern`.
- * Patterns: "*" (wildcard) | "domain.com" (domain match) | "user@domain.com" (exact)
- */
-function emailMatchesPattern(email, pattern) {
-    if (!pattern?.trim()) return false;
-    const p = pattern.trim().toLowerCase();
-    if (p === "*") return true;
-    if (!p.includes("@")) return email.endsWith("@" + p);
-    return email === p;
-}
-
-/**
- * Returns true if the rule is satisfied by the given recipient email list.
- * ruleType "ALL" → every pattern in ruleValue must match at least one recipient.
- * ruleType "ANY" (default) → at least one recipient matches at least one pattern.
- * A rule with no ruleValue patterns is not filtered by this check at all —
- * it's a no-op pass-through, so rules can rely purely on composeType /
- * recipientType (see Rules Selector engine below) if that's all they specify.
- */
-function ruleMatchesEmails(rule, emails) {
-    const { ruleType = "ANY", ruleValue = [] } = rule;
-    if (!ruleValue.length) return true;
-    if (ruleType === "ALL") {
-        return ruleValue.every(p => emails.some(e => emailMatchesPattern(e, p)));
-    }
-    return emails.some(e => ruleValue.some(p => emailMatchesPattern(e, p)));
-}
-
 // =============================================================================
 //  RULES SELECTOR ENGINE
 //  Segregates rules by (1) compose type, (2) recipient type (internal /
 //  external relative to the sender's domain), then (3) priority — ascending,
 //  lower number = higher priority.
 // =============================================================================
-
 // ─── 1. Compose-type segregation ───────────────────────────────────────────
 // rule.composeType: "NEW" (new message) | "REPLY_FORWARD" (reply/replyAll/forward) | "ALL" (default)
 
 const _composeTypeByItem = new WeakMap();
-
-function normalizeRuleComposeType(value) {
-    const v = (value || "ALL").toUpperCase().replace(/[\s/_-]+/g, "");
-    if (v === "NEW" || v === "COMPOSE" || v === "NEWMAIL") return "NEW";
-    if (v === "REPLYFORWARD" || v === "REPLY" || v === "FORWARD") return "REPLY_FORWARD";
-    return "ALL";
-}
 
 /**
  * Resolves the current item's compose type via Office.js, normalized to
@@ -606,22 +568,6 @@ function getComposeType(item) {
     });
 }
 
-/** True if the rule's composeType segment matches the current compose type. */
-function ruleMatchesComposeType(rule, composeType) {
-    const want = normalizeRuleComposeType(rule.context);
-    if (want === "ALL") return true;
-    if (!composeType) return true; // couldn't determine — don't exclude the rule on an unknown
-    return want === composeType;
-}
-
-// ─── 2. Recipient-type segregation (internal / external) ──────────────────
-// rule.recipientType: "INTERNAL" | "EXTERNAL" | "ALL" (default)
-
-function normalizeRuleRecipientType(value) {
-    const v = (value || "ALL").toUpperCase();
-    return (v === "INTERNAL" || v === "EXTERNAL") ? v : "ALL";
-}
-
 /** Domain portion of an email address, lowercased. */
 function getDomain(email) {
     const at = (email || "").lastIndexOf("@");
@@ -639,14 +585,6 @@ function classifyRecipients(senderEmail, recipientEmails) {
     if (!senderDomain || recipientEmails.length === 0) return null;
     const allInternal = recipientEmails.every(e => getDomain(e) === senderDomain);
     return allInternal ? "internal" : "external";
-}
-
-/** True if the rule's recipientType segment matches the resolved classification. */
-function ruleMatchesRecipientType(rule, classification) {
-    const want = normalizeRuleRecipientType(rule.recipientType);
-    if (want === "ALL") return true;
-    if (!classification) return false; // a specific filter needs a resolved classification to pass
-    return want === classification;
 }
 
 // ─── 3. Top-level selector ──────────────────────────────────────────────────
@@ -693,7 +631,7 @@ async function findMatchingRule(item) {
     const enabledRules = (rulesJson?.rulesList || [])
         .filter(r => r.enabled)
         .filter(r => r?.context === composeType || r?.context === "all")
-        .filter(r => r?.recipientType === recipientType)
+        .filter(r => r?.recipientType === recipientType || r?.recipientType === "all")
         .sort((a, b) => a.priority - b.priority); // ascending — lower number = higher priority
 
     console.log("[CardByte] Selector engine inputs:", { composeType, recipientType, emails, enabledRules, rulesJson });
@@ -785,14 +723,12 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
 async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) {
     const { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, overrideHtml = null } = opts;
     const userEmail = mailbox?.userProfile?.emailAddress;
-
     // ── 1. Determine which HTML to use ─────────────────────────────────────
     let html = overrideHtml;
 
     if (!html) {
         html = getCachedSignature({ skipTtl, skipSessionCheck });
     }
-
     if (!html && fetchIfMissing && userEmail) {
         let attempt = 0;
         while (attempt <= MAX_RETRIES) {
@@ -962,10 +898,8 @@ function registerRecipientsChangedHandler() {
 Office.onReady(() => {
     console.log("✅ Office.onReady fired");
     console.log(`[CardByte] Platform: ${detectPlatform()}`);
-
     // Opportunistically purge stale per-id entries left from previous sessions
     purgeStaleSigById();
-
     // Delay slightly to let OWA fully hydrate the mailbox item
     setTimeout(registerRecipientsChangedHandler, 500);
 });
@@ -984,12 +918,9 @@ const applySignature = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return;
-
         const userEmail = mailbox?.userProfile?.emailAddress;
-
         // Inject default signature (fetches rules + primary in parallel)
         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
-
         // Prefetch all rule signatures in the background so recipient-change
         // lookups across this and any other open compose windows are instant.
         // Fire-and-forget — failures are logged but don't block the compose open.
@@ -998,7 +929,6 @@ const applySignature = async function (event = { completed: () => { } }) {
                 console.warn("[CardByte] Background prefetch failed:", err)
             );
         }
-
         // Initial recipient check (handles compose opening with a pre-filled To)
         const emails = await getAllRecipientEmails(item);
         if (emails.length > 0) {
@@ -1023,13 +953,10 @@ const applySignature = async function (event = { completed: () => { } }) {
 const onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
-
     try {
         if (!item) return;
-
         // Stop polling — compose session is ending
         stopRecipientPolling();
-
         // await applySignatureCore(
         //     item, mailbox,
         //     { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
