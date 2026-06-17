@@ -79,12 +79,8 @@ async function fetchAndCacheRules(userEmail) {
             return null;
         }
 
-        const decryptedData = JSON.parse(await res.text());
-
-        const parsed =
-            typeof decryptedData === "string"
-                ? JSON.parse(decryptedData)
-                : decryptedData;
+        // API IS NOT ENCRYPTED
+        const parsed = await res.json();
 
         const rulesJson = parsed?.rulesJson;
 
@@ -408,14 +404,17 @@ async function pollRecipients() {
     try {
         const emails = await getAllRecipientEmails(item);
         const snapshot = serializeRecipients(emails);
-        const rules = getCachedRules()
 
         // No change
         if (snapshot === _lastRecipientSnapshot) return;
 
         _lastRecipientSnapshot = snapshot;
 
-        console.log("[CardByte] 🔄 Recipient change detected:", emails, rules);
+        const rules = getCachedRules() || {};
+
+        console.log("[CardByte] 🔄 Recipient change detected:");
+        console.log("[CardByte] Recipients:", emails);
+        console.log("[CardByte] Cached Rules:", rules);
 
     } catch (err) {
         console.error("[CardByte] pollRecipients error:", err);
