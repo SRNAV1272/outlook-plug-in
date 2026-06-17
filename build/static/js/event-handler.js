@@ -31,7 +31,7 @@ const RULES_CACHE_TTL_MS = 5 * 60 * 1000;
 // Shape: { [signatureId]: { html: string, ts: number } }
 // Shared across all compose/reply/forward windows via SharedRuntime localStorage.
 const SIG_BY_ID_CACHE_KEY = "cardbyte_sig_by_id";
-const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;   // same TTL as other caches
+const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;
 
 const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
 const RECIPIENT_POLL_MS = 2000;   // poll interval for OWA fallback
@@ -216,13 +216,8 @@ function setCachedRules(rulesJson) {
 //
 //  Map shape: { [signatureId]: { html: string, ts: number } }
 
-function _readSigByIdMap() {
-    return store.getJson(SIG_BY_ID_CACHE_KEY) || {};
-}
-
-function _writeSigByIdMap(map) {
-    store.setJson(SIG_BY_ID_CACHE_KEY, map);
-}
+function _readSigByIdMap() { return store.getJson(SIG_BY_ID_CACHE_KEY) || {}; }
+function _writeSigByIdMap(map) { store.setJson(SIG_BY_ID_CACHE_KEY, map); }
 
 function getSigById(signatureId, { skipTtl = false } = {}) {
     const id = String(signatureId);
@@ -380,40 +375,21 @@ async function getOrFetchSignatureById(signatureId, encryptedMail, xPlatform, { 
 }
 
 /**
- * Main signature resolver:
- *  1. Runs primary renderer + rules fetch in parallel.
- *  2. Returns primary HTML if available, otherwise falls back to the
- *     highest-priority enabled rule (using the shared sigById cache).
- *  Side-effect: always populates the rules cache.
+ * Ensures rules are in cache, fetching live if not.
+ * Returns rulesJson or null. Shared by applySignature + findMatchingRule
+ * so we never duplicate the live-fetch logic.
  */
-async function resolveSignatureFromServer(userEmail) {
-    const xPlatform = getXPlatform();
-    const encryptedMail = await encryptEmail(userEmail);
+async function ensureRulesCached(userEmail) {
+    let rulesJson = getCachedRules();
+    if (rulesJson) return rulesJson;
 
-    const [primaryHtml, rulesJson] = await Promise.all([
-        fetchPrimarySignature(encryptedMail, xPlatform),
-        fetchAndCacheRules(encryptedMail, xPlatform),
-    ]);
+    console.warn("[CardByte] Rules not in cache — live fetch...");
+    if (!userEmail) return null;
 
-    if (primaryHtml) {
-        console.log("[CardByte] Using primary renderer result");
-        return primaryHtml;
-    }
-
-    console.warn("[CardByte] Primary returned null — falling back to top-priority rule");
-
-    const enabledRules = (rulesJson?.rulesList || [])
-        .filter(r => r.enabled)
-        .sort((a, b) => a.priority - b.priority);
-
-    if (enabledRules.length === 0) {
-        console.warn("[CardByte] No enabled rules found");
-        return null;
-    }
-
-    const topRule = enabledRules[0];
-    console.log(`[CardByte] Fallback rule: "${topRule.rule}" (priority ${topRule.priority}), signatureId: ${topRule.signatureId}`);
-    return getOrFetchSignatureById(topRule.signatureId, encryptedMail, xPlatform);
+    const enc = await encryptEmail(userEmail);
+    rulesJson = await fetchAndCacheRules(enc, getXPlatform());
+    if (!rulesJson) console.warn("[CardByte] ensureRulesCached: live fetch returned null");
+    return rulesJson;
 }
 
 /**
@@ -502,11 +478,12 @@ async function getOrDetectComposeContext() {
             item.getComposeTypeAsync((result) => {
                 if (result.status !== Office.AsyncResultStatus.Succeeded) return resolve("compose");
                 const ct = result.value?.composeType || "";
-                // ComposeType enum values: "newMail" | "reply" | "forward"
-                resolve(ct === "reply" || ct === "forward" ||
-                    ct === Office.MailboxEnums.ComposeType?.Reply ||
-                    ct === Office.MailboxEnums.ComposeType?.Forward
-                    ? "reply" : "compose");
+                resolve(
+                    ct === "reply" || ct === "forward" ||
+                        ct === Office.MailboxEnums.ComposeType?.Reply ||
+                        ct === Office.MailboxEnums.ComposeType?.Forward
+                        ? "reply" : "compose"
+                );
             });
         } else {
             // Classic Outlook: conversationId is set on replies/forwards, null on new mail
@@ -548,18 +525,17 @@ function emailMatchesPattern(email, pattern) {
  *     "apply this signature to every external domain EXCEPT gmail.com"
  *   → fires only if no external recipient's domain appears in ruleValue.
  *
- * @param {object}      rule
- * @param {string[]}    emails         - full recipient list (To + CC), lowercase
- * @param {string[]|null} externalEmails - non-null only for external-classified rules;
- *                                        internal recipients already stripped out
+ * @param {object}        rule
+ * @param {string[]}      emails          - full recipient list (To + CC), lowercase
+ * @param {string[]|null} externalEmails  - non-null only for external-classified rules;
+ *                                          internal recipients already stripped out
  */
 function ruleMatchesEmails(rule, emails, externalEmails = null) {
     const ruleValue = rule.ruleValue || [];
 
     // ── External exclusion logic ──────────────────────────────────────────────
     if (externalEmails !== null) {
-        if (externalEmails.length === 0) return false; // no external recipients — nothing to match
-
+        if (externalEmails.length === 0) return false;
         // Rule fires only when NO external recipient is covered by any exclusion pattern
         const anyExcluded = externalEmails.some(email =>
             ruleValue.some(pattern => emailMatchesPattern(email, pattern))
@@ -569,7 +545,6 @@ function ruleMatchesEmails(rule, emails, externalEmails = null) {
 
     // ── Standard inclusion logic (internal / all rules) ───────────────────────
     const ruleType = (rule.ruleType || "ANY").toUpperCase();
-
     if (ruleType === "ALL") {
         return ruleValue.every(p => emails.some(e => emailMatchesPattern(e, p)));
     }
@@ -580,10 +555,8 @@ function ruleMatchesEmails(rule, emails, externalEmails = null) {
  * Classifies the recipient list as "internal", "external", or "all".
  *
  * internal → every recipient shares the user's domain
- * external → at least one recipient is on a different domain  (mixed = external)
+ * external → at least one recipient is on a different domain (mixed = external)
  * all      → fallback when userEmail or recipients are unavailable
- *
- * Short-circuits on the first external hit for performance.
  *
  * @param {string[]} recipientEmails  - lowercase email strings
  * @param {string}   userEmail        - logged-in user's email address
@@ -621,12 +594,12 @@ function classifyRecipientType(recipientEmails, userEmail) {
  *   Internal recipients (same domain as user) are stripped before pattern
  *   matching. ruleValue acts as an EXCLUSION list — the rule fires only when
  *   ALL remaining external recipients are NOT covered by any pattern in ruleValue.
- *   If no matching external rule exists the engine falls through to the next tier.
+ *   Falls through to the next tier if no external rule matches.
  *
- * @param {object[]} enabledRules      - pre-filtered to enabled only (any order)
- * @param {string[]} recipientEmails   - lowercase deduplicated emails (To + CC)
+ * @param {object[]}          enabledRules      - pre-filtered to enabled only (any order)
+ * @param {string[]}          recipientEmails   - lowercase deduplicated emails (To + CC)
  * @param {"compose"|"reply"} composeContext
- * @param {string}   userEmail
+ * @param {string}            userEmail
  * @returns {object|null}
  */
 function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail) {
@@ -649,18 +622,18 @@ function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail
         const ctxExact = ctx === composeContext;
         const ctxAll = ctx === "all";
 
-        if (!ctxExact && !ctxAll) continue; // e.g. rule is "compose" but we're in "reply"
+        if (!ctxExact && !ctxAll) continue;   // e.g. rule is "compose" but we're in "reply"
 
         // ── RecipientType dimension ───────────────────────────────────────────
         const rt = (rule.recipientType || "all").toLowerCase();
         const rtExact = rt === classified;
         const rtAll = rt === "all";
 
-        if (!rtExact && !rtAll) continue;   // e.g. rule is "internal" but recipients are external
+        if (!rtExact && !rtAll) continue;     // e.g. rule is "internal" but recipients are external
 
         // ── Pattern filter ────────────────────────────────────────────────────
-        // External rules: pass externalEmails → exclusion logic
-        // All other rules: pass null → standard inclusion logic
+        // External rules → exclusion logic against externalEmails only
+        // All other rules → standard inclusion logic against full list
         const emailsCtx = rt === "external" ? externalEmails : null;
         if (!ruleMatchesEmails(rule, recipientEmails, emailsCtx)) continue;
 
@@ -703,30 +676,79 @@ function selectBestRule(enabledRules, recipientEmails, composeContext, userEmail
 }
 
 /**
- * Public entry point for rule evaluation.
+ * Finds the best context-default rule to apply at compose-open time,
+ * BEFORE the user has typed any recipients.
  *
- * Runs getAllRecipientEmails and getOrDetectComposeContext in parallel (both
- * are async Office calls) so neither waits on the other. Live-fetches rules
- * from the API only when the cache is cold.
+ * Only considers rules that:
+ *   - have recipientType "all"  (no domain/email specificity needed)
+ *   - have ruleValue containing "*" (wildcard — intended as catch-all)
+ *   - match the current composeContext (exact match wins; "all" is fallback)
+ *
+ * Tier 0 = context exact match, Tier 1 = context "all" fallback.
+ * Within each tier, lowest priority number wins.
+ *
+ * @param {object[]}          enabledRules   - pre-filtered to enabled only
+ * @param {"compose"|"reply"} composeContext
+ * @returns {object|null}
+ */
+function findContextDefaultRule(enabledRules, composeContext) {
+    // buckets[0] = context exact match, buckets[1] = context "all" fallback
+    const buckets = [null, null];
+
+    for (const rule of enabledRules) {
+        // Must be a catch-all recipient type
+        const rt = (rule.recipientType || "all").toLowerCase();
+        if (rt !== "all") continue;
+
+        // Must have wildcard in ruleValue — marks it as a catch-all
+        if (!(rule.ruleValue || []).includes("*")) continue;
+
+        // Context filter
+        const ctx = (rule.context || "all").toLowerCase();
+        const ctxExact = ctx === composeContext;
+        const ctxAll = ctx === "all";
+
+        if (!ctxExact && !ctxAll) continue;
+
+        const bucket = ctxExact ? 0 : 1;
+        if (buckets[bucket] === null || rule.priority < buckets[bucket].priority) {
+            buckets[bucket] = rule;
+        }
+    }
+
+    const best = buckets.find(b => b !== null) ?? null;
+
+    if (best) {
+        console.log(
+            `[CardByte] 🎯 Context default rule: "${best.rule}"`,
+            `| context=${best.context}`,
+            `| priority=${best.priority}`,
+            `| signatureId=${best.signatureId}`
+        );
+    } else {
+        console.warn(`[CardByte] No context default rule found for context: ${composeContext}`);
+    }
+
+    return best;
+}
+
+/**
+ * Public entry point for rule evaluation (recipient-change path).
+ *
+ * Runs getAllRecipientEmails and getOrDetectComposeContext in parallel.
+ * Live-fetches rules from the API only when the cache is cold.
  *
  * @param {object} item  - Office mailbox item
  * @returns {Promise<object|null>}  best matching rule, or null
  */
 async function findMatchingRule(item) {
+    const userEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
 
     // ── Rules: cache-first, single live fetch on miss ────────────────────────
-    let rulesJson = getCachedRules();
+    const rulesJson = await ensureRulesCached(userEmail);
     if (!rulesJson) {
-        console.warn("[CardByte] Rules not in cache — live fetch...");
-        const userEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
-        if (userEmail) {
-            const enc = await encryptEmail(userEmail);
-            rulesJson = await fetchAndCacheRules(enc, getXPlatform());
-        }
-        if (!rulesJson) {
-            console.warn("[CardByte] findMatchingRule: no rules available");
-            return null;
-        }
+        console.warn("[CardByte] findMatchingRule: no rules available");
+        return null;
     }
 
     // ── Recipients + context in parallel ─────────────────────────────────────
@@ -740,10 +762,8 @@ async function findMatchingRule(item) {
         return null;
     }
 
-    const userEmail = Office?.context?.mailbox?.userProfile?.emailAddress || "";
     const enabledRules = (rulesJson?.rulesList || []).filter(r => r.enabled);
-
-    return selectBestRule(enabledRules, recipientEmails, composeContext, userEmail);
+    return selectBestRule(enabledRules, recipientEmails, composeContext, userEmail || "");
 }
 
 // =============================================================================
@@ -810,15 +830,12 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
 
 /**
  * Resolves the correct signature HTML and injects it into the compose body.
+ * Used only as a last-resort fallback (primary renderer path).
  *
- * @param {object}  item                        - Office mailbox item
- * @param {object}  mailbox                     - Office mailbox
+ * @param {object}  item       - Office mailbox item
+ * @param {object}  mailbox    - Office mailbox
  * @param {object}  opts
- * @param {boolean} opts.fetchIfMissing         - fetch from server if cache is cold
- * @param {boolean} opts.skipTtl               - bypass TTL check on the cache
- * @param {boolean} opts.skipSessionCheck      - bypass session-ID check
- * @param {string|null} opts.overrideHtml      - use this HTML directly (rule-matched)
- * @param {boolean} isSendTime                 - true when called from onSendHandler
+ * @param {boolean} isSendTime - true when called from onSendHandler
  */
 async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) {
     const { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, overrideHtml = null } = opts;
@@ -827,9 +844,7 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
     // ── 1. Determine which HTML to use ─────────────────────────────────────
     let html = overrideHtml;
 
-    if (!html) {
-        html = getCachedSignature({ skipTtl, skipSessionCheck });
-    }
+    if (!html) html = getCachedSignature({ skipTtl, skipSessionCheck });
 
     if (!html && fetchIfMissing && userEmail) {
         let attempt = 0;
@@ -839,7 +854,9 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
                     console.warn(`[CardByte] Retry ${attempt}/${MAX_RETRIES}...`);
                     await new Promise(r => setTimeout(r, 1000 * attempt));
                 }
-                const result = await resolveSignatureFromServer(userEmail);
+                const result = await fetchPrimarySignature(
+                    await encryptEmail(userEmail), getXPlatform()
+                );
                 if (result != null) {
                     html = result;
                     CACHED_SIGNATURE_HTML = html;
@@ -1012,7 +1029,16 @@ Office.onReady(() => {
 
 /**
  * applySignature — LaunchEvent handler (new compose / reply / forward)
- * Injects the default signature and kicks off recipient polling + native event.
+ *
+ * Resolution order at open time:
+ *   1. Rules engine with actual recipients (if To is pre-filled)
+ *   2. Context-default rule — best wildcard rule matching compose/reply context
+ *   3. Primary renderer (last resort — context-unaware server response)
+ *
+ * After injecting the opening signature, kicks off:
+ *   - Background prefetch of all rule signatures
+ *   - Recipient polling (OWA safety net)
+ *   - Native RecipientsChanged handler (desktop / New Outlook)
  */
 const applySignature = async function (event = { completed: () => { } }) {
     // Reset per-window state so each new compose/reply/forward gets a fresh
@@ -1029,29 +1055,67 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         const userEmail = mailbox?.userProfile?.emailAddress;
 
-        // Inject default signature (fetches rules + primary in parallel)
-        await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
+        // ── Detect context + fetch rules + read recipients in parallel ────────
+        // All three are needed before we can make a rule decision.
+        const [composeContext, rulesJson, emails] = await Promise.all([
+            getOrDetectComposeContext(),
+            ensureRulesCached(userEmail),
+            getAllRecipientEmails(item),
+        ]);
 
-        // Prefetch all rule signatures in the background so recipient-change
-        // lookups across this and any other open compose windows are instant.
-        // Fire-and-forget — failures are logged but don't block the compose open.
+        const enabledRules = (rulesJson?.rulesList || []).filter(r => r.enabled);
+        const xPlatform = getXPlatform();
+        const encryptedMail = await encryptEmail(userEmail);
+
+        let appliedViaRule = false;
+
+        // ── Step 1: full rule match if To is pre-filled ───────────────────────
+        if (emails.length > 0) {
+            _lastRecipientSnapshot = serializeRecipients(emails);
+
+            const matched = selectBestRule(enabledRules, emails, composeContext, userEmail || "");
+            if (matched) {
+                const ruleHtml = await getOrFetchSignatureById(matched.signatureId, encryptedMail, xPlatform);
+                if (ruleHtml) {
+                    await applySignatureWithFallback(item, ruleHtml, false);
+                    appliedViaRule = true;
+                    console.log(`[CardByte] ✅ Opening sig from full rule match: "${matched.rule}"`);
+                }
+            }
+        }
+
+        // ── Step 2: context-default rule (no recipients yet) ──────────────────
+        // Picks the best wildcard rule that matches the current compose context
+        // e.g. "Compose" sig for new mail, "Replies/Forward" sig for reply.
+        if (!appliedViaRule) {
+            const contextRule = findContextDefaultRule(enabledRules, composeContext);
+            if (contextRule) {
+                const ruleHtml = await getOrFetchSignatureById(contextRule.signatureId, encryptedMail, xPlatform);
+                if (ruleHtml) {
+                    await applySignatureWithFallback(item, ruleHtml, false);
+                    appliedViaRule = true;
+                    console.log(`[CardByte] ✅ Opening sig from context-default rule: "${contextRule.rule}"`);
+                }
+            }
+        }
+
+        // ── Step 3: primary renderer fallback (last resort) ───────────────────
+        // Only reached if rules are unavailable or no rule matches at all.
+        if (!appliedViaRule) {
+            console.warn("[CardByte] No rule matched at open — falling back to primary renderer");
+            await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
+        }
+
+        // ── Background: prefetch all rule signatures ───────────────────────────
+        // Fire-and-forget — ensures recipient-change lookups are instant.
         if (userEmail) {
             prefetchAllRuleSignatures(userEmail).catch(err =>
                 console.warn("[CardByte] Background prefetch failed:", err)
             );
         }
 
-        // Initial recipient check (handles compose opening with a pre-filled To)
-        const emails = await getAllRecipientEmails(item);
-        if (emails.length > 0) {
-            _lastRecipientSnapshot = serializeRecipients(emails);
-            await onRecipientsChanged(item);
-        }
-
-        // Start polling as OWA / fallback safety net
+        // ── Kick off recipient change detection ───────────────────────────────
         startRecipientPolling();
-
-        // Register native RecipientsChanged handler for desktop / New Outlook
         registerRecipientsChangedHandler();
 
     } catch (err) {
