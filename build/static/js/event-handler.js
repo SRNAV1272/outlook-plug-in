@@ -689,15 +689,14 @@ async function findMatchingRule(item) {
     }
 
     const recipientType = classifyRecipients(senderEmail, emails);
-    console.log("[CardByte] Selector engine inputs:", { composeType, recipientType, emails });
 
     const enabledRules = (rulesJson?.rulesList || [])
         .filter(r => r.enabled)
         .filter(r => ruleMatchesComposeType(r, composeType))
         .filter(r => ruleMatchesRecipientType(r, recipientType))
-        .filter(r => ruleMatchesEmails(r, emails))
         .sort((a, b) => a.priority - b.priority); // ascending — lower number = higher priority
 
+    console.log("[CardByte] Selector engine inputs:", { composeType, recipientType, emails, enabledRules, rulesJson });
     const matched = enabledRules[0] || null;
 
     if (matched) {
@@ -888,6 +887,8 @@ async function pollRecipients() {
     _lastRecipientSnapshot = snapshot;
 
     console.log("[CardByte] 🔄 Recipient change detected via poll:", emails);
+    console.log("[CardByte] 🔄 Recipient change detected via poll:", emails);
+
     if (emails.length === 0) return;
 
     await onRecipientsChanged(item);
