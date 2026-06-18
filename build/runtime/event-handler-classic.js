@@ -7726,21 +7726,26 @@ function findContextDefaultRule(item, rulesJson, cb) {
 // Runs the full 4-tier selector, resolves the signature, and injects it.
 // forceReplace=true so a rule-matched signature always replaces the default.
 
-function onRecipientsChanged(item) {
+function onRecipientsChanged(item, onDone) {
     findMatchingRule(item, function (matched) {
-        if (!matched) return;
+        if (!matched) {
+            if (onDone) onDone(false);
+            return;
+        }
 
         _diag.info("onRecipientsChanged: rule matched → signatureId=" + matched.signatureId);
 
         getOrFetchSignatureById(matched.signatureId, function (wrappedHtml) {
             if (!wrappedHtml) {
                 _diag.warn("onRecipientsChanged: signature null — keeping current");
+                if (onDone) onDone(false);
                 return;
             }
             _diag.info("onRecipientsChanged: injecting rule-matched signature");
             writeSignature(item, wrappedHtml, function (ok) {
                 if (!ok) _diag.warn("onRecipientsChanged: writeSignature failed");
                 else _diag.info("onRecipientsChanged: ✅ rule signature injected");
+                if (onDone) onDone(ok);
             }, true /* forceReplace */);
         });
     });
@@ -7767,7 +7772,13 @@ function _pollRecipients() {
         _diag.info("pollRecipients: change detected → " + JSON.stringify(emails));
 
         if (emails.length === 0) return;
-        onRecipientsChanged(item);
+
+        // Pass onDone so the diag block is re-flushed (prepended) after the
+        // rule-matched write completes — making poll results visible in the body.
+        onRecipientsChanged(item, function (ok) {
+            _diag.info("pollRecipients: post-change flush (writeOk=" + ok + ")");
+            writeDiagnostics(item, function () { });
+        });
     });
 }
 
@@ -7927,58 +7938,58 @@ function applySignature(event) {
                     prefetchAllRuleSignatures();
                 }
 
-                // ── Step 4: initial recipient check + context-default rule ─────
+                // ── Steps 4–6: initial recipient check → polling → diag flush ──
                 //
-                // If there are already recipients (compose opened from a contact
-                // card with To pre-filled), run the full 4-tier selector.
-                //
-                // If there are no recipients yet, run findContextDefaultRule to
-                // inject the context-appropriate default (e.g. a dedicated
-                // "new message" signature) before the user starts typing.
+                // Steps 5 and 6 are nested INSIDE the getAllRecipientEmails
+                // callback (and inside onRecipientsChanged's onDone callback when
+                // recipients are present) so that:
+                //   • startRecipientPolling fires only after the initial
+                //     rule-matched signature write is committed — not racing it.
+                //   • writeDiagnostics flushes AFTER the rule-match write, so
+                //     the diag block captures _evalRules output and the write
+                //     result, not just PATH A succeeded.
+                //   • guarded.completed() is still inside the fetchAndCacheRules
+                //     callback so the runtime isn't torn down prematurely.
+
+                function _finishSetup() {
+                    // ── Step 5 ─────────────────────────────────────────────────
+                    startRecipientPolling();
+
+                    // ── Step 6 ─────────────────────────────────────────────────
+                    _diag.info("applySignature: chain complete — flushing diagnostics");
+                    writeDiagnostics(item, function () {
+                        guarded.completed();
+                    });
+                }
 
                 getAllRecipientEmails(item, function (emails) {
                     if (emails.length > 0) {
+                        // Pre-filled recipients: run full selector, wait for write,
+                        // then start polling + flush diag.
                         _lastRecipientSnapshot = _serializeRecipients(emails);
-                        onRecipientsChanged(item);
+                        onRecipientsChanged(item, function (/*ok*/) {
+                            _finishSetup();
+                        });
                     } else if (rulesJson) {
-                        // No recipients yet — apply the context-default rule if one exists.
-                        // forceReplace=false so we don't clobber a signature the user
-                        // may have already manually edited.
+                        // No recipients yet — inject context-default rule signature
+                        // if one exists, then start polling + flush diag.
                         findContextDefaultRule(item, rulesJson, function (defaultRule) {
-                            if (!defaultRule) return;
+                            if (!defaultRule) { _finishSetup(); return; }
                             _diag.info("applySignature: injecting context-default rule id="
                                 + defaultRule.signatureId);
                             getOrFetchSignatureById(defaultRule.signatureId, function (wrappedHtml) {
-                                if (!wrappedHtml) return;
+                                if (!wrappedHtml) { _finishSetup(); return; }
                                 writeSignature(item, wrappedHtml, function (ok) {
                                     if (!ok) _diag.warn("applySignature: context-default write failed");
                                     else _diag.info("applySignature: ✅ context-default injected");
+                                    _finishSetup();
                                 }, false /* forceReplace */);
                             });
                         });
+                    } else {
+                        // No recipients, no rules — just start polling and flush.
+                        _finishSetup();
                     }
-                });
-
-                // ── Step 5: start polling ─────────────────────────────────────
-                //
-                // setInterval must be registered BEFORE guarded.completed() or
-                // Classic's runtime teardown will kill the timer immediately.
-                startRecipientPolling();
-
-                // ── Step 6: flush diagnostics then signal Office ───────────────
-                //
-                // writeDiagnostics is called HERE — after rules fetch, prefetch,
-                // initial recipient check, and polling are all committed — so the
-                // diag block captures the complete execution trace including all
-                // post-signature steps. Calling it inside applySignatureCore would
-                // flush too early (at PATH A succeeded), cutting off everything after.
-                //
-                // guarded.completed() fires inside the writeDiagnostics callback,
-                // after the diag block is written to the body. The runtime stays
-                // alive because setInterval (step 5) is already running.
-                _diag.info("applySignature: chain complete — flushing diagnostics");
-                writeDiagnostics(item, function () {
-                    guarded.completed();
                 });
             });
         }
@@ -8054,15 +8065,16 @@ function onFromChangedHandler(event) {
                     getAllRecipientEmails(item, function (emails) {
                         if (emails.length > 0) {
                             _lastRecipientSnapshot = _serializeRecipients(emails);
-                            onRecipientsChanged(item);
+                            onRecipientsChanged(item, function (/*ok*/) {
+                                startRecipientPolling();
+                                _diag.info("onFromChangedHandler: chain complete — flushing diagnostics");
+                                writeDiagnostics(item, function () { guarded.completed(); });
+                            });
+                        } else {
+                            startRecipientPolling();
+                            _diag.info("onFromChangedHandler: chain complete — flushing diagnostics");
+                            writeDiagnostics(item, function () { guarded.completed(); });
                         }
-                    });
-
-                    startRecipientPolling();
-
-                    _diag.info("onFromChangedHandler: chain complete — flushing diagnostics");
-                    writeDiagnostics(item, function () {
-                        guarded.completed();
                     });
                 });
             }
