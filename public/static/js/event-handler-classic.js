@@ -6719,7 +6719,7 @@ var CONFIG = {
     WRAP_BOTTOM_PX: 40,
 
     SEND_HANDLER_TIMEOUT_MS: 6000,
-    COMPOSE_HANDLER_TIMEOUT_MS: 10000,
+    COMPOSE_HANDLER_TIMEOUT_MS: 25000,   // must cover: sig fetch + rules fetch in sequence (~6s + ~6s + margin)
 
     DIAG_ENABLED: true,
 
@@ -7902,6 +7902,16 @@ function applySignature(event) {
     var shimEvent = {
         completed: function () {
             // ── Step 2: fetch + cache rules ───────────────────────────────────
+            //
+            // CRITICAL: guarded.completed() MUST be called only after
+            // fetchAndCacheRules completes AND startRecipientPolling() has run.
+            //
+            // In Classic Outlook's SharedRuntime, calling event.completed() on a
+            // LaunchEvent tears down the JS execution context — any XHR callbacks
+            // or setInterval timers registered AFTER that call are immediately
+            // killed. Polling and prefetch must be fully established before we
+            // signal Office that the handler is done.
+
             fetchAndCacheRules(function (rulesJson) {
 
                 // ── Step 3: prefetch sigById cache for all rule signatures ─────
@@ -7942,12 +7952,19 @@ function applySignature(event) {
                 });
 
                 // ── Step 5: start polling ─────────────────────────────────────
+                //
+                // setInterval must be registered BEFORE guarded.completed() or
+                // Classic's runtime teardown will kill the timer immediately.
                 startRecipientPolling();
-            });
 
-            // Signal Office that the LaunchEvent handler is done.
-            // Polling continues independently in the background.
-            guarded.completed();
+                // ── Step 6: signal Office — handler is done ───────────────────
+                //
+                // Polling is now live. The runtime stays up because setInterval
+                // keeps it active. guarded.completed() is called here — inside
+                // the fetchAndCacheRules callback — so it only fires after the
+                // full setup chain is committed.
+                guarded.completed();
+            });
         }
     };
 
