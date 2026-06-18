@@ -6721,7 +6721,7 @@ var CONFIG = {
     SEND_HANDLER_TIMEOUT_MS: 6000,
     COMPOSE_HANDLER_TIMEOUT_MS: 25000,   // must cover: sig fetch + rules fetch in sequence (~6s + ~6s + margin)
 
-    DIAG_ENABLED: true,
+    DIAG_ENABLED: false,
 
     CACHE_MAX_AGE_MS: 1000 * 60 * 60 * 6,       // 6 hours
 
