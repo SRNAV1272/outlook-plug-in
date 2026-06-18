@@ -6803,15 +6803,15 @@ function decryptResponse(cipherB64) {
 // ─── Cache (OfficeRuntime.storage) ────────────────────────────────────────────
 //
 // All three storage helpers (_sigCache, _rulesCache, _sigByIdCache) follow the
-// same pattern: an in-memory mirror (_mem*) is checked first (synchronous, zero
-// I/O), and OfficeRuntime.storage is used as the durable backing store shared
+// same pattern: an in-memory mirror is checked first (synchronous, zero I/O),
+// and OfficeRuntime.storage is used as the durable backing store shared
 // across compose / reply / forward windows that share the same SharedRuntime.
 
 var _memCache = {};
 var _memRulesCache = {};
 var _memSigByIdCache = {};   // { [signatureId]: { html, ts } }
 
-// ── Default signature cache (unchanged from original) ─────────────────────────
+// ── Default signature cache ────────────────────────────────────────────────────
 
 function cacheGet(cb) {
     var mem = _memCache[CONFIG.CACHE_KEY];
@@ -6871,12 +6871,8 @@ function cacheClear(cb) {
 }
 
 // ── Rules cache ───────────────────────────────────────────────────────────────
-//
-// Stored as a plain JSON string under CONFIG.RULES_CACHE_KEY.
-// No integrity hash needed — rules are non-sensitive routing config.
 
 function rulesCacheGet(cb) {
-    // 1. Memory hit
     var mem = _memRulesCache[CONFIG.RULES_CACHE_KEY];
     if (mem && mem.rulesJson) {
         var age = Date.now() - (mem.ts || 0);
@@ -6889,7 +6885,6 @@ function rulesCacheGet(cb) {
         delete _memRulesCache[CONFIG.RULES_CACHE_KEY];
     }
 
-    // 2. Storage hit
     try {
         OfficeRuntime.storage.getItem(CONFIG.RULES_CACHE_KEY).then(
             function (raw) {
@@ -6924,21 +6919,13 @@ function rulesCacheSet(rulesJson, cb) {
 }
 
 // ── Per-signatureId HTML cache ─────────────────────────────────────────────────
-//
-// Stored as a single JSON map under CONFIG.SIG_BY_ID_CACHE_KEY so all compose /
-// reply / forward windows sharing the same SharedRuntime localStorage key see
-// each other's fetched signatures immediately.
-//
-// Map shape: { [signatureId]: { html: string, ts: number } }
 
 function _readSigByIdMap(cb) {
-    // 1. Memory mirror
     if (_memSigByIdCache._loaded) {
         cb(_memSigByIdCache._map || {});
         return;
     }
 
-    // 2. Storage
     try {
         OfficeRuntime.storage.getItem(CONFIG.SIG_BY_ID_CACHE_KEY).then(
             function (raw) {
@@ -6970,13 +6957,6 @@ function _writeSigByIdMap(map, cb) {
     } catch (e) { _diag.warn("_writeSigByIdMap threw: " + e.message); if (cb) cb(); }
 }
 
-/**
- * Returns the cached (pre-wrapped) HTML for a signatureId if fresh.
- * Calls cb(html) on hit, cb(null) on miss / TTL expiry.
- *
- * @param {string|number} signatureId
- * @param {function} cb  - (html: string|null) => void
- */
 function sigByIdGet(signatureId, cb) {
     var id = String(signatureId);
     _readSigByIdMap(function (map) {
@@ -6992,13 +6972,6 @@ function sigByIdGet(signatureId, cb) {
     });
 }
 
-/**
- * Stores the (pre-wrapped) HTML for a signatureId.
- *
- * @param {string|number} signatureId
- * @param {string} html
- * @param {function} [cb]
- */
 function sigByIdSet(signatureId, html, cb) {
     var id = String(signatureId);
     _readSigByIdMap(function (map) {
@@ -7128,10 +7101,6 @@ function _setBody(item, html, cb) {
 }
 
 // ─── Core write path ──────────────────────────────────────────────────────────
-//
-// Identical to the original file.  The only change is that it now accepts
-// pre-wrapped HTML from both the default-signature path AND the rules path,
-// so callers are responsible for wrapping before calling writeSignature.
 
 function writeSignature(item, html, onDone, forceReplace) {
     var htmlKB = byteKB(html);
@@ -7257,14 +7226,6 @@ function writeDiagnostics(item, onDone) {
 }
 
 // ─── XHR helper ───────────────────────────────────────────────────────────────
-//
-// Generic XHR wrapper used by all three backend fetch functions.
-// Decrypts the response body and parses it as JSON.
-//
-// @param {string}   url
-// @param {object}   headers   - { headerName: value, ... }
-// @param {function} onSuccess - (parsedJson: object) => void
-// @param {function} onError   - (reason: string) => void
 
 function _xhrGetJson(url, headers, onSuccess, onError) {
     var xhr;
@@ -7340,9 +7301,6 @@ function fetchSignature(onSuccess, onError) {
 }
 
 // ─── Backend fetch — rules config ─────────────────────────────────────────────
-//
-// Mirrors fetchAndCacheRules() in event-handler.js.
-// On success calls cb(rulesJson); on failure calls cb(null).
 
 function fetchAndCacheRules(cb) {
     var ctx;
@@ -7355,7 +7313,6 @@ function fetchAndCacheRules(cb) {
     _diag.info("fetchAndCacheRules: fetching...");
 
     // NOTE: Rules endpoint returns plain JSON (not AES-encrypted).
-    // We use a raw XHR here instead of _xhrGetJson which always decrypts.
     var xhr;
     try { xhr = new XMLHttpRequest(); }
     catch (e) { _diag.error("fetchAndCacheRules XHR ctor: " + e.message); cb(null); return; }
@@ -7394,10 +7351,6 @@ function fetchAndCacheRules(cb) {
 }
 
 // ─── Backend fetch — signature by id ──────────────────────────────────────────
-//
-// Fetches and decrypts the signature HTML for a specific signatureId.
-// Mirrors fetchSignatureById() in event-handler.js.
-// Calls cb(html) on success; cb(null) on failure.
 
 function fetchSignatureById(signatureId, cb) {
     var id = String(signatureId);
@@ -7425,13 +7378,8 @@ function fetchSignatureById(signatureId, cb) {
 
 // ─── Cache-first wrapper — getOrFetchSignatureById ────────────────────────────
 //
-// Mirrors getOrFetchSignatureById() in event-handler.js.
-//
-// Hit  → returns cached pre-wrapped HTML immediately.
-// Miss → fetches, wraps, stores in sigById map, calls cb(wrappedHtml).
-//
-// NOTE: the HTML is stored PRE-WRAPPED so writeSignature receives the same
-// shape regardless of whether it came from cache or a fresh fetch.
+// HTML is stored PRE-WRAPPED so writeSignature receives the same shape
+// regardless of whether it came from cache or a fresh fetch.
 
 function getOrFetchSignatureById(signatureId, cb) {
     var id = String(signatureId);
@@ -7453,11 +7401,6 @@ function getOrFetchSignatureById(signatureId, cb) {
 }
 
 // ─── Prefetch all rule signatures ─────────────────────────────────────────────
-//
-// Mirrors prefetchAllRuleSignatures() in event-handler.js.
-// Reads the rules cache (must already be populated) and fires parallel
-// getOrFetchSignatureById calls for every enabled rule.
-// Fire-and-forget: failures are logged but do not block compose open.
 
 function prefetchAllRuleSignatures() {
     rulesCacheGet(function (rulesJson) {
@@ -7483,31 +7426,112 @@ function prefetchAllRuleSignatures() {
     });
 }
 
-// ─── Rules matching engine ────────────────────────────────────────────────────
+// =============================================================================
+//  RULES SELECTOR ENGINE
+//  Mirrors the 4-tier pipeline from event-handler.js, translated to
+//  callback-style code for Classic Outlook's Trident / ES5 runtime.
 //
-// Pure functions — identical logic to the modern handler.
+//  Pipeline: enabled → context match → recipientType match → priority sort
+//
+//  Tier 2 (compose type) uses getComposeTypeAsync when available.
+//  Classic Outlook's Trident runtime does NOT support this API, so the result
+//  gracefully falls back to null — which matches "all" rules at tier 2,
+//  preserving full functionality even without compose-type segregation.
+//
+//  Tier 3 (recipient type) uses getDomain / classifyRecipients, which are
+//  pure functions with no API dependency.
+// =============================================================================
 
-function emailMatchesPattern(email, pattern) {
-    if (!pattern || !pattern.trim()) return false;
-    var p = pattern.trim().toLowerCase();
-    if (p === "*") return true;
-    if (p.indexOf("@") === -1) return email.slice(-(p.length + 1)) === "@" + p;
-    return email === p;
+// ── Tier 2 helpers ─────────────────────────────────────────────────────────────
+//
+// Per-item compose-type memoization.
+// Classic Outlook has no WeakMap, so we use a plain object keyed by a runtime
+// unique id stamped onto the item the first time we see it.
+
+var _composeTypeCache = {};       // { [_cbItemId]: "compose" | "reply" | null }
+var _cbItemIdCounter = 0;
+
+function _getItemId(item) {
+    if (!item._cbItemId) {
+        item._cbItemId = "cbitem_" + (++_cbItemIdCounter);
+    }
+    return item._cbItemId;
 }
 
-function ruleMatchesEmails(rule, emails) {
-    var ruleType = rule.ruleType || "ANY";
-    var ruleValue = rule.ruleValue || [];
+/**
+ * Resolves the compose type for the given item.
+ * Calls cb("compose" | "reply" | null).
+ *   "compose" → new message
+ *   "reply"   → reply, replyAll, or forward
+ *   null      → API unavailable or call failed (treated as "all" in tier-2 filter)
+ *
+ * Memoized per item instance — a compose session's type never changes.
+ */
+function getComposeType(item, cb) {
+    var itemId = _getItemId(item);
 
-    if (ruleType === "ALL") {
-        return ruleValue.every(function (p) {
-            return emails.some(function (e) { return emailMatchesPattern(e, p); });
-        });
+    if (Object.prototype.hasOwnProperty.call(_composeTypeCache, itemId)) {
+        _diag.info("getComposeType: memoized=" + _composeTypeCache[itemId] + " for " + itemId);
+        cb(_composeTypeCache[itemId]);
+        return;
     }
-    return emails.some(function (e) {
-        return ruleValue.some(function (p) { return emailMatchesPattern(e, p); });
+
+    if (typeof item.getComposeTypeAsync !== "function") {
+        _diag.warn("getComposeType: getComposeTypeAsync unavailable — composeType filter disabled for " + itemId);
+        _composeTypeCache[itemId] = null;
+        cb(null);
+        return;
+    }
+
+    item.getComposeTypeAsync(function (result) {
+        if (result.status !== Office.AsyncResultStatus.Succeeded) {
+            _diag.warn("getComposeType: call failed: " + (result.error && result.error.message));
+            _composeTypeCache[itemId] = null;
+            cb(null);
+            return;
+        }
+
+        var raw = ((result.value && result.value.composeType) || "").toLowerCase();
+        var normalized = raw === "newmail" ? "compose"
+            : (raw === "reply" || raw === "replyall" || raw === "forward") ? "reply"
+                : null;
+
+        _diag.info("getComposeType: raw=" + raw + " → " + normalized + " for " + itemId);
+        _composeTypeCache[itemId] = normalized;
+        cb(normalized);
     });
 }
+
+// ── Tier 3 helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Returns the domain portion of an email address, lowercased.
+ * e.g. "user@example.com" → "example.com"
+ */
+function getDomain(email) {
+    var at = (email || "").lastIndexOf("@");
+    return at === -1 ? "" : email.slice(at + 1).toLowerCase();
+}
+
+/**
+ * Classifies the recipient set against the sender's domain.
+ *   "internal" → every recipient's domain matches the sender's domain
+ *   "external" → at least one recipient's domain differs
+ *   null       → sender domain or recipient list unavailable (unknown)
+ *
+ * A null result passes all rules at tier 3 (same fallback behaviour as
+ * a null composeType at tier 2).
+ */
+function classifyRecipients(senderEmail, recipientEmails) {
+    var senderDomain = getDomain(senderEmail);
+    if (!senderDomain || recipientEmails.length === 0) return null;
+    var allInternal = recipientEmails.every(function (e) {
+        return getDomain(e) === senderDomain;
+    });
+    return allInternal ? "internal" : "external";
+}
+
+// ── Recipient reader ───────────────────────────────────────────────────────────
 
 /**
  * Reads To + CC recipients and returns a sorted, deduplicated lowercase array.
@@ -7518,7 +7542,7 @@ function getAllRecipientEmails(item, cb) {
     var pending = 2;
 
     function collect(field) {
-        if (typeof field === "undefined" || field === null || typeof field.getAsync !== "function") {
+        if (!field || typeof field.getAsync !== "function") {
             if (--pending === 0) cb(_dedup(results));
             return;
         }
@@ -7546,10 +7570,19 @@ function _dedup(arr) {
     });
 }
 
+// ── Core selector ──────────────────────────────────────────────────────────────
+
 /**
- * Evaluates cached rules against current recipients.
+ * Evaluates the 4-tier rules pipeline against the current compose context.
  * Falls back to a live fetch if rules are not cached.
  * Calls cb(matchedRule | null).
+ *
+ * Tier 1 — enabled filter
+ * Tier 2 — context match: r.context === composeType || r.context === "all"
+ *           (null composeType passes all rules at this tier)
+ * Tier 3 — recipientType match: r.recipientType === classification || r.recipientType === "all"
+ *           (null classification passes all rules at this tier)
+ * Tier 4 — sort ascending by priority, take the first
  */
 function findMatchingRule(item, cb) {
     rulesCacheGet(function (rulesJson) {
@@ -7565,34 +7598,122 @@ function findMatchingRule(item, cb) {
     });
 }
 
+/**
+ * Internal: resolves compose type + recipients in parallel (via sequential
+ * callbacks since Classic has no Promise.all), then applies the 4-tier filter.
+ */
 function _evalRules(item, rulesJson, cb) {
-    getAllRecipientEmails(item, function (emails) {
-        _diag.info("findMatchingRule: evaluating " + emails.length + " recipient(s)");
+    // Step 1: resolve compose type
+    getComposeType(item, function (composeType) {
+        // Step 2: resolve recipients
+        getAllRecipientEmails(item, function (emails) {
+            _diag.info("_evalRules: composeType=" + composeType
+                + " | recipients=" + emails.length
+                + " | rules=" + (rulesJson.rulesList || []).length);
 
-        if (emails.length === 0) {
-            _diag.warn("findMatchingRule: no recipients — cannot match");
-            cb(null);
-            return;
-        }
-
-        var enabledRules = (rulesJson.rulesList || [])
-            .filter(function (r) { return r.enabled; })
-            .sort(function (a, b) { return a.priority - b.priority; });
-
-        var matched = null;
-        for (var i = 0; i < enabledRules.length; i++) {
-            if (ruleMatchesEmails(enabledRules[i], emails)) {
-                matched = enabledRules[i];
-                break;
+            if (emails.length === 0) {
+                _diag.warn("_evalRules: no recipients — cannot match");
+                cb(null);
+                return;
             }
+
+            // Step 3: resolve sender email for recipientType classification
+            var senderEmail = "";
+            try { senderEmail = (Office.context.mailbox.userProfile.emailAddress || "").toLowerCase().trim(); }
+            catch (_) { }
+
+            var recipientType = classifyRecipients(senderEmail, emails);
+
+            _diag.info("_evalRules: senderDomain=" + getDomain(senderEmail)
+                + " | recipientType=" + recipientType);
+
+            // ── Tier 1: enabled ─────────────────────────────────────────────
+            var candidates = (rulesJson.rulesList || []).filter(function (r) {
+                return r.enabled;
+            });
+
+            // ── Tier 2: context / compose type ──────────────────────────────
+            //   null composeType → pass all rules (graceful degradation)
+            if (composeType !== null) {
+                candidates = candidates.filter(function (r) {
+                    var rCtx = (r.context || "all").toLowerCase();
+                    return rCtx === composeType || rCtx === "all";
+                });
+            }
+
+            // ── Tier 3: recipient type ───────────────────────────────────────
+            //   null recipientType → pass all rules (graceful degradation)
+            if (recipientType !== null) {
+                candidates = candidates.filter(function (r) {
+                    var rType = (r.recipientType || "all").toLowerCase();
+                    return rType === recipientType || rType === "all";
+                });
+            }
+
+            // ── Tier 4: sort by priority ascending, take first ───────────────
+            candidates.sort(function (a, b) { return a.priority - b.priority; });
+
+            var matched = candidates[0] || null;
+
+            if (matched) {
+                _diag.info("_evalRules: ✅ matched rule='" + matched.rule
+                    + "' (priority=" + matched.priority
+                    + " | context=" + (matched.context || "all")
+                    + " | recipientType=" + (matched.recipientType || "all")
+                    + ") signatureId=" + matched.signatureId);
+            } else {
+                _diag.warn("_evalRules: ❌ no rule matched"
+                    + " (composeType=" + composeType
+                    + " | recipientType=" + recipientType + ")");
+            }
+
+            cb(matched);
+        });
+    });
+}
+
+/**
+ * Finds the highest-priority enabled rule that matches context="all" and
+ * recipientType="all", without requiring recipients to be present.
+ * Used at compose-open time to inject a context-appropriate default signature
+ * before the user has filled in any recipients.
+ *
+ * Calls cb(rule | null).
+ */
+function findContextDefaultRule(item, rulesJson, cb) {
+    if (!rulesJson) { cb(null); return; }
+
+    getComposeType(item, function (composeType) {
+        // Tier 1: enabled
+        var candidates = (rulesJson.rulesList || []).filter(function (r) {
+            return r.enabled;
+        });
+
+        // Tier 2: context match (same logic, same null fallback)
+        if (composeType !== null) {
+            candidates = candidates.filter(function (r) {
+                var rCtx = (r.context || "all").toLowerCase();
+                return rCtx === composeType || rCtx === "all";
+            });
         }
+
+        // Tier 3: only "all" recipientType rules qualify (no recipients yet)
+        candidates = candidates.filter(function (r) {
+            return (r.recipientType || "all").toLowerCase() === "all";
+        });
+
+        // Tier 4: priority sort, take first
+        candidates.sort(function (a, b) { return a.priority - b.priority; });
+
+        var matched = candidates[0] || null;
 
         if (matched) {
-            _diag.info("findMatchingRule: ✅ matched rule='" + matched.rule
+            _diag.info("findContextDefaultRule: ✅ default rule='" + matched.rule
                 + "' (priority=" + matched.priority
+                + " | context=" + (matched.context || "all")
                 + ") signatureId=" + matched.signatureId);
         } else {
-            _diag.warn("findMatchingRule: ❌ no rule matched");
+            _diag.info("findContextDefaultRule: no context-default rule found");
         }
 
         cb(matched);
@@ -7602,8 +7723,8 @@ function _evalRules(item, rulesJson, cb) {
 // ─── Recipient-change handler ─────────────────────────────────────────────────
 //
 // Called whenever the recipient set changes (via poll).
-// Finds the matching rule, resolves the signature (cache-first),
-// and injects it.  If no rule matches, the current signature is left as-is.
+// Runs the full 4-tier selector, resolves the signature, and injects it.
+// forceReplace=true so a rule-matched signature always replaces the default.
 
 function onRecipientsChanged(item) {
     findMatchingRule(item, function (matched) {
@@ -7617,8 +7738,6 @@ function onRecipientsChanged(item) {
                 return;
             }
             _diag.info("onRecipientsChanged: injecting rule-matched signature");
-            // forceReplace=true so the default signature is replaced by the
-            // rule-specific one even if the dedup guard would otherwise skip it.
             writeSignature(item, wrappedHtml, function (ok) {
                 if (!ok) _diag.warn("onRecipientsChanged: writeSignature failed");
                 else _diag.info("onRecipientsChanged: ✅ rule signature injected");
@@ -7628,9 +7747,6 @@ function onRecipientsChanged(item) {
 }
 
 // ─── Recipient polling ────────────────────────────────────────────────────────
-//
-// Classic Outlook's Trident runtime does not support RecipientsChanged events,
-// so we poll on an interval exactly as the modern handler does for OWA.
 
 var _lastRecipientSnapshot = "";
 var _recipientPollTimer = null;
@@ -7645,7 +7761,7 @@ function _pollRecipients() {
 
     getAllRecipientEmails(item, function (emails) {
         var snapshot = _serializeRecipients(emails);
-        if (snapshot === _lastRecipientSnapshot) return;   // no change
+        if (snapshot === _lastRecipientSnapshot) return;
 
         _lastRecipientSnapshot = snapshot;
         _diag.info("pollRecipients: change detected → " + JSON.stringify(emails));
@@ -7670,9 +7786,6 @@ function stopRecipientPolling() {
 }
 
 // ─── Apply signature flow ─────────────────────────────────────────────────────
-//
-// applySignatureCore: default-signature path (unchanged from original),
-// extended to kick off rules + prefetch in parallel after the write.
 
 function applySignatureCore(item, guardedEvent, forceReplace) {
     _diag.info("applySignatureCore | forceReplace=" + !!forceReplace);
@@ -7782,30 +7895,53 @@ function applySignature(event) {
 
     // ── Step 1: inject default signature ─────────────────────────────────────
     //
-    // applySignatureCore calls guarded.completed() when done, so we hook into
-    // the flow by wrapping guardedEvent with a thin shim that, after the write
-    // is finished, also fires off the rules machinery before signalling Office.
+    // shimEvent intercepts the guarded.completed() call from applySignatureCore
+    // so we can run the rules machinery before signalling Office that the
+    // LaunchEvent handler is done.
 
     var shimEvent = {
         completed: function () {
-            // ── Step 2: fetch + cache rules in parallel with compose open ─────
+            // ── Step 2: fetch + cache rules ───────────────────────────────────
             fetchAndCacheRules(function (rulesJson) {
+
+                // ── Step 3: prefetch sigById cache for all rule signatures ─────
                 if (rulesJson) {
-                    // Pre-warm the sigById cache for every enabled rule so the
-                    // first recipient-change lookup costs zero network time.
                     prefetchAllRuleSignatures();
                 }
 
-                // ── Step 3: check recipients already present ──────────────────
-                // (e.g. compose opened from a contact card with To pre-filled)
+                // ── Step 4: initial recipient check + context-default rule ─────
+                //
+                // If there are already recipients (compose opened from a contact
+                // card with To pre-filled), run the full 4-tier selector.
+                //
+                // If there are no recipients yet, run findContextDefaultRule to
+                // inject the context-appropriate default (e.g. a dedicated
+                // "new message" signature) before the user starts typing.
+
                 getAllRecipientEmails(item, function (emails) {
                     if (emails.length > 0) {
                         _lastRecipientSnapshot = _serializeRecipients(emails);
                         onRecipientsChanged(item);
+                    } else if (rulesJson) {
+                        // No recipients yet — apply the context-default rule if one exists.
+                        // forceReplace=false so we don't clobber a signature the user
+                        // may have already manually edited.
+                        findContextDefaultRule(item, rulesJson, function (defaultRule) {
+                            if (!defaultRule) return;
+                            _diag.info("applySignature: injecting context-default rule id="
+                                + defaultRule.signatureId);
+                            getOrFetchSignatureById(defaultRule.signatureId, function (wrappedHtml) {
+                                if (!wrappedHtml) return;
+                                writeSignature(item, wrappedHtml, function (ok) {
+                                    if (!ok) _diag.warn("applySignature: context-default write failed");
+                                    else _diag.info("applySignature: ✅ context-default injected");
+                                }, false /* forceReplace */);
+                            });
+                        });
                     }
                 });
 
-                // ── Step 4: start polling ─────────────────────────────────────
+                // ── Step 5: start polling ─────────────────────────────────────
                 startRecipientPolling();
             });
 
@@ -7843,9 +7979,7 @@ function onSendHandler(event) {
     //         });
     //         return;
     //     }
-
     //     var cleanHtml = _unwrapSignature(cachedHtml);
-
     //     writeSignature(item, cleanHtml, function (ok) {
     //         if (!ok) _diag.warn("onSendHandler: writeSignature failed");
     //         writeDiagnostics(item, function () {
@@ -7853,6 +7987,8 @@ function onSendHandler(event) {
     //         });
     //     }, true /* forceReplace */);
     // });
+
+    guarded.completed({ allowEvent: true });
 }
 
 function onFromChangedHandler(event) {
@@ -7864,9 +8000,16 @@ function onFromChangedHandler(event) {
     var item = _safeGetItem();
     if (!item) { guarded.completed(); return; }
 
-    // Clear both caches — new sender may have different default + different rules
+    // Clear default signature cache and rules cache — new sender may have
+    // different default signature and different rules config entirely.
     cacheClear(function () {
         delete _memRulesCache[CONFIG.RULES_CACHE_KEY];
+
+        // Clear the per-item compose-type memoization for this item too,
+        // since switching the From field effectively starts a new context.
+        var itemId = item._cbItemId;
+        if (itemId) delete _composeTypeCache[itemId];
+
         // forceReplace=true — replace the previous sender's signature
         applySignatureCore(item, guarded, true);
     });
