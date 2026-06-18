@@ -7352,6 +7352,29 @@ function fetchAndCacheRules(cb) {
 
 // ─── Backend fetch — signature by id ──────────────────────────────────────────
 
+// function fetchSignatureById(signatureId, cb) {
+//     var id = String(signatureId);
+//     var ctx;
+//     try { ctx = resolveContext(); }
+//     catch (e) { _diag.error("fetchSignatureById: " + e.message); cb(null); return; }
+
+//     var encrypted = encryptEmail(ctx.email);
+//     if (!encrypted) { _diag.warn("fetchSignatureById: encrypt failed"); cb(null); return; }
+
+//     _diag.info("fetchSignatureById: fetching id=" + id);
+
+//     _xhrGetJson(
+//         CONFIG.SIG_BY_ID_URL + id,
+//         { "username": encrypted, "X-Platform": ctx.platform },
+//         function (parsed) {
+//             var html = parsed && parsed.html;
+//             if (!html) { _diag.warn("fetchSignatureById: missing html for id=" + id); cb(null); return; }
+//             _diag.info("fetchSignatureById: success id=" + id + " | len=" + html.length);
+//             cb(html);
+//         },
+//         function (reason) { _diag.warn("fetchSignatureById: failed id=" + id + " reason=" + reason); cb(null); }
+//     );
+// }
 function fetchSignatureById(signatureId, cb) {
     var id = String(signatureId);
     var ctx;
@@ -7363,17 +7386,40 @@ function fetchSignatureById(signatureId, cb) {
 
     _diag.info("fetchSignatureById: fetching id=" + id);
 
-    _xhrGetJson(
-        CONFIG.SIG_BY_ID_URL + id,
-        { "username": encrypted, "X-Platform": ctx.platform },
-        function (parsed) {
+    // NOTE: SIG_BY_ID_URL returns plain JSON (not AES-encrypted) — use raw XHR,
+    // same pattern as fetchAndCacheRules.
+    var xhr;
+    try { xhr = new XMLHttpRequest(); }
+    catch (e) { _diag.error("fetchSignatureById XHR ctor: " + e.message); cb(null); return; }
+
+    xhr.open("GET", CONFIG.SIG_BY_ID_URL + id, true);
+    xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
+    xhr.setRequestHeader("username", encrypted);
+    xhr.setRequestHeader("X-Platform", ctx.platform);
+
+    xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+            var parsed;
+            try { parsed = JSON.parse(xhr.responseText); }
+            catch (e) { _diag.warn("fetchSignatureById: JSON parse failed: " + e.message); cb(null); return; }
+
             var html = parsed && parsed.html;
             if (!html) { _diag.warn("fetchSignatureById: missing html for id=" + id); cb(null); return; }
+
             _diag.info("fetchSignatureById: success id=" + id + " | len=" + html.length);
             cb(html);
-        },
-        function (reason) { _diag.warn("fetchSignatureById: failed id=" + id + " reason=" + reason); cb(null); }
-    );
+        } else {
+            _diag.warn("fetchSignatureById: HTTP " + xhr.status + " for id=" + id);
+            cb(null);
+        }
+    };
+
+    xhr.ontimeout = function () { _diag.warn("fetchSignatureById: timeout id=" + id); cb(null); };
+    xhr.onerror = function () { _diag.error("fetchSignatureById: network error id=" + id); cb(null); };
+
+    try { xhr.send(); }
+    catch (e) { _diag.error("fetchSignatureById: send threw: " + e.message); cb(null); }
 }
 
 // ─── Cache-first wrapper — getOrFetchSignatureById ────────────────────────────
