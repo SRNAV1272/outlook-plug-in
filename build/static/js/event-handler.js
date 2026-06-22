@@ -78,7 +78,10 @@ const getMaxHtmlSize = () => isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_H
 
 // Returns "MAC" or "WINDOWS" for X-Platform header
 function getXPlatform() {
-    return Office.context.diagnostics.platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+    const p = detectPlatform();
+    if (p === "mac") return "MAC";
+    if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
+    return "WINDOWS";
 }
 
 // =============================================================================
@@ -153,12 +156,17 @@ const store = {
 // ─── Session ID ───────────────────────────────────────────────────────────────
 
 function getOrCreateSessionId() {
-    let sid = sessionStorage.getItem(SESSION_KEY);
-    if (!sid) {
-        sid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36);
-        sessionStorage.setItem(SESSION_KEY, sid);
+    try {
+        let sid = sessionStorage.getItem(SESSION_KEY);
+        if (!sid) {
+            sid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36);
+            sessionStorage.setItem(SESSION_KEY, sid);
+        }
+        return sid;
+    } catch (_) {
+        // sessionStorage unavailable (mobile LaunchEvent runtime)
+        return "mobile-session";
     }
-    return sid;
 }
 
 // ─── Default signature cache ──────────────────────────────────────────────────
@@ -673,10 +681,32 @@ function bodySetSelectedDataAsync(item, html) {
  * Light (<100 KB): uses setSignatureAsync directly.
  * Heavy (≥100 KB): cursor trick at compose time; skipped at send time (already there).
  */
+
 async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
 
+    // ── Mobile: setSignatureAsync not supported — go straight to setSelectedDataAsync
+    if (isMobile()) {
+        const maxSize = getMaxHtmlSize(); // 200KB on mobile
+        if (htmlSize > maxSize) {
+            console.warn(`[CardByte] Signature too large for mobile (${htmlSize} > ${maxSize})`);
+            showNotification(item, "Signature too large for this device. Please contact Admin.");
+            return false;
+        }
+        try {
+            removeNotification(item);
+            await bodySetSelectedDataAsync(item, html);
+            console.log("[CardByte] Mobile signature inserted via setSelectedDataAsync");
+            return true;
+        } catch (err) {
+            console.error("[CardByte] Mobile signature insertion failed:", err);
+            showNotification(item, "Signature could not be inserted. Please contact Admin.");
+            return false;
+        }
+    }
+
+    // ── Desktop / OWA / Mac: existing logic unchanged ──────────────────────
     if (htmlSize < HEAVY_THRESHOLD) {
         removeNotification(item);
         await bodySetSignatureAsync(item, html);
@@ -692,8 +722,8 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     }
 
     try {
-        await bodySetSignatureAsync(item, "");          // move cursor to bottom
-        await bodySetSelectedDataAsync(item, html);     // inject at cursor
+        await bodySetSignatureAsync(item, "");
+        await bodySetSelectedDataAsync(item, html);
         removeNotification(item);
         console.log("[CardByte] Heavy signature inserted via cursor trick");
         return true;
@@ -703,6 +733,7 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
         return false;
     }
 }
+
 
 // =============================================================================
 //  CORE SIGNATURE ORCHESTRATOR
@@ -823,7 +854,6 @@ async function pollRecipients() {
     _lastRecipientSnapshot = snapshot;
 
     console.log("[CardByte] 🔄 Recipient change detected via poll:", emails);
-    console.log("[CardByte] 🔄 Recipient change detected via poll:", emails);
 
     if (emails.length === 0) return;
 
@@ -832,6 +862,16 @@ async function pollRecipients() {
 
 function startRecipientPolling() {
     if (_recipientPollTimer) return;
+
+    // Polling-based signature swap is not reliable on mobile:
+    // - LaunchEvent runtime is short-lived; item goes stale between polls
+    // - setSelectedDataAsync has no cursor-to-bottom equivalent, causing
+    //   duplicate/misplaced signatures on each swap
+    if (isMobile()) {
+        console.log("[CardByte] 📵 Recipient polling disabled on mobile — not supported");
+        return;
+    }
+
     console.log("[CardByte] 📡 Starting recipient polling...");
     _recipientPollTimer = setInterval(pollRecipients, RECIPIENT_POLL_MS);
 }
@@ -924,16 +964,20 @@ const applySignature = async function (event = { completed: () => { } }) {
         // Prefetch all rule signatures in the background so recipient-change
         // lookups across this and any other open compose windows are instant.
         // Fire-and-forget — failures are logged but don't block the compose open.
-        if (userEmail) {
+        if (userEmail && !isMobile()) {
             prefetchAllRuleSignatures(userEmail).catch(err =>
                 console.warn("[CardByte] Background prefetch failed:", err)
             );
         }
         // Initial recipient check (handles compose opening with a pre-filled To)
-        const emails = await getAllRecipientEmails(item);
-        if (emails.length > 0) {
-            _lastRecipientSnapshot = serializeRecipients(emails);
-            await onRecipientsChanged(item);
+        // Skip on mobile: no polling, and setSelectedDataAsync can't replace the
+        // signature already inserted above — it would duplicate it.
+        if (!isMobile()) {
+            const emails = await getAllRecipientEmails(item);
+            if (emails.length > 0) {
+                _lastRecipientSnapshot = serializeRecipients(emails);
+                await onRecipientsChanged(item);
+            }
         }
 
         // Start polling as OWA / fallback safety net
