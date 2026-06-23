@@ -14,10 +14,6 @@ const HEAVY_THRESHOLD = 100 * 1024; // 100 KB
 const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
 const MAX_RETRIES = 2;
 
-// Marker used to locate the heavy-path signature in the body at send/from-change time.
-const SIG_BLOCK_ID = "cardbyte-sig-block";
-const SIG_BLOCK_ATTR = "data-cardbyte-sig";
-
 // ─── Platform detection (memoized) ───────────────────────────────────────────
 // detectPlatform() previously re-evaluated on every call; we memoize after
 // Office.onReady fires so the result is stable for the lifetime of the page.
@@ -242,7 +238,7 @@ function bodySetSignatureAsync(item, html) {
             reject(new Error("setSignatureAsync not available")); return;
         }
         item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error);
+            r.status === "succeeded" ? resolve() : reject(r.error);
         });
     });
 }
@@ -256,70 +252,6 @@ function bodySetSelectedDataAsync(item, html) {
             r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error);
         });
     });
-}
-
-// ─── Body read/write helpers ──────────────────────────────────────────────────
-
-function getBodyHtml(item) {
-    return new Promise((resolve, reject) => {
-        item.body.getAsync(Office.CoercionType.Html, (r) => {
-            r.status === Office.AsyncResultStatus.Succeeded
-                ? resolve(r.value || "")
-                : reject(r.error);
-        });
-    });
-}
-
-function setBodyAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        item.body.setAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            r.status === Office.AsyncResultStatus.Succeeded
-                ? resolve()
-                : reject(r.error);
-        });
-    });
-}
-
-/**
- * Finds the [data-cardbyte-sig] marker in the compose body and replaces its
- * content with freshHtml, then writes the modified body back via setAsync.
- * If insertIfMissing=true and no marker is found, inserts before the reply-chain
- * boundary (or appends to body). Returns true when the body was written.
- */
-async function replaceHeavySigInBody(item, freshHtml, insertIfMissing = false) {
-    const currentBody = await getBodyHtml(item);
-    const doc = new DOMParser().parseFromString(currentBody, "text/html");
-
-    // Try data-attribute first; fall back to id (Outlook may strip data-* attributes).
-    const sigBlock = doc.querySelector(`[${SIG_BLOCK_ATTR}]`) || doc.getElementById(SIG_BLOCK_ID);
-    if (sigBlock) {
-        sigBlock.innerHTML = freshHtml;
-        // Ensure both marker attributes are present in case only one survived.
-        sigBlock.id = SIG_BLOCK_ID;
-        sigBlock.setAttribute(SIG_BLOCK_ATTR, "1");
-        await setBodyAsync(item, doc.documentElement.outerHTML);
-        console.log("[CardByte] Heavy signature replaced in body via marker.");
-        return true;
-    }
-
-    if (!insertIfMissing) return false;
-
-    // Marker not found — insert before reply chain, or append to body.
-    const chainAnchor = doc.querySelector('hr, #divRplyFwdMsg, a[name="_MailOriginal"]');
-    const newSigDiv = doc.createElement("div");
-    newSigDiv.id = SIG_BLOCK_ID;
-    newSigDiv.setAttribute(SIG_BLOCK_ATTR, "1");
-    newSigDiv.innerHTML = freshHtml;
-
-    if (chainAnchor && chainAnchor.parentNode) {
-        chainAnchor.parentNode.insertBefore(newSigDiv, chainAnchor);
-    } else {
-        doc.body.appendChild(newSigDiv);
-    }
-
-    await setBodyAsync(item, doc.documentElement.outerHTML);
-    console.log("[CardByte] Heavy signature inserted (marker not found — fallback).");
-    return true;
 }
 
 /**
@@ -390,22 +322,14 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}.`);
 
     if (isSendTime) {
-        // Find the existing sig marker and replace its content.
-        // insertIfMissing=true handles the case where the user deleted the signature.
-        try {
-            const replaced = await replaceHeavySigInBody(item, html, true);
-            if (replaced) removeHeavySignatureNotification(item);
-            return replaced;
-        } catch (err) {
-            console.error("[CardByte] Heavy send-time replacement failed:", err);
-            return false;
-        }
+        console.log("[CardByte] Heavy signature at send time — skipping.");
+        removeHeavySignatureNotification(item);
+        return false;
     }
 
     try {
         await bodySetSignatureAsync(item, "");
-        const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
-        await bodySetSelectedDataAsync(item, GAP + wrappedHtml + GAP);
+        await bodySetSelectedDataAsync(item, GAP + html + '<p style="margin:0;padding:0;line-height:1.5;">&ensp;</p>');
 
         removeHeavySignatureNotification(item);
         console.log("[CardByte] Heavy signature inserted at compose time via cursor trick.");
@@ -560,83 +484,12 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     }
 };
 
-const onFromChangedHandler = async function (event = { completed: () => { } }) {
-    const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
-    try {
-        if (!item) return;
-        // Clear the old account's signature cache so the new account's is fetched fresh.
-        _clearCache();
-
-        const userEmail = mailbox?.userProfile?.emailAddress;
-        if (!userEmail) return;
-
-        // Fetch the new From account's signature with retries.
-        let html = null;
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * attempt));
-            try {
-                const result = await renderSignatureOnServer(userEmail);
-                if (result != null) { html = result; break; }
-            } catch (err) {
-                console.warn(`[CardByte] From-change fetch attempt ${attempt + 1} failed:`, err);
-            }
-        }
-        if (!html) { console.error("[CardByte] onFromChangedHandler: no signature available."); return; }
-        setCachedSignature(html);
-
-        const isHeavy = new Blob([html]).size >= HEAVY_THRESHOLD;
-
-        // Read the current body to detect an existing heavy-sig marker.
-        let doc = null;
-        let existingMarker = null;
-        try {
-            const currentBody = await getBodyHtml(item);
-            doc = new DOMParser().parseFromString(currentBody, "text/html");
-            existingMarker = doc.querySelector(`[${SIG_BLOCK_ATTR}]`) || doc.getElementById(SIG_BLOCK_ID);
-        } catch (err) {
-            console.warn("[CardByte] From-change: getBodyHtml failed — falling back to normal apply:", err);
-        }
-
-        if (existingMarker && doc) {
-            if (isHeavy) {
-                // Old heavy → New heavy: replace marker content in body.
-                existingMarker.innerHTML = html;
-                await setBodyAsync(item, doc.documentElement.outerHTML);
-            } else {
-                // Old heavy → New light: remove marker from body, then set sig slot.
-                if (existingMarker.parentNode) existingMarker.parentNode.removeChild(existingMarker);
-                await setBodyAsync(item, doc.documentElement.outerHTML);
-                await bodySetSignatureAsync(item, GAP + html);
-            }
-        } else {
-            // No existing heavy marker in body — apply fresh.
-            if (isHeavy) {
-                // setSignatureAsync("") clears the old light sig from the slot and
-                // positions cursor there; setSelectedDataAsync inserts the new heavy sig.
-                await bodySetSignatureAsync(item, "");
-                const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
-                await bodySetSelectedDataAsync(item, GAP + wrappedHtml + GAP);
-            } else {
-                // Light sig: setSignatureAsync replaces the sig slot directly.
-                await bodySetSignatureAsync(item, GAP + html);
-            }
-        }
-        removeHeavySignatureNotification(item);
-    } catch (err) {
-        console.error("[CardByte] Error in onFromChangedHandler:", err);
-    } finally {
-        event.completed();
-    }
-};
-
 // ─── Associate Office actions ─────────────────────────────────────────────────
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("onSendHandler", onSendHandler);
     Office.actions.associate("applySignature", applySignature);
-    Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
-    console.log("[CardByte] Office.actions registered: applySignature, onSendHandler, onFromChangedHandler");
+    console.log("[CardByte] Office.actions registered: applySignature, onSendHandler");
 } else {
     console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
 }
