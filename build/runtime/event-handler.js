@@ -390,13 +390,45 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}.`);
 
     if (isSendTime) {
-        // Heavy sig was already placed correctly at compose time via the cursor trick.
-        // Calling setAsync here to "refresh" it replaces the entire body, which:
-        //   • strips reply/forward chain images (data URI size exceeds setAsync limit)
-        //   • loses user-drafted content on large bodies
-        //   • causes duplication when the marker is missing (fallback inserts a 2nd sig)
-        // Trust the compose-time insertion and let the mail send as-is.
-        console.log("[CardByte] Heavy signature at send time — trusting compose-time insertion, skipping body surgery.");
+        // Body surgery via setAsync is safe ONLY for fresh composes (no reply chain).
+        // For replies/forwards, setAsync corrupts forwarded content and strips images.
+        // We detect which case we're in by reading the body once and checking for
+        // Outlook's reply/forward markers before deciding whether to proceed.
+        try {
+            const currentBody = await getBodyHtml(item);
+            const doc = new DOMParser().parseFromString(currentBody, "text/html");
+
+            const isReplyOrForward = !!(
+                doc.querySelector('#divRplyFwdMsg') ||
+                doc.querySelector('a[name="_MailOriginal"]') ||
+                doc.querySelector('[id*="divRplyFwdMsg"]')
+            );
+
+            if (!isReplyOrForward) {
+                // Fresh compose — safe to replace the sig in the body.
+                // setAsync body size = user text + sig only (no reply chain images).
+                const sigBlock = doc.querySelector(`[${SIG_BLOCK_ATTR}]`) || doc.getElementById(SIG_BLOCK_ID);
+                if (sigBlock) {
+                    sigBlock.innerHTML = html;
+                    sigBlock.id = SIG_BLOCK_ID;
+                    sigBlock.setAttribute(SIG_BLOCK_ATTR, "1");
+                    await setBodyAsync(item, doc.documentElement.outerHTML);
+                    console.log("[CardByte] Heavy sig replaced in body at send time (fresh compose).");
+                } else {
+                    // Marker not found (may have been stripped or user deleted sig) —
+                    // compose-time sig goes out as-is; do NOT insert a duplicate.
+                    console.log("[CardByte] Heavy sig marker not found at send time — compose-time sig sent.");
+                }
+            } else {
+                // Reply or forward — trust the compose-time cursor-trick insertion.
+                // setAsync here would overwrite the entire body and corrupt
+                // forwarded images embedded in the reply chain.
+                console.log("[CardByte] Heavy sig send time (reply/forward) — trusting compose-time insertion.");
+            }
+        } catch (err) {
+            // Non-fatal — compose-time sig is still in the body, mail still sends.
+            console.error("[CardByte] Heavy send-time replacement failed:", err);
+        }
         removeHeavySignatureNotification(item);
         return true;
     }
