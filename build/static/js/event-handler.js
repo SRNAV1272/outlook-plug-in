@@ -390,16 +390,15 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}.`);
 
     if (isSendTime) {
-        // Find the existing sig marker and replace its content.
-        // insertIfMissing=true handles the case where the user deleted the signature.
-        try {
-            const replaced = await replaceHeavySigInBody(item, html, true);
-            if (replaced) removeHeavySignatureNotification(item);
-            return replaced;
-        } catch (err) {
-            console.error("[CardByte] Heavy send-time replacement failed:", err);
-            return false;
-        }
+        // Heavy sig was already placed correctly at compose time via the cursor trick.
+        // Calling setAsync here to "refresh" it replaces the entire body, which:
+        //   • strips reply/forward chain images (data URI size exceeds setAsync limit)
+        //   • loses user-drafted content on large bodies
+        //   • causes duplication when the marker is missing (fallback inserts a 2nd sig)
+        // Trust the compose-time insertion and let the mail send as-is.
+        console.log("[CardByte] Heavy signature at send time — trusting compose-time insertion, skipping body surgery.");
+        removeHeavySignatureNotification(item);
+        return true;
     }
 
     try {
@@ -565,7 +564,7 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
     const item = mailbox?.item;
     try {
         if (!item) return;
-        // Clear the old account's signature cache so the new account's is fetched fresh.
+        // Clear the old account's cache so the new account's signature is fetched fresh.
         _clearCache();
 
         const userEmail = mailbox?.userProfile?.emailAddress;
@@ -587,40 +586,20 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
 
         const isHeavy = new Blob([html]).size >= HEAVY_THRESHOLD;
 
-        // Read the current body to detect an existing heavy-sig marker.
-        let doc = null;
-        let existingMarker = null;
-        try {
-            const currentBody = await getBodyHtml(item);
-            doc = new DOMParser().parseFromString(currentBody, "text/html");
-            existingMarker = doc.querySelector(`[${SIG_BLOCK_ATTR}]`) || doc.getElementById(SIG_BLOCK_ID);
-        } catch (err) {
-            console.warn("[CardByte] From-change: getBodyHtml failed — falling back to normal apply:", err);
-        }
-
-        if (existingMarker && doc) {
-            if (isHeavy) {
-                // Old heavy → New heavy: replace marker content in body.
-                existingMarker.innerHTML = html;
-                await setBodyAsync(item, doc.documentElement.outerHTML);
-            } else {
-                // Old heavy → New light: remove marker from body, then set sig slot.
-                if (existingMarker.parentNode) existingMarker.parentNode.removeChild(existingMarker);
-                await setBodyAsync(item, doc.documentElement.outerHTML);
-                await bodySetSignatureAsync(item, GAP + html);
-            }
+        if (isHeavy) {
+            // Heavy sig: use cursor trick (same as compose time).
+            // setSignatureAsync("") clears the old sig slot and positions the cursor there;
+            // setSelectedDataAsync inserts the new heavy sig at that position.
+            // Note: if the old sig was also heavy and is still in the body, it will remain —
+            // setAsync body surgery is intentionally avoided because it corrupts reply-chain
+            // images and can strip drafted content on large bodies.
+            await bodySetSignatureAsync(item, "");
+            const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
+            await bodySetSelectedDataAsync(item, GAP + wrappedHtml + GAP);
         } else {
-            // No existing heavy marker in body — apply fresh.
-            if (isHeavy) {
-                // setSignatureAsync("") clears the old light sig from the slot and
-                // positions cursor there; setSelectedDataAsync inserts the new heavy sig.
-                await bodySetSignatureAsync(item, "");
-                const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
-                await bodySetSelectedDataAsync(item, GAP + wrappedHtml + GAP);
-            } else {
-                // Light sig: setSignatureAsync replaces the sig slot directly.
-                await bodySetSignatureAsync(item, GAP + html);
-            }
+            // Light sig: setSignatureAsync replaces the Outlook sig slot directly.
+            // Safe — only touches the sig slot, never the rest of the body.
+            await bodySetSignatureAsync(item, GAP + html);
         }
         removeHeavySignatureNotification(item);
     } catch (err) {
