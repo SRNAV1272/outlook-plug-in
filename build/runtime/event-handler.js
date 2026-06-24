@@ -401,46 +401,55 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
             // selector caused false positives on fresh composes in OWA (matched
             // internal OWA elements that are present even without a reply chain).
             const RF_SELECTORS = ['#divRplyFwdMsg', 'a[name="_MailOriginal"]'];
-            let matchedRfSelector = null;
+            let chainEl = null;
             for (const sel of RF_SELECTORS) {
-                if (doc.querySelector(sel)) { matchedRfSelector = sel; break; }
+                chainEl = doc.querySelector(sel);
+                if (chainEl) break;
             }
-            const isReplyOrForward = !!matchedRfSelector;
-            console.log(`[CardByte] Reply/forward detection: ${isReplyOrForward}${matchedRfSelector ? ` — matched: "${matchedRfSelector}"` : ''}`);
+            const isReplyOrForward = !!chainEl;
+            console.log(`[CardByte] Reply/forward: ${isReplyOrForward}${chainEl ? ` (${chainEl.id || chainEl.name})` : ''}`);
 
             // Diagnostic: count how many times "cardbyte" appears in the body.
-            // Zero means OWA stripped everything; non-zero tells us what survived.
             const cbCount = (currentBody.match(/cardbyte/gi) || []).length;
             console.log(`[CardByte] 'cardbyte' occurrences in body: ${cbCount}`);
 
-            if (!isReplyOrForward) {
-                // Fresh compose — safe to replace sig via body surgery.
-                // Search order: class (survives OWA sanitizer) → data-attr → id →
-                // x_-prefixed id (OWA sometimes prefixes injected ids with "x_").
-                const byClass = doc.querySelector(`.${SIG_BLOCK_CLASS}`);
-                const byAttr  = doc.querySelector(`[${SIG_BLOCK_ATTR}]`);
-                const byId    = doc.getElementById(SIG_BLOCK_ID) || doc.getElementById(`x_${SIG_BLOCK_ID}`);
-                const sigBlock = byClass || byAttr || byId;
-                console.log(`[CardByte] Sig marker — by class: ${!!byClass}, by data-attr: ${!!byAttr}, by id: ${!!byId}`);
-
-                if (sigBlock) {
-                    sigBlock.innerHTML = html;
-                    sigBlock.id = SIG_BLOCK_ID;
-                    sigBlock.className = SIG_BLOCK_CLASS;
-                    sigBlock.setAttribute(SIG_BLOCK_ATTR, "1");
-                    await setBodyAsync(item, doc.documentElement.outerHTML);
-                    console.log("[CardByte] Sig replaced at send time (fresh compose).");
-                } else {
-                    // Marker stripped — compose-time sig goes out as-is; do NOT duplicate.
-                    console.warn("[CardByte] Sig marker not found at send time — compose-time sig sent as-is.");
-                    // Log body snippets to diagnose what survived OWA sanitization.
-                    console.log("[CardByte] Body head (500):", currentBody.substring(0, 500));
-                    console.log("[CardByte] Body tail (500):", currentBody.substring(Math.max(0, currentBody.length - 500)));
+            // For replies/forwards, setBodyAsync rewrites the entire body. This is safe
+            // UNLESS the reply chain itself contains data-URI images (e.g. a forwarded
+            // CardByte sig) — writing those back risks stripping them due to size limits.
+            // Check the chain for data URIs; skip surgery only if they are found there.
+            if (isReplyOrForward) {
+                const chainHtml = chainEl.outerHTML || "";
+                const chainHasDataUriImages = chainHtml.includes("data:image");
+                console.log(`[CardByte] Chain has data-URI images: ${chainHasDataUriImages}`);
+                if (chainHasDataUriImages) {
+                    console.log("[CardByte] Send time reply/forward: chain has data-URI images — trusting compose-time insertion to protect them.");
+                    removeHeavySignatureNotification(item);
+                    return true;
                 }
+                // Chain has no data-URI images → safe to proceed with surgery.
+                console.log("[CardByte] Send time reply/forward: no data-URI images in chain — proceeding with sig replacement.");
+            }
+
+            // Body surgery — runs for fresh compose AND replies without data-URI chain.
+            // Search order: class → data-attr → id → x_-prefixed id.
+            const byClass = doc.querySelector(`.${SIG_BLOCK_CLASS}`);
+            const byAttr  = doc.querySelector(`[${SIG_BLOCK_ATTR}]`);
+            const byId    = doc.getElementById(SIG_BLOCK_ID) || doc.getElementById(`x_${SIG_BLOCK_ID}`);
+            const sigBlock = byClass || byAttr || byId;
+            console.log(`[CardByte] Sig marker — by class: ${!!byClass}, by data-attr: ${!!byAttr}, by id: ${!!byId}`);
+
+            if (sigBlock) {
+                sigBlock.innerHTML = html;
+                sigBlock.id = SIG_BLOCK_ID;
+                sigBlock.className = SIG_BLOCK_CLASS;
+                sigBlock.setAttribute(SIG_BLOCK_ATTR, "1");
+                await setBodyAsync(item, doc.documentElement.outerHTML);
+                console.log(`[CardByte] Sig replaced at send time (${isReplyOrForward ? "reply/forward" : "fresh compose"}).`);
             } else {
-                // Reply or forward — setBodyAsync would overwrite the full body and
-                // corrupt forwarded images; trust the compose-time insertion instead.
-                console.log("[CardByte] Send time reply/forward — trusting compose-time insertion.");
+                // Marker stripped — compose-time sig goes out as-is; do NOT duplicate.
+                console.warn("[CardByte] Sig marker not found at send time — compose-time sig sent as-is.");
+                console.log("[CardByte] Body head (500):", currentBody.substring(0, 500));
+                console.log("[CardByte] Body tail (500):", currentBody.substring(Math.max(0, currentBody.length - 500)));
             }
         } catch (err) {
             console.error("[CardByte] Send-time replacement failed:", err);
@@ -606,11 +615,43 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     const item = mailbox?.item;
     try {
         if (!item) return;
-        await _applySignatureCore(
-            item, mailbox,
-            { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
-            true
-        );
+
+        const userEmail = mailbox?.userProfile?.emailAddress;
+        let html = null;
+
+        // Always attempt a fresh server fetch at send time so that admin-edited
+        // signatures go out — not the compose-time cached version.
+        // Race against 3 s: enough for a normal round-trip while leaving headroom
+        // inside the 5 s SoftBlock window.  On timeout/error, fall back to cache
+        // so the mail always sends.
+        if (userEmail) {
+            try {
+                const fresh = await Promise.race([
+                    renderSignatureOnServer(userEmail),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+                ]);
+                if (fresh) {
+                    html = fresh;
+                    setCachedSignature(html);
+                    console.log(`[CardByte] Send time: fresh sig from server (${html.length} chars).`);
+                }
+            } catch (fetchErr) {
+                console.warn("[CardByte] Send time: server fetch failed/timed out — falling back to cache:", fetchErr.message);
+            }
+        }
+
+        if (!html) {
+            html = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+            if (html) {
+                console.log(`[CardByte] Send time: using cached sig (${html.length} chars).`);
+            } else {
+                console.error("[CardByte] Send time: no sig available — sending as-is.");
+                return;
+            }
+        }
+
+        await applySignatureWithFallback(item, html, true);
+
     } catch (err) {
         console.error("[CardByte] Error in onSendHandler:", err);
     } finally {
