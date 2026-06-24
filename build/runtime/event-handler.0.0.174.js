@@ -15,7 +15,7 @@ const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
 const MAX_RETRIES = 2;
 
 // Marker used to locate the heavy-path signature in the body at send/from-change time.
-const SIG_BLOCK_ID = "cardbyte-sig-block";
+const SIG_BLOCK_ID   = "cardbyte-sig-block";
 const SIG_BLOCK_ATTR = "data-cardbyte-sig";
 
 // ─── Platform detection (memoized) ───────────────────────────────────────────
@@ -378,66 +378,78 @@ const GAP = '<p style="margin:0;padding:0;line-height:1.5;">&ensp;</p>';
 
 async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
-    console.log("[CardByte] Signature size:", htmlSize, "bytes");
+    const isHeavy = htmlSize >= HEAVY_THRESHOLD;
+    console.log("[CardByte] Signature size:", htmlSize, "bytes, isHeavy:", isHeavy, "isSendTime:", isSendTime);
 
-    if (htmlSize < HEAVY_THRESHOLD) {
-        removeHeavySignatureNotification(item);
-        await bodySetSignatureAsync(item, GAP + html);  // ← gap prepended
-        return true;
-    }
-
-    // ── Heavy path ───────────────────────────────────────────────────────────
-    console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}.`);
-
+    // ── Send-time path (light AND heavy) ─────────────────────────────────────
+    // setSignatureAsync is a compose-mode API and is NOT guaranteed available in
+    // the OnMessageSend event context — calling it there throws silently, leaving
+    // the compose-time sig untouched.  Use body surgery (setBodyAsync) instead.
+    // setBodyAsync is safe ONLY for fresh composes; for replies/forwards it
+    // overwrites the entire body and corrupts embedded reply-chain images.
     if (isSendTime) {
-        // Body surgery via setAsync is safe ONLY for fresh composes (no reply chain).
-        // For replies/forwards, setAsync corrupts forwarded content and strips images.
-        // We detect which case we're in by reading the body once and checking for
-        // Outlook's reply/forward markers before deciding whether to proceed.
         try {
             const currentBody = await getBodyHtml(item);
             const doc = new DOMParser().parseFromString(currentBody, "text/html");
+            console.log(`[CardByte] Send time — body length: ${currentBody.length} chars`);
 
-            const isReplyOrForward = !!(
-                doc.querySelector('#divRplyFwdMsg') ||
-                doc.querySelector('a[name="_MailOriginal"]') ||
-                doc.querySelector('[id*="divRplyFwdMsg"]')
-            );
+            // NOTE: [id*="divRplyFwdMsg"] was intentionally removed — the substring
+            // selector caused false positives on fresh composes in OWA (matched
+            // internal OWA elements that are present even without a reply chain).
+            const RF_SELECTORS = ['#divRplyFwdMsg', 'a[name="_MailOriginal"]'];
+            let matchedRfSelector = null;
+            for (const sel of RF_SELECTORS) {
+                if (doc.querySelector(sel)) { matchedRfSelector = sel; break; }
+            }
+            const isReplyOrForward = !!matchedRfSelector;
+            console.log(`[CardByte] Reply/forward detection: ${isReplyOrForward}${matchedRfSelector ? ` — matched: "${matchedRfSelector}"` : ''}`);
 
             if (!isReplyOrForward) {
-                // Fresh compose — safe to replace the sig in the body.
-                // setAsync body size = user text + sig only (no reply chain images).
-                const sigBlock = doc.querySelector(`[${SIG_BLOCK_ATTR}]`) || doc.getElementById(SIG_BLOCK_ID);
+                // Fresh compose — safe to replace sig via body surgery.
+                const byAttr = doc.querySelector(`[${SIG_BLOCK_ATTR}]`);
+                const byId   = doc.getElementById(SIG_BLOCK_ID);
+                const sigBlock = byAttr || byId;
+                console.log(`[CardByte] Sig marker — by data-attr: ${!!byAttr}, by id: ${!!byId}`);
+
                 if (sigBlock) {
                     sigBlock.innerHTML = html;
                     sigBlock.id = SIG_BLOCK_ID;
                     sigBlock.setAttribute(SIG_BLOCK_ATTR, "1");
                     await setBodyAsync(item, doc.documentElement.outerHTML);
-                    console.log("[CardByte] Heavy sig replaced in body at send time (fresh compose).");
+                    console.log("[CardByte] Sig replaced at send time (fresh compose).");
                 } else {
-                    // Marker not found (may have been stripped or user deleted sig) —
-                    // compose-time sig goes out as-is; do NOT insert a duplicate.
-                    console.log("[CardByte] Heavy sig marker not found at send time — compose-time sig sent.");
+                    // Marker stripped (e.g. user edited sig area) — compose-time sig
+                    // goes out as-is; do NOT insert a duplicate.
+                    console.warn("[CardByte] Sig marker not found at send time — compose-time sig sent as-is.");
+                    console.log("[CardByte] Body head (500 chars):", currentBody.substring(0, 500));
                 }
             } else {
-                // Reply or forward — trust the compose-time cursor-trick insertion.
-                // setAsync here would overwrite the entire body and corrupt
-                // forwarded images embedded in the reply chain.
-                console.log("[CardByte] Heavy sig send time (reply/forward) — trusting compose-time insertion.");
+                // Reply or forward — setBodyAsync would overwrite the full body and
+                // corrupt forwarded images; trust the compose-time insertion instead.
+                console.log("[CardByte] Send time reply/forward — trusting compose-time insertion.");
             }
         } catch (err) {
-            // Non-fatal — compose-time sig is still in the body, mail still sends.
-            console.error("[CardByte] Heavy send-time replacement failed:", err);
+            console.error("[CardByte] Send-time replacement failed:", err);
         }
         removeHeavySignatureNotification(item);
         return true;
     }
 
+    // ── Compose-time light path ───────────────────────────────────────────────
+    if (!isHeavy) {
+        removeHeavySignatureNotification(item);
+        // Wrap in marker div so body surgery at send time can locate and replace it.
+        const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
+        await bodySetSignatureAsync(item, GAP + wrappedHtml);
+        return true;
+    }
+
+    // ── Compose-time heavy path ───────────────────────────────────────────────
+    console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — using cursor trick.`);
     try {
         await bodySetSignatureAsync(item, "");
         const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
         await bodySetSelectedDataAsync(item, GAP + wrappedHtml + GAP);
-
         removeHeavySignatureNotification(item);
         console.log("[CardByte] Heavy signature inserted at compose time via cursor trick.");
         return true;
@@ -462,6 +474,7 @@ async function _applySignatureCore(item, mailbox, opts = {}, isSendTime = false)
     const userEmail = mailbox?.userProfile?.emailAddress;
 
     let html = getCachedSignature({ skipTtl, skipSessionCheck });
+    console.log(`[CardByte] Cache read (skipTtl:${skipTtl}, skipSession:${skipSessionCheck}) — ${html ? html.length + ' chars' : 'null'}`);
 
     if (fetchIfMissing && userEmail && html == null) {
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -629,9 +642,9 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
             const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
             await bodySetSelectedDataAsync(item, GAP + wrappedHtml + GAP);
         } else {
-            // Light sig: setSignatureAsync replaces the Outlook sig slot directly.
-            // Safe — only touches the sig slot, never the rest of the body.
-            await bodySetSignatureAsync(item, GAP + html);
+            // Light sig: wrap in marker div so body surgery at send time can find it.
+            const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
+            await bodySetSignatureAsync(item, GAP + wrappedHtml);
         }
         removeHeavySignatureNotification(item);
     } catch (err) {
