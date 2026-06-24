@@ -14,9 +14,13 @@ const HEAVY_THRESHOLD = 100 * 1024; // 100 KB
 const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
 const MAX_RETRIES = 2;
 
-// Marker used to locate the heavy-path signature in the body at send/from-change time.
-const SIG_BLOCK_ID   = "cardbyte-sig-block";
-const SIG_BLOCK_ATTR = "data-cardbyte-sig";
+// Marker used to locate the signature in the body at send/from-change time.
+// OWA's getAsync sanitizer strips id= and data-* attributes from returned HTML,
+// so we use class= as the primary marker (standard HTML, survives sanitization).
+// id= and data-* are kept as fallbacks for non-OWA clients.
+const SIG_BLOCK_ID    = "cardbyte-sig-block";
+const SIG_BLOCK_CLASS = "cardbyte-sig-block";
+const SIG_BLOCK_ATTR  = "data-cardbyte-sig";
 
 // ─── Platform detection (memoized) ───────────────────────────────────────────
 // detectPlatform() previously re-evaluated on every call; we memoize after
@@ -404,24 +408,34 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
             const isReplyOrForward = !!matchedRfSelector;
             console.log(`[CardByte] Reply/forward detection: ${isReplyOrForward}${matchedRfSelector ? ` — matched: "${matchedRfSelector}"` : ''}`);
 
+            // Diagnostic: count how many times "cardbyte" appears in the body.
+            // Zero means OWA stripped everything; non-zero tells us what survived.
+            const cbCount = (currentBody.match(/cardbyte/gi) || []).length;
+            console.log(`[CardByte] 'cardbyte' occurrences in body: ${cbCount}`);
+
             if (!isReplyOrForward) {
                 // Fresh compose — safe to replace sig via body surgery.
-                const byAttr = doc.querySelector(`[${SIG_BLOCK_ATTR}]`);
-                const byId   = doc.getElementById(SIG_BLOCK_ID);
-                const sigBlock = byAttr || byId;
-                console.log(`[CardByte] Sig marker — by data-attr: ${!!byAttr}, by id: ${!!byId}`);
+                // Search order: class (survives OWA sanitizer) → data-attr → id →
+                // x_-prefixed id (OWA sometimes prefixes injected ids with "x_").
+                const byClass = doc.querySelector(`.${SIG_BLOCK_CLASS}`);
+                const byAttr  = doc.querySelector(`[${SIG_BLOCK_ATTR}]`);
+                const byId    = doc.getElementById(SIG_BLOCK_ID) || doc.getElementById(`x_${SIG_BLOCK_ID}`);
+                const sigBlock = byClass || byAttr || byId;
+                console.log(`[CardByte] Sig marker — by class: ${!!byClass}, by data-attr: ${!!byAttr}, by id: ${!!byId}`);
 
                 if (sigBlock) {
                     sigBlock.innerHTML = html;
                     sigBlock.id = SIG_BLOCK_ID;
+                    sigBlock.className = SIG_BLOCK_CLASS;
                     sigBlock.setAttribute(SIG_BLOCK_ATTR, "1");
                     await setBodyAsync(item, doc.documentElement.outerHTML);
                     console.log("[CardByte] Sig replaced at send time (fresh compose).");
                 } else {
-                    // Marker stripped (e.g. user edited sig area) — compose-time sig
-                    // goes out as-is; do NOT insert a duplicate.
+                    // Marker stripped — compose-time sig goes out as-is; do NOT duplicate.
                     console.warn("[CardByte] Sig marker not found at send time — compose-time sig sent as-is.");
-                    console.log("[CardByte] Body head (500 chars):", currentBody.substring(0, 500));
+                    // Log body snippets to diagnose what survived OWA sanitization.
+                    console.log("[CardByte] Body head (500):", currentBody.substring(0, 500));
+                    console.log("[CardByte] Body tail (500):", currentBody.substring(Math.max(0, currentBody.length - 500)));
                 }
             } else {
                 // Reply or forward — setBodyAsync would overwrite the full body and
@@ -439,7 +453,7 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     if (!isHeavy) {
         removeHeavySignatureNotification(item);
         // Wrap in marker div so body surgery at send time can locate and replace it.
-        const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
+        const wrappedHtml = `<div id="${SIG_BLOCK_ID}" class="${SIG_BLOCK_CLASS}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
         await bodySetSignatureAsync(item, GAP + wrappedHtml);
         return true;
     }
@@ -448,7 +462,7 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — using cursor trick.`);
     try {
         await bodySetSignatureAsync(item, "");
-        const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
+        const wrappedHtml = `<div id="${SIG_BLOCK_ID}" class="${SIG_BLOCK_CLASS}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
         await bodySetSelectedDataAsync(item, GAP + wrappedHtml + GAP);
         removeHeavySignatureNotification(item);
         console.log("[CardByte] Heavy signature inserted at compose time via cursor trick.");
@@ -639,11 +653,11 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
             // setAsync body surgery is intentionally avoided because it corrupts reply-chain
             // images and can strip drafted content on large bodies.
             await bodySetSignatureAsync(item, "");
-            const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
+            const wrappedHtml = `<div id="${SIG_BLOCK_ID}" class="${SIG_BLOCK_CLASS}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
             await bodySetSelectedDataAsync(item, GAP + wrappedHtml + GAP);
         } else {
             // Light sig: wrap in marker div so body surgery at send time can find it.
-            const wrappedHtml = `<div id="${SIG_BLOCK_ID}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
+            const wrappedHtml = `<div id="${SIG_BLOCK_ID}" class="${SIG_BLOCK_CLASS}" ${SIG_BLOCK_ATTR}="1">${html}</div>`;
             await bodySetSignatureAsync(item, GAP + wrappedHtml);
         }
         removeHeavySignatureNotification(item);
