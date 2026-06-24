@@ -18,9 +18,9 @@ const MAX_RETRIES = 2;
 // OWA's getAsync sanitizer strips id= and data-* attributes from returned HTML,
 // so we use class= as the primary marker (standard HTML, survives sanitization).
 // id= and data-* are kept as fallbacks for non-OWA clients.
-const SIG_BLOCK_ID    = "cardbyte-sig-block";
+const SIG_BLOCK_ID = "cardbyte-sig-block";
 const SIG_BLOCK_CLASS = "cardbyte-sig-block";
-const SIG_BLOCK_ATTR  = "data-cardbyte-sig";
+const SIG_BLOCK_ATTR = "data-cardbyte-sig";
 
 // ─── Platform detection (memoized) ───────────────────────────────────────────
 // detectPlatform() previously re-evaluated on every call; we memoize after
@@ -413,28 +413,22 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
             const cbCount = (currentBody.match(/cardbyte/gi) || []).length;
             console.log(`[CardByte] 'cardbyte' occurrences in body: ${cbCount}`);
 
-            // For replies/forwards, setBodyAsync rewrites the entire body. This is safe
-            // UNLESS the reply chain itself contains data-URI images (e.g. a forwarded
-            // CardByte sig) — writing those back risks stripping them due to size limits.
-            // Check the chain for data URIs; skip surgery only if they are found there.
+            // For replies/forwards: Office.js setAsync sanitizes HTML and strips external
+            // image URLs (OWA CDN proxy links). These cannot be fetched cross-origin, so
+            // we cannot re-embed them as data URIs. setAsync would always drop reply chain
+            // images — trust the compose-time sig instead (which was already freshly fetched
+            // when the compose window opened).
             if (isReplyOrForward) {
-                const chainHtml = chainEl.outerHTML || "";
-                const chainHasDataUriImages = chainHtml.includes("data:image");
-                console.log(`[CardByte] Chain has data-URI images: ${chainHasDataUriImages}`);
-                if (chainHasDataUriImages) {
-                    console.log("[CardByte] Send time reply/forward: chain has data-URI images — trusting compose-time insertion to protect them.");
-                    removeHeavySignatureNotification(item);
-                    return true;
-                }
-                // Chain has no data-URI images → safe to proceed with surgery.
-                console.log("[CardByte] Send time reply/forward: no data-URI images in chain — proceeding with sig replacement.");
+                console.log("[CardByte] Send time reply/forward — trusting compose-time insertion (setAsync would strip reply chain images).");
+                removeHeavySignatureNotification(item);
+                return true;
             }
 
-            // Body surgery — runs for fresh compose AND replies without data-URI chain.
+            // Fresh compose only — no reply chain, so setAsync is safe.
             // Search order: class → data-attr → id → x_-prefixed id.
             const byClass = doc.querySelector(`.${SIG_BLOCK_CLASS}`);
-            const byAttr  = doc.querySelector(`[${SIG_BLOCK_ATTR}]`);
-            const byId    = doc.getElementById(SIG_BLOCK_ID) || doc.getElementById(`x_${SIG_BLOCK_ID}`);
+            const byAttr = doc.querySelector(`[${SIG_BLOCK_ATTR}]`);
+            const byId = doc.getElementById(SIG_BLOCK_ID) || doc.getElementById(`x_${SIG_BLOCK_ID}`);
             const sigBlock = byClass || byAttr || byId;
             console.log(`[CardByte] Sig marker — by class: ${!!byClass}, by data-attr: ${!!byAttr}, by id: ${!!byId}`);
 
@@ -444,9 +438,8 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
                 sigBlock.className = SIG_BLOCK_CLASS;
                 sigBlock.setAttribute(SIG_BLOCK_ATTR, "1");
                 await setBodyAsync(item, doc.documentElement.outerHTML);
-                console.log(`[CardByte] Sig replaced at send time (${isReplyOrForward ? "reply/forward" : "fresh compose"}).`);
+                console.log("[CardByte] Sig replaced at send time (fresh compose).");
             } else {
-                // Marker stripped — compose-time sig goes out as-is; do NOT duplicate.
                 console.warn("[CardByte] Sig marker not found at send time — compose-time sig sent as-is.");
                 console.log("[CardByte] Body head (500):", currentBody.substring(0, 500));
                 console.log("[CardByte] Body tail (500):", currentBody.substring(Math.max(0, currentBody.length - 500)));
