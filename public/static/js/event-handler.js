@@ -216,98 +216,27 @@ async function renderSignatureOnServer(user) {
     }
 }
 
-function compressBase64Image(dataUrl, maxWidth, quality) {
-    if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    if (quality === undefined) quality = isMobile() ? MOBILE_IMAGE_QUALITY : 0.7;
+// ─── Timeout wrapper ──────────────────────────────────────────────────────────
+function withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms)
+        )
+    ]);
+}
 
+// ─── Check if signature already present in body ───────────────────────────────
+function getBodyText(item) {
     return new Promise((resolve) => {
-        if (dataUrl.startsWith("data:image/gif")) { resolve(dataUrl); return; }
-        const img = new Image();
-        img.onload = () => {
-            try {
-                const canvas = document.createElement("canvas");
-                let width = img.width;
-                let height = img.height;
-                if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext("2d");
-                const isPng = dataUrl.startsWith("data:image/png");
-                if (isPng) {
-                    ctx.clearRect(0, 0, width, height);
-                    ctx.drawImage(img, 0, 0, width, height);
-                    let result = canvas.toDataURL("image/png");
-                    if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                    console.log(`[CardByte] Compressed PNG: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                    resolve(result); return;
-                }
-                ctx.drawImage(img, 0, 0, width, height);
-                let result = canvas.toDataURL("image/jpeg", quality);
-                if (result.length >= dataUrl.length) result = canvas.toDataURL("image/png");
-                if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                console.log(`[CardByte] Compressed: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                resolve(result);
-            } catch (e) { console.warn("[CardByte] Canvas compression failed:", e); resolve(dataUrl); }
-        };
-        img.onerror = () => resolve(dataUrl);
-        img.src = dataUrl;
+        item.body.getAsync(Office.CoercionType.Html, (result) => {
+            if (result.status === "succeeded") resolve(result.value || "");
+            else resolve("");
+        });
     });
 }
 
-async function compressImagesInHtml(html) {
-    if (!html) return html;
-
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, "text/html");
-    const profileImg = doc.querySelector('img[alt="Profile Photo"]');
-
-    if (!profileImg) return html;
-
-    const src = profileImg.getAttribute('src');
-    if (!src || !src.startsWith('data:image/')) return html;
-
-    console.log(`[CardByte] Compressing profile picture (${(src.length / 1024).toFixed(0)}KB)`);
-
-    const compressed = await compressBase64Image(src);
-    if (compressed === src) return html;
-
-    console.log(`[CardByte] Profile picture compressed: ${(src.length / 1024).toFixed(0)}KB -> ${(compressed.length / 1024).toFixed(0)}KB`);
-
-    return html.replace(src, compressed);
-}
-
-function extractBase64Images(html) {
-    const images = [];
-    let index = 0;
-    const cleanedHtml = html.replace(
-        /src\s*=\s*"data:(image\/([^;]+));base64,([^"]+)"/gi,
-        (_match, mimeType, extension, base64Data) => {
-            const cid = `cardbyte_img_${index}`;
-            const safeExt = extension.replace(/[^a-z0-9]/gi, "") || "png";
-            const fileName = `${cid}.${safeExt}`;
-            images.push({ cid, fileName, mimeType, base64Data });
-            index++;
-            return `src="cid:${cid}"`;
-        }
-    );
-    return { cleanedHtml, images };
-}
-
-function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.addFileAttachmentFromBase64Async !== "function") {
-            console.warn("[CardByte] addFileAttachmentFromBase64Async not available");
-            resolve(false); return;
-        }
-        item.addFileAttachmentFromBase64Async(
-            base64Data, fileName, { isInline: true, contentId: cid },
-            (result) => {
-                if (result.status === Office.AsyncResultStatus.Succeeded) resolve(true);
-                else { console.error(`[CardByte] Attach failed ${cid}:`, result.error); reject(result.error); }
-            }
-        );
-    });
-}
+const SIGNATURE_SENTINEL = "cardbyte-sig";   // a string present in every CardByte signature
 
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
@@ -365,8 +294,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
 
         if (fetched != null) {
-            // Compress immediately after fetch and store compressed version
-            fetched = await compressImagesInHtml(fetched);
             CACHED_SIGNATURE_HTML = fetched;
             setCachedSignature(fetched);  // ← store compressed, not raw
         }
@@ -401,9 +328,6 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
         }
     }
 
-    // let compressedSignature = await compressImagesInHtml(fetched);
-    // compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
-
     let finalSignature = `<div style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
 
     console.log("[CardByte] ════════════════════════════════════",
@@ -434,18 +358,42 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
+    const done = (allow = true) => event.completed({ allowEvent: allow });
+
     try {
-        if (!item) return;
-        // FIX: skipSessionCheck:true because onSendHandler runs in a separate
-        // iframe with its own fresh sessionStorage, so the session ID never
-        // matches the one stored by applySignature — causing a false cache miss.
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
+        if (!item) { done(true); return; }
+
+        await withTimeout(_onSendCore(item, mailbox), 4000);   // 4s budget (1s before Outlook's limit)
+
     } catch (err) {
-        console.error("[CardByte] Error in onSendHandler:", err);
+        // Timeout or any error — let the mail go, don't block the user
+        console.warn("[CardByte] onSendHandler error/timeout — allowing send:", err.message);
     } finally {
-        event.completed({ allowEvent: true });
+        done(true);
     }
 };
+
+async function _onSendCore(item, mailbox) {
+    // 1. Check if signature is already in the body (fast path — avoids setSignatureAsync)
+    const bodyHtml = await getBodyText(item);
+    if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
+        console.log("[CardByte] Signature already present — skipping re-apply on send.");
+        return;
+    }
+
+    // 2. Signature is missing — try to apply from cache (no fetch, no retries)
+    const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+    if (!cached) {
+        console.warn("[CardByte] No cached signature available on send — allowing send without signature.");
+        return;
+    }
+
+    await _applySignatureCore(item, mailbox, {
+        fetchIfMissing: false,
+        skipTtl: true,
+        skipSessionCheck: true
+    });
+}
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("onSendHandler", onSendHandler);
