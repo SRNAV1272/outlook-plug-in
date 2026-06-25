@@ -6700,7 +6700,7 @@
 
 var CONFIG = {
     // Backend endpoint. Sends encrypted email in `username` header.
-    XHR_URL: "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+    XHR_URL: "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
     XHR_TIMEOUT_MS: 6000,
 
     // AES-CBC key + IV (base64). Same scheme as WebView clients so the backend
@@ -6719,7 +6719,7 @@ var CONFIG = {
     WRAP_BOTTOM_PX: 40,
 
     // Send handler must complete within Outlook's hard send budget (~5s).
-    SEND_HANDLER_TIMEOUT_MS: 2000,
+    SEND_HANDLER_TIMEOUT_MS: 3500,
 
     // Compose / from-changed handlers have a softer budget.
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
@@ -7080,21 +7080,42 @@ function cacheClear(cb) {
     );
 }
 
+// ─── Add this constant near CONFIG ────────────────────────────────────────────
+var SIGNATURE_SENTINEL = "cardbyte-sig-block"; // Must appear in every rendered signature
+
+// ─── Add this helper ──────────────────────────────────────────────────────────
+function bodyAlreadyHasSignature(item, cb) {
+    try {
+        item.body.getAsync(
+            Office.CoercionType.Html,
+            { asyncContext: null },
+            function (result) {
+                if (result.status !== Office.AsyncResultStatus.Succeeded) {
+                    _diag.warn("bodyAlreadyHasSignature: getAsync failed — assuming absent");
+                    cb(false);
+                    return;
+                }
+                var body = result.value || "";
+                var found = body.indexOf(SIGNATURE_SENTINEL) !== -1;
+                _diag.info("bodyAlreadyHasSignature: " + found);
+                cb(found);
+            }
+        );
+    } catch (e) {
+        _diag.warn("bodyAlreadyHasSignature threw: " + e.message);
+        cb(false);
+    }
+}
+
 // ─── Compose-body write path ──────────────────────────────────────────────────
 
 function _wrapSignature(html) {
-    return `
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0">
-            <tr>
-                <td style="
-                    padding-top:${CONFIG.WRAP_TOP_PX}px;
-                    padding-bottom:${CONFIG.WRAP_BOTTOM_PX}px;
-                ">
-                    ${html}
-                </td>
-            </tr>
-        </table>
-    `;
+    return '<table role="presentation" cellpadding="0" cellspacing="0" border="0"'
+        + ' data-cb="' + SIGNATURE_SENTINEL + '">'   // ← sentinel here
+        + '<tr><td style="'
+        + 'padding-top:' + CONFIG.WRAP_TOP_PX + 'px;'
+        + 'padding-bottom:' + CONFIG.WRAP_BOTTOM_PX + 'px;'
+        + '">' + html + '</td></tr></table>';
 }
 
 /**
@@ -7490,20 +7511,26 @@ function onSendHandler(event) {
         return;
     }
 
-    // ✅ cacheGet is async — must use callback
-    cacheGet(function (cachedHtml) {
-        if (!cachedHtml) {
-            _diag.info("onSendHandler: no cached signature — passing through");
-            writeDiagnostics(item, function () {
-                guarded.completed({ allowEvent: true });
-            });
+    // Fast path: if signature sentinel is already in body, skip everything
+    bodyAlreadyHasSignature(item, function (alreadyPresent) {
+        if (alreadyPresent) {
+            _diag.info("onSendHandler: signature present — fast pass-through");
+            guarded.completed({ allowEvent: true });
             return;
         }
 
-        _diag.info("onSendHandler: writing cached signature (" + cachedHtml.length + " chars)");
-        writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
-            if (!ok) _diag.warn("onSendHandler: writeSignature failed");
-            writeDiagnostics(item, function () {
+        // Slow path: signature missing — write from cache only (no fetch)
+        _diag.warn("onSendHandler: signature missing — attempting cache write");
+        cacheGet(function (cachedHtml) {
+            if (!cachedHtml) {
+                _diag.warn("onSendHandler: cache miss — allowing send without signature");
+                guarded.completed({ allowEvent: true });
+                return;
+            }
+
+            _diag.info("onSendHandler: writing from cache (" + cachedHtml.length + " chars)");
+            writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
+                if (!ok) _diag.warn("onSendHandler: writeSignature failed");
                 guarded.completed({ allowEvent: true });
             });
         });
