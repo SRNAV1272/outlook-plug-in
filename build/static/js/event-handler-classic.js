@@ -6719,7 +6719,7 @@ var CONFIG = {
     WRAP_BOTTOM_PX: 40,
 
     // Send handler must complete within Outlook's hard send budget (~5s).
-    SEND_HANDLER_TIMEOUT_MS: 3500,
+    SEND_HANDLER_TIMEOUT_MS: 4500,
 
     // Compose / from-changed handlers have a softer budget.
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
