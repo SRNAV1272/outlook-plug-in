@@ -37,14 +37,14 @@ function showNotification(item, message, type = "informationalMessage", persiste
     const details = {
         type,
         message,
-        icon: "none",
+        // icon field OMITTED — "none" is not a valid value in OWA and throws
+        // Sys.ArgumentException: Value does not fall within the expected range.
+        // Only registered resource IDs are accepted; omitting defaults to no icon.
         persistent,
     };
 
-    // Replace if already shown (replaceAsync), else add fresh (addAsync)
     item.notificationMessages.replaceAsync(NOTIF_KEY, details, (result) => {
         if (result.status !== "succeeded") {
-            // Key didn't exist yet — add it
             item.notificationMessages.addAsync(NOTIF_KEY, details, (r) => {
                 if (r.status !== "succeeded") {
                     console.warn("[CardByte] addAsync notification failed:", r.error?.message);
@@ -445,8 +445,8 @@ async function _applySignatureCore(item, mailbox) {
     if (!signature && userEmail) {
 
         // 3a. API call starting
-        showNotification(item, "CardByte: Loading signature…");
-        console.log("[CardByte] 🔔 Notification → Loading signature…");
+        showNotification(item, "CardByte: Fetching signature from server…");
+        console.log("[CardByte] 🔔 Notification → Fetching signature from server…");
 
         const MAX_RETRIES = 2;
         let attempt = 0;
@@ -472,12 +472,18 @@ async function _applySignatureCore(item, mailbox) {
         }
 
         if (signature) {
-            // 3b. API response received successfully
-            showNotification(item, "CardByte: Signature fetched successfully.");
-            console.log("[CardByte] 🔔 Notification → Signature fetched successfully.");
+            showNotification(item, "CardByte: Signature fetched — applying…");
+            console.log("[CardByte] 🔔 Notification → Signature fetched — applying…");
             COMPOSE_TIME_SIGNATURE = signature;
             setCachedSignature(signature);
         } else {
+            showNotification(
+                item,
+                "CardByte: Signature fetching failed. Please contact your admin.",
+                "errorMessage",
+                true
+            );
+            console.log("[CardByte] 🔔 Notification → Signature fetching failed.");
             console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed:`, lastError);
         }
     }
@@ -497,13 +503,13 @@ async function _applySignatureCore(item, mailbox) {
         console.error("[CardByte] ❌ No signature found in memory, cache, or server.");
         showNotification(
             item,
-            "CardByte: Signature not found. Please contact your admin.",
+            "CardByte: Signature fetching failed. Please contact your admin.",
             "errorMessage",
             true  // persistent — user must dismiss manually
         );
-        console.log("[CardByte] 🔔 Notification → Signature not found. Please contact your admin.");
+        console.log("[CardByte] 🔔 Notification → Signature fetching failed. Please contact your admin.");
         logTiming(`_applySignatureCore (${composeType}) — aborted, no signature`, t0);
-        return; // ← do NOT apply anything
+        return;
     }
 
     // ── Phase 6: Applying signature ───────────────────────────────────────────
