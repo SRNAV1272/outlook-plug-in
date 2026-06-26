@@ -436,25 +436,27 @@ async function _applySignatureCore(item, mailbox) {
 
     console.log(`[CardByte] _applySignatureCore — composeType: ${composeType}`);
 
-    // 1. In-memory (fastest — no fetch needed, skip notification)
+    // ── Phase 1: In-memory (fastest — silent, no notification needed) ─────────
     let signature = COMPOSE_TIME_SIGNATURE;
     if (signature) {
         console.log("[CardByte] ✅ Compose: using in-memory COMPOSE_TIME_SIGNATURE");
     }
 
-    // 2. Session cache (also fast — skip notification)
+    // ── Phase 2: Session cache (fast — silent) ────────────────────────────────
     if (!signature) {
         signature = getCachedSignature();
         if (signature) {
-            console.log("[CardByte] ✅ Compose: cache hit");
+            console.log("[CardByte] ✅ Compose: session cache hit");
             COMPOSE_TIME_SIGNATURE = signature;
         }
     }
 
-    // 3. Server fetch — show "loading" notification, then update on completion
+    // ── Phase 3: Server fetch — full notification lifecycle ───────────────────
     if (!signature && userEmail) {
-        showNotification(item, "CardByte: Loading your email signature…");
-        console.log("[CardByte] 🔔 Notification: loading signature from server");
+
+        // 3a. API call starting
+        showNotification(item, "CardByte: Loading signature…");
+        console.log("[CardByte] 🔔 Notification → Loading signature…");
 
         const MAX_RETRIES = 2;
         let attempt = 0;
@@ -480,15 +482,17 @@ async function _applySignatureCore(item, mailbox) {
         }
 
         if (signature) {
+            // 3b. API response received successfully
+            showNotification(item, "CardByte: Signature fetched successfully.");
+            console.log("[CardByte] 🔔 Notification → Signature fetched successfully.");
             COMPOSE_TIME_SIGNATURE = signature;
             setCachedSignature(signature);
         } else {
             console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed:`, lastError);
-            showNotification(item, "CardByte: Could not load signature — sending without one.", "errorMessage");
         }
     }
 
-    // 4. Stale cache last-ditch (bypasses session + TTL)
+    // ── Phase 4: Stale cache last-ditch (bypasses session + TTL) ─────────────
     if (!signature) {
         const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (staleCache) {
@@ -498,37 +502,33 @@ async function _applySignatureCore(item, mailbox) {
         }
     }
 
-    // 5. Minimal identity fallback
+    // ── Phase 5: No signature found anywhere — abort and notify ──────────────
     if (!signature) {
-        console.warn("[CardByte] No signature available — using fallback identity signature.");
-        signature = `
-            <table cellpadding="0" cellspacing="0" border="0" width="400">
-              <tr>
-                <td style="font-family:Arial,sans-serif;font-size:12px;">
-                  <strong>${userProfile.displayName || ""}</strong><br/>
-                  ${userProfile.emailAddress || ""}<br/>
-                  <span style="color:#999;">Sent via CardByte</span>
-                </td>
-              </tr>
-            </table>
-        `;
+        console.error("[CardByte] ❌ No signature found in memory, cache, or server.");
+        showNotification(
+            item,
+            "CardByte: Signature not found. Please contact your admin.",
+            "errorMessage",
+            true  // persistent — user must dismiss manually
+        );
+        console.log("[CardByte] 🔔 Notification → Signature not found. Please contact your admin.");
+        logTiming(`_applySignatureCore (${composeType}) — aborted, no signature`, t0);
+        return; // ← do NOT apply anything
     }
 
+    // ── Phase 6: Applying signature ───────────────────────────────────────────
+    showNotification(item, "CardByte: Applying signature…");
+    console.log("[CardByte] 🔔 Notification → Applying signature…");
+
     const finalSignature = _wrapSignature(signature);
-    console.log(`[CardByte] Applying signature for composeType: ${composeType}`);
+    console.log(`[CardByte] Writing signature for composeType: ${composeType}`);
     await bodySetSignatureAsync(item, finalSignature);
 
-    // ── Update notification: success (auto-dismiss after 4 seconds) ──────────
-    // Only show success notification if we had shown a loading one (i.e. fetch path).
-    // For cache/in-memory hits the bar stays silent — no noise for fast paths.
-    // We check by seeing if a notification was pending (the errorMessage case
-    // above already replaced it, so this only fires on the happy path).
-    const wasLoadingShown = !COMPOSE_TIME_SIGNATURE || !getCachedSignature();
-    // Simpler: always update on success so the bar is accurate if it was shown.
-    showNotification(item, "CardByte: Signature applied ✓", "informationalMessage", false);
-    console.log("[CardByte] 🔔 Notification: signature applied");
+    // ── Phase 7: Applied ──────────────────────────────────────────────────────
+    showNotification(item, "CardByte: Signature applied ✓");
+    console.log("[CardByte] 🔔 Notification → Signature applied ✓");
 
-    // Auto-remove the success message after 4 seconds to keep the UI clean
+    // Auto-dismiss success message after 4 seconds
     setTimeout(() => removeNotification(item), 4000);
 
     logTiming(`_applySignatureCore (${composeType}) total`, t0);
