@@ -1,141 +1,31 @@
-// ─── Constants ────────────────────────────────────────────────────────────────
+let CACHED_SIGNATURE_HTML = null;
+const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
+// ─── Session-based cache buster ───────────────────────────────────────────────
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-const MAX_SAFE_HTML_SIZE = 500_000;
-const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
-const HEAVY_THRESHOLD = 100 * 1024; // 100 KB
-const NOTIF_KEY_HEAVY = "cardbyte_sig_heavy";
-const MAX_RETRIES = 2;
+// ─── In-memory signature store ────────────────────────────────────────────────
+let COMPOSE_TIME_SIGNATURE = null;
 
-// ─── Platform detection (memoized) ───────────────────────────────────────────
-// detectPlatform() previously re-evaluated on every call; we memoize after
-// Office.onReady fires so the result is stable for the lifetime of the page.
-let _platformCache = null;
+// ─── In-flight fetch deduplicator ────────────────────────────────────────────
+// Shared between _prefetchSignature and _applySignatureCore.
+// If prefetch is already running when applySignature fires, the compose
+// handler waits on the same promise — zero duplicate network requests.
+let _fetchInFlight = null;
 
-function detectPlatform() {
-    if (_platformCache) return _platformCache;
-
-    const platform = (Office?.context?.platform || "").toLowerCase();
-    const ua = (navigator?.userAgent || "").toLowerCase();
-
-    if (platform === "ios" || platform === "iphone" || platform === "ipad") {
-        _platformCache = "mobile-ios";
-    } else if (platform === "android") {
-        _platformCache = "mobile-android";
-    } else if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android")) {
-        _platformCache = ua.includes("android") ? "mobile-android" : "mobile-ios";
-    } else if (
-        (platform === "officeonline" || platform === "web" || platform === "") &&
-        (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
-    ) {
-        _platformCache = ua.includes("android") ? "mobile-android" : "mobile-ios";
-    } else if (
-        platform === "mac" ||
-        ((platform === "" || platform === "desktop") &&
-            (ua.includes("macintosh") || ua.includes("mac os x")) &&
-            !ua.includes("iphone") && !ua.includes("ipad"))
-    ) {
-        _platformCache = "mac";
-    } else if (platform === "officeonline" || platform === "web" || platform === "") {
-        _platformCache = "owa";
-    } else {
-        _platformCache = "desktop";
-    }
-
-    return _platformCache;
+// ─── Timing logger ────────────────────────────────────────────────────────────
+function logTiming(label, startMs) {
+    const elapsed = Date.now() - startMs;
+    console.log(`[CardByte] ⏱ ${label}: ${elapsed}ms`);
 }
 
-const isMobile = () => { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; };
-const isOWA = () => detectPlatform() === "owa";
-const isMac = () => detectPlatform() === "mac";
-const getMaxHtmlSize = () => isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
-
-Office.onReady(() => {
-    console.log("✅ Office.onReady is Started!");
-    // Prime the memoized platform detection once Office context is available.
-    _platformCache = null; // reset so detectPlatform() uses the real context
-    console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
-});
-
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
-// Pre-import the AES key pair once rather than re-importing on every fetch.
-// Both promises are created eagerly and awaited only when first needed.
-let _cryptoKeysPromise = null;
-
-function getCryptoKeys() {
-    if (_cryptoKeysPromise) return _cryptoKeysPromise;
-
-    _cryptoKeysPromise = (async () => {
-        const keyBuffer = base64ToArrayBuffer(AES_KEY);
-        const ivBuffer = base64ToArrayBuffer(AES_IV);
-        const [decryptKey, encryptKey] = await Promise.all([
-            crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]),
-            crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]),
-        ]);
-        return { decryptKey, encryptKey, ivBuffer };
-    })();
-
-    return _cryptoKeysPromise;
-}
-
-function base64ToArrayBuffer(base64) {
-    let b = base64.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = b.length % 4;
-    if (pad) b += "=".repeat(4 - pad);
-    const bin = atob(b);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes.buffer;
-}
-
-function arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let bin = "";
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin);
-}
-
-async function handleAesDecrypt(encryptedText) {
-    if (!encryptedText) return "";
-    try {
-        const { decryptKey, ivBuffer } = await getCryptoKeys();
-        const encryptedBuffer = base64ToArrayBuffer(encryptedText);
-        if (encryptedBuffer.byteLength % 16 !== 0) {
-            console.error(`[CardByte] Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes`);
-            return encryptedText;
-        }
-        const decryptedBuffer = await crypto.subtle.decrypt(
-            { name: "AES-CBC", iv: ivBuffer }, decryptKey, encryptedBuffer
-        );
-        return new TextDecoder().decode(decryptedBuffer);
-    } catch (err) {
-        console.error("[CardByte] Decryption error:", err);
-        return encryptedText;
-    }
-}
-
-async function encryptEmail(email = "") {
-    if (!email || !email.trim()) { console.warn("[CardByte] Empty email provided"); return ""; }
-    try {
-        const { encryptKey, ivBuffer } = await getCryptoKeys();
-        const data = new TextEncoder().encode(email);
-        const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, encryptKey, data);
-        return arrayBufferToBase64(encrypted);
-    } catch (err) {
-        console.error("[CardByte] Encryption error:", err);
-        return "";
-    }
-}
-
-// ─── Session-aware localStorage cache ────────────────────────────────────────
-
+// ─── Session ID ───────────────────────────────────────────────────────────────
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
     if (!sid) {
@@ -145,23 +35,25 @@ function getOrCreateSessionId() {
     return sid;
 }
 
-/**
- * Clears all three cache keys in one place — previously duplicated in two
- * branches of getCachedSignature.
- */
-function _clearCache() {
-    localStorage.removeItem(CACHE_KEY);
-    localStorage.removeItem(CACHE_SESSION_KEY);
-    localStorage.removeItem(CACHE_TIMESTAMP_KEY);
-}
-
+// ─── Cache read ───────────────────────────────────────────────────────────────
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-    if (skipSessionCheck) return localStorage.getItem(CACHE_KEY);
+    const t0 = Date.now();
+
+    if (skipSessionCheck) {
+        const val = localStorage.getItem(CACHE_KEY);
+        logTiming("getCachedSignature (skipSessionCheck)", t0);
+        return val;
+    }
 
     const currentSid = getOrCreateSessionId();
-    if (localStorage.getItem(CACHE_SESSION_KEY) !== currentSid) {
+    const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
+
+    if (cachedSid !== currentSid) {
         console.log("[CardByte] New session detected — clearing cached signature");
-        _clearCache();
+        localStorage.removeItem(CACHE_KEY);
+        localStorage.removeItem(CACHE_SESSION_KEY);
+        localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+        logTiming("getCachedSignature (session mismatch — cleared)", t0);
         return null;
     }
 
@@ -169,327 +61,565 @@ function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) 
         const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
         if (Date.now() - ts > CACHE_TTL_MS) {
             console.log("[CardByte] Cache TTL expired — clearing cached signature");
-            _clearCache();
+            localStorage.removeItem(CACHE_KEY);
+            localStorage.removeItem(CACHE_SESSION_KEY);
+            localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+            logTiming("getCachedSignature (TTL expired — cleared)", t0);
             return null;
         }
     }
 
-    return localStorage.getItem(CACHE_KEY);
+    const val = localStorage.getItem(CACHE_KEY);
+    logTiming("getCachedSignature (hit)", t0);
+    return val;
 }
 
+// ─── Cache write ──────────────────────────────────────────────────────────────
 function setCachedSignature(html) {
-    const sid = getOrCreateSessionId();
+    const t0 = Date.now();
+    const currentSid = getOrCreateSessionId();
     try {
         localStorage.setItem(CACHE_KEY, html);
-        localStorage.setItem(CACHE_SESSION_KEY, sid);
+        localStorage.setItem(CACHE_SESSION_KEY, currentSid);
         localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now().toString());
-    } catch (_) { /* quota exceeded — silently ignore */ }
-}
-
-// ─── Network ──────────────────────────────────────────────────────────────────
-
-async function renderSignatureOnServer(userEmail) {
-    const xPlatform = Office.context.diagnostics.platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
-    const encryptedMail = await encryptEmail(userEmail);
-
-    const res = await fetch(
-        "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-        { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
-    );
-
-    if (!res.ok) throw new Error(`[CardByte] Server responded ${res.status}`);
-
-    const decryptedData = await handleAesDecrypt(await res.text());
-    return JSON.parse(decryptedData)?.html ?? null;
-}
-
-// ─── Notification helpers ─────────────────────────────────────────────────────
-
-function showHeavySignatureNotification(item, message) {
-    try {
-        item?.notificationMessages?.addAsync?.(
-            NOTIF_KEY_HEAVY,
-            {
-                type: Office.MailboxEnums.ItemNotificationMessageType.InformationalMessage,
-                message,
-                icon: "Icon.16x16",
-                persistent: true,
-            },
-            (result) => {
-                if (result.status !== Office.AsyncResultStatus.Succeeded)
-                    console.warn("[CardByte] Could not add notification:", result.error?.message);
-            }
-        );
-    } catch (err) {
-        console.warn("[CardByte] showHeavySignatureNotification failed:", err);
+        logTiming("setCachedSignature", t0);
+    } catch (_) {
+        logTiming("setCachedSignature (failed — likely quota)", t0);
     }
 }
 
-function removeHeavySignatureNotification(item) {
-    try { item?.notificationMessages?.removeAsync?.(NOTIF_KEY_HEAVY, () => { }); }
-    catch (_) { /* no-op */ }
+// ─── Platform detection ───────────────────────────────────────────────────────
+const MAX_SAFE_HTML_SIZE = 500_000;
+const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
+
+function detectPlatform() {
+    const platform = (Office?.context?.platform || "").toLowerCase();
+    const ua = (navigator?.userAgent || "").toLowerCase();
+
+    if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
+    if (platform === "android") return "mobile-android";
+    if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android"))
+        return ua.includes("android") ? "mobile-android" : "mobile-ios";
+    if (
+        (platform === "officeonline" || platform === "web" || platform === "") &&
+        (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
+    ) return ua.includes("android") ? "mobile-android" : "mobile-ios";
+    if (platform === "mac") return "mac";
+    if (
+        (platform === "" || platform === "desktop") &&
+        (ua.includes("macintosh") || ua.includes("mac os x")) &&
+        !ua.includes("iphone") && !ua.includes("ipad")
+    ) return "mac";
+    if (platform === "officeonline" || platform === "web" || platform === "") return "owa";
+    return "desktop";
 }
 
-// ─── Signature injection ──────────────────────────────────────────────────────
+function isMobile() {
+    const p = detectPlatform();
+    return p === "mobile-ios" || p === "mobile-android";
+}
+function isOWA() { return detectPlatform() === "owa"; }
+function isMac() { return detectPlatform() === "mac"; }
+function getMaxHtmlSize() { return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE; }
+
+// ─── Compose type detection ───────────────────────────────────────────────────
+function detectComposeType(item) {
+    try {
+        const mode = item?.composeType;
+        if (mode) {
+            if (mode === Office.MailboxEnums.ComposeType.NewMail) return "new";
+            if (mode === Office.MailboxEnums.ComposeType.Reply) return "reply";
+            if (mode === Office.MailboxEnums.ComposeType.ReplyAll) return "replyAll";
+            if (mode === Office.MailboxEnums.ComposeType.Forward) return "forward";
+            if (typeof mode === "string") return mode.toLowerCase();
+        }
+        // Fallback: inReplyTo populated = reply or forward
+        if (item?.inReplyTo) return "reply-or-forward";
+    } catch (_) { }
+    return "new"; // safest assumption when unknown
+}
+
+// ─── Office.onReady ───────────────────────────────────────────────────────────
+Office.onReady(() => {
+    console.log("✅ Office.onReady is Started !");
+    console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
+
+    // Fire-and-forget prefetch. Sets _fetchInFlight so if applySignature
+    // fires before this completes, it waits on the same promise.
+    _prefetchSignature().catch((err) => {
+        console.warn("[CardByte] onReady prefetch failed silently:", err.message);
+    });
+});
+
+// ─── Crypto helpers ───────────────────────────────────────────────────────────
+function base64ToArrayBuffer(base64) {
+    let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = base64Data.length % 4;
+    if (padding) base64Data += "=".repeat(4 - padding);
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+    return bytes.buffer;
+}
+
+function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binaryString = "";
+    for (let i = 0; i < bytes.length; i++) binaryString += String.fromCharCode(bytes[i]);
+    return btoa(binaryString);
+}
+
+async function handleAesDecrypt(encryptedText, generatedKey) {
+    const t0 = Date.now();
+    try {
+        if (!encryptedText) return "";
+        const keyToUse = generatedKey || AES_KEY;
+        let keyBuffer;
+        try { keyBuffer = base64ToArrayBuffer(keyToUse); }
+        catch (e) { console.error("Failed to decode key as base64:", e); return encryptedText; }
+        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
+            if (generatedKey && generatedKey !== AES_KEY) return handleAesDecrypt(encryptedText, AES_KEY);
+            return encryptedText;
+        }
+        const ivBuffer = base64ToArrayBuffer(AES_IV);
+        if (ivBuffer.byteLength !== 16) return encryptedText;
+        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
+        let encryptedBuffer;
+        try { encryptedBuffer = base64ToArrayBuffer(encryptedText); }
+        catch (e) { return encryptedText; }
+        if (encryptedBuffer.byteLength % 16 !== 0) {
+            console.error(`Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes`);
+            return encryptedText;
+        }
+        const decryptedBuffer = await crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBuffer }, key, encryptedBuffer);
+        const result = new TextDecoder().decode(decryptedBuffer);
+        logTiming("handleAesDecrypt (success)", t0);
+        return result;
+    } catch (err) {
+        logTiming("handleAesDecrypt (error)", t0);
+        if (generatedKey && generatedKey !== AES_KEY && err.message.includes("key data")) {
+            try { return await handleAesDecrypt(encryptedText, AES_KEY); }
+            catch (e) { console.error("Fallback also failed:", e.message); }
+        }
+        return encryptedText;
+    }
+}
+
+async function encryptEmail(email = "") {
+    const t0 = Date.now();
+    try {
+        if (!email || email.trim() === "") { console.warn("Warning: Empty email provided"); return ""; }
+        const keyBuffer = base64ToArrayBuffer(AES_KEY);
+        const ivBuffer = base64ToArrayBuffer(AES_IV);
+        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
+            console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`); return "";
+        }
+        if (ivBuffer.byteLength !== 16) {
+            console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`); return "";
+        }
+        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
+        const data = new TextEncoder().encode(email);
+        const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
+        const base64Result = arrayBufferToBase64(encrypted);
+        try { atob(base64Result); } catch (e) { console.error("Result is NOT valid base64:", e); }
+        logTiming("encryptEmail (success)", t0);
+        return base64Result;
+    } catch (err) {
+        logTiming("encryptEmail (error)", t0);
+        console.error("Encryption error:", err);
+        return "";
+    }
+}
+
+// ─── Backend fetch ────────────────────────────────────────────────────────────
+async function renderSignatureOnServer(user) {
+    const t0 = Date.now();
+    const platform = Office.context.diagnostics.platform;
+    const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
+
+    try {
+        const encryptedMail = await encryptEmail(user);
+        console.log(`[CardByte] 🌐 API call started — primary renderer`);
+
+        const tFetch = Date.now();
+        const primaryRes = await fetch(
+            "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
+        );
+        logTiming("API call — fetch() resolved (headers)", tFetch);
+
+        if (primaryRes.ok) {
+            const tBody = Date.now();
+            const data = await primaryRes.arrayBuffer();
+            logTiming("API call — response.arrayBuffer() buffering", tBody);
+
+            const text = new TextDecoder().decode(data);
+            const decryptedData = await handleAesDecrypt(text); // timing inside
+            logTiming("API call — primary renderer (total)", t0);
+            console.log("[CardByte] Using NEW renderer");
+            return JSON.parse(decryptedData)?.html || null;
+        }
+        logTiming("API call — primary renderer (non-ok response)", t0);
+        console.warn("Primary failed. Falling back to legacy...");
+    } catch (err) {
+        logTiming("API call — primary renderer (crashed)", t0);
+        console.warn("Primary crashed. Falling back to legacy...", err);
+    }
+
+    try {
+        const t1 = Date.now();
+        console.log(`[CardByte] 🌐 API call started — legacy renderer`);
+        const legacyRes = await fetch(
+            "https://enterprise.cardbyte.ai/render-signature",
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
+        );
+        if (!legacyRes.ok) throw new Error("Legacy renderer failed");
+        const legacyData = await legacyRes.json();
+        logTiming("API call — legacy renderer (success)", t1);
+        console.log("[CardByte] Using LEGACY renderer", legacyData);
+        return legacyData?.finalHtml || null;
+    } catch (legacyError) {
+        console.error("Both primary and legacy failed:", legacyError);
+        return null;
+    }
+}
+
+// ─── Fetch deduplicator ───────────────────────────────────────────────────────
+// Single shared promise across prefetch + applySignature.
+// Whichever fires first starts the fetch; the other awaits the same promise.
+async function _fetchSignatureOnce(userEmail) {
+    if (_fetchInFlight) {
+        console.log("[CardByte] 🔒 Fetch already in-flight — waiting on existing promise (no duplicate request)");
+        const t0 = Date.now();
+        const result = await _fetchInFlight;
+        logTiming("_fetchSignatureOnce (waited on in-flight)", t0);
+        return result;
+    }
+
+    console.log("[CardByte] 🔒 No in-flight fetch — starting new request");
+    _fetchInFlight = renderSignatureOnServer(userEmail).finally(() => {
+        _fetchInFlight = null;
+        console.log("[CardByte] 🔒 In-flight fetch settled — lock released");
+    });
+
+    return _fetchInFlight;
+}
+
+// ─── Taskpane prefetch ────────────────────────────────────────────────────────
+async function _prefetchSignature() {
+    const t0 = Date.now();
+    console.log("[CardByte] 🔥 Prefetch: started");
+
+    const mailbox = Office?.context?.mailbox;
+    const userEmail = mailbox?.userProfile?.emailAddress;
+
+    if (!userEmail) {
+        console.warn("[CardByte] 🔥 Prefetch: no email available — skipping");
+        return;
+    }
+
+    // 1. In-memory already warm
+    if (COMPOSE_TIME_SIGNATURE) {
+        console.log("[CardByte] 🔥 Prefetch: COMPOSE_TIME_SIGNATURE already warm — skipping");
+        logTiming("Prefetch (skipped — in-memory warm)", t0);
+        return;
+    }
+
+    // 2. Valid cache exists — warm in-memory from it, no fetch needed
+    const cached = getCachedSignature();
+    if (cached) {
+        COMPOSE_TIME_SIGNATURE = cached;
+        console.log("[CardByte] 🔥 Prefetch: cache hit — COMPOSE_TIME_SIGNATURE warmed");
+        logTiming("Prefetch (warmed from cache)", t0);
+        return;
+    }
+
+    // 3. Cache miss — fetch from server (sets _fetchInFlight so applySignature
+    //    firing concurrently will wait on this same promise, not fire a new one)
+    console.log("[CardByte] 🔥 Prefetch: cache miss — fetching from server");
+    try {
+        const html = await _fetchSignatureOnce(userEmail);
+        if (html) {
+            COMPOSE_TIME_SIGNATURE = html;
+            setCachedSignature(html);
+            logTiming("Prefetch (fetch + cache set)", t0);
+            console.log("[CardByte] 🔥 Prefetch: ✅ complete — signature ready");
+        } else {
+            console.warn("[CardByte] 🔥 Prefetch: server returned null — compose will fetch on demand");
+            logTiming("Prefetch (server returned null)", t0);
+        }
+    } catch (err) {
+        console.error("[CardByte] 🔥 Prefetch: fetch threw —", err.message);
+        logTiming("Prefetch (fetch threw)", t0);
+    }
+}
+
+// Expose on window so taskpane.js can call window.cardbytePrewarm()
+if (typeof window !== "undefined") {
+    window.cardbytePrewarm = _prefetchSignature;
+}
+
+// ─── Timeout wrapper ──────────────────────────────────────────────────────────
+function withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms)
+        )
+    ]);
+}
+
+// ─── Body helpers ─────────────────────────────────────────────────────────────
+function getBodyText(item) {
+    return new Promise((resolve) => {
+        const t0 = Date.now();
+        item.body.getAsync(Office.CoercionType.Html, (result) => {
+            logTiming("getBodyText", t0);
+            if (result.status === "succeeded") resolve(result.value || "");
+            else resolve("");
+        });
+    });
+}
+
+const SIGNATURE_SENTINEL = "cardbyte-sig";
 
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.setSignatureAsync !== "function") {
-            reject(new Error("setSignatureAsync not available")); return;
+            reject(new Error("setSignatureAsync not available"));
+            return;
         }
+        const t0 = Date.now();
         item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            r.status === "succeeded" ? resolve() : reject(r.error);
+            logTiming("setSignatureAsync", t0);
+            if (r.status === "succeeded") resolve();
+            else reject(r.error);
         });
     });
 }
 
-function bodySetSelectedDataAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.setSelectedDataAsync !== "function") {
-            reject(new Error("setSelectedDataAsync not available")); return;
+// ─── Signature wrapper ────────────────────────────────────────────────────────
+function _wrapSignature(html) {
+    return `<div data-cb="${SIGNATURE_SENTINEL}" style="margin-top:40px;margin-bottom:40px;">${html}</div>`;
+}
+
+// ─── Compose-time core ────────────────────────────────────────────────────────
+async function _applySignatureCore(item, mailbox) {
+    const t0 = Date.now();
+    const userProfile = mailbox?.userProfile || {};
+    const userEmail = userProfile?.emailAddress;
+    const composeType = detectComposeType(item);
+
+    console.log(`[CardByte] _applySignatureCore — composeType: ${composeType}`);
+
+    // 1. In-memory (fastest — set by prefetch or prior compose)
+    let signature = COMPOSE_TIME_SIGNATURE;
+    if (signature) {
+        console.log("[CardByte] ✅ Compose: using in-memory COMPOSE_TIME_SIGNATURE");
+    }
+
+    // 2. Session cache
+    if (!signature) {
+        signature = getCachedSignature();
+        if (signature) {
+            console.log("[CardByte] ✅ Compose: cache hit");
+            COMPOSE_TIME_SIGNATURE = signature;
         }
-        item.body.setSelectedDataAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error);
-        });
-    });
-}
-
-/**
- * Light path  (<100 KB): use setSignatureAsync directly — Outlook handles
- * placement natively. We first clear any Outlook-default signature with
- * setSignatureAsync("") before injecting our own, so the two never stack.
- *
- * Heavy path (≥100 KB):
- *   • Compose open → show notification bar only (don't block the compose window).
- *   • Send time    → inject via setSelectedDataAsync so the signature travels
- *                    with the message body.
- *
- * IMPORTANT: setSignatureAsync("") is called ONLY when we have a real signature
- * to insert immediately after. It is never called when no signature is available
- * (that branch exits early in _applySignatureCore before reaching here).
- */
-// async function applySignatureWithFallback(item, html, isSendTime = false) {
-//     const htmlSize = new Blob([html]).size;
-//     console.log("[CardByte] Signature size:", htmlSize, "bytes");
-
-//     if (htmlSize < HEAVY_THRESHOLD) {
-//         removeHeavySignatureNotification(item);
-//         // Clear any Outlook-injected default signature first, then set ours.
-//         // Both calls are on the light path so setSignatureAsync is available.
-//         await bodySetSignatureAsync(item, html);
-//         return true;
-//     }
-
-//     console.warn(`[CardByte] Signature is ${htmlSize} bytes (≥100 KB) — heavy path (isSendTime=${isSendTime}).`);
-
-//     if (!isSendTime) {
-//         await bodySetSignatureAsync(item, "");
-//         showHeavySignatureNotification(item, "Your signature is large and will be inserted at the time of send.");
-//         return false;
-//     }
-
-//     try {
-//         // Step 1: Use setSignatureAsync("") to force cursor to bottom
-//         await bodySetSignatureAsync(item, "");
-
-//         // Step 2: Now insert heavy signature at cursor (which is now at bottom)
-//         await bodySetSelectedDataAsync(item, html);
-
-//         removeHeavySignatureNotification(item);
-//         console.log("[CardByte] Heavy signature inserted at bottom via cursor trick.");
-//         return true;
-//     } catch (err) {
-//         console.error("[CardByte] Heavy path send-time insertion failed:", err);
-//         return false;
-//     }
-// }
-
-// ─── Core orchestration ───────────────────────────────────────────────────────
-
-const GAP = '<p style="margin:0;padding:0;line-height:1.5;">&ensp;</p>';
-
-async function applySignatureWithFallback(item, html, isSendTime = false) {
-    const htmlSize = new Blob([html]).size;
-    console.log("[CardByte] Signature size:", htmlSize, "bytes");
-
-    if (htmlSize < HEAVY_THRESHOLD) {
-        removeHeavySignatureNotification(item);
-        await bodySetSignatureAsync(item, GAP + html);  // ← gap prepended
-        return true;
     }
 
-    // ── Heavy path ───────────────────────────────────────────────────────────
-    console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}.`);
+    // 3. Server fetch — uses _fetchSignatureOnce so if prefetch is already
+    //    in-flight, this waits on that promise instead of firing a new request.
+    if (!signature && userEmail) {
+        const MAX_RETRIES = 2;
+        let attempt = 0;
+        let lastError = null;
 
-    if (isSendTime) {
-        console.log("[CardByte] Heavy signature at send time — skipping.");
-        removeHeavySignatureNotification(item);
-        return false;
-    }
-
-    try {
-        await bodySetSignatureAsync(item, "");
-        await bodySetSelectedDataAsync(item, GAP + html + '<p style="margin:0;padding:0;line-height:1.5;">&ensp;</p>');
-
-        removeHeavySignatureNotification(item);
-        console.log("[CardByte] Heavy signature inserted at compose time via cursor trick.");
-        return true;
-    } catch (err) {
-        console.error("[CardByte] Heavy path compose-time insertion failed:", err);
-        showHeavySignatureNotification(item, "Your signature is large and could not be inserted. Please contact Admin.");
-        return false;
-    }
-}
-
-/**
- * @param {object}  item
- * @param {object}  mailbox
- * @param {object}  opts
- * @param {boolean} opts.fetchIfMissing   - Fetch from server when cache is cold.
- * @param {boolean} opts.skipTtl          - Ignore TTL when reading from cache.
- * @param {boolean} opts.skipSessionCheck - Ignore session mismatch check.
- * @param {boolean} isSendTime            - true when called from onSendHandler.
- */
-async function _applySignatureCore(item, mailbox, opts = {}, isSendTime = false) {
-    const { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = opts;
-    const userEmail = mailbox?.userProfile?.emailAddress;
-
-    let html = getCachedSignature({ skipTtl, skipSessionCheck });
-
-    if (fetchIfMissing && userEmail && html == null) {
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            if (attempt > 0) {
-                console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})…`);
-                // Exponential-ish back-off starting at 1 s (not 0 s on attempt 0)
-                await new Promise(r => setTimeout(r, 1000 * attempt));
-            }
+        while (attempt <= MAX_RETRIES) {
             try {
-                const result = await renderSignatureOnServer(userEmail);
-                if (result != null) { html = result; break; }
-                console.warn("[CardByte] Server returned null on attempt", attempt);
+                if (attempt > 0) {
+                    console.warn(`[CardByte] Retrying fetch (attempt ${attempt}/${MAX_RETRIES})...`);
+                    await new Promise(r => setTimeout(r, 1000 * attempt));
+                }
+                // ↓ _fetchSignatureOnce: waits on prefetch if in-flight, else starts new fetch
+                const result = await _fetchSignatureOnce(userEmail);
+                if (result != null) {
+                    signature = result;
+                    break;
+                }
+                lastError = new Error("Server returned null");
             } catch (err) {
+                lastError = err;
                 console.warn(`[CardByte] Fetch attempt ${attempt + 1} failed:`, err);
             }
+            attempt++;
         }
 
-        if (html != null) {
-            setCachedSignature(html);
+        if (signature) {
+            COMPOSE_TIME_SIGNATURE = signature;
+            setCachedSignature(signature);
         } else {
-            console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed — falling back to stale cache.`);
-            // Last resort: any cached value regardless of TTL or session
-            html = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-            if (html) console.warn("[CardByte] Using stale cached signature.");
+            console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed:`, lastError);
         }
     }
 
-    if (!html) {
-        console.error("[CardByte] No signature available. Aborting.");
-        removeHeavySignatureNotification(item);
-        showHeavySignatureNotification(item, "Signature not available. Please contact Admin.");
+    // 4. Stale cache last-ditch (bypasses session + TTL)
+    if (!signature) {
+        const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+        if (staleCache) {
+            console.warn("[CardByte] Using stale cached signature as last resort.");
+            signature = staleCache;
+            COMPOSE_TIME_SIGNATURE = signature;
+        }
+    }
+
+    // 5. Minimal identity fallback (not stored — send-time won't re-apply it)
+    if (!signature) {
+        console.warn("[CardByte] No signature available — using fallback identity signature.");
+        signature = `
+            <table cellpadding="0" cellspacing="0" border="0" width="400">
+              <tr>
+                <td style="font-family:Arial,sans-serif;font-size:12px;">
+                  <strong>${userProfile.displayName || ""}</strong><br/>
+                  ${userProfile.emailAddress || ""}<br/>
+                  <span style="color:#999;">Sent via CardByte</span>
+                </td>
+              </tr>
+            </table>
+        `;
+    }
+
+    const finalSignature = _wrapSignature(signature);
+    console.log(`[CardByte] Applying signature for composeType: ${composeType}`);
+    await bodySetSignatureAsync(item, finalSignature);
+    logTiming(`_applySignatureCore (${composeType}) total`, t0);
+}
+
+// ─── Send-time core — NO API calls ───────────────────────────────────────────
+async function _onSendCore(item, mailbox) {
+    const t0 = Date.now();
+    console.log("[CardByte] ── onSend: checking body for existing signature...");
+
+    const bodyHtml = await getBodyText(item);
+
+    if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
+        console.log("[CardByte] ✅ onSend: signature already present — fast pass-through.");
+        logTiming("_onSendCore (fast pass-through)", t0);
         return;
     }
 
-    await applySignatureWithFallback(item, html, isSendTime);
+    console.log("[CardByte] ⚠️ onSend: signature missing — attempting recovery (no API calls).");
+
+    // 1. In-memory
+    let signature = COMPOSE_TIME_SIGNATURE;
+    if (signature) {
+        console.log("[CardByte] ✅ onSend: recovered from COMPOSE_TIME_SIGNATURE (in-memory).");
+    }
+
+    // 2. localStorage (skip session + TTL — may be different iframe context)
+    if (!signature) {
+        signature = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+        if (signature) {
+            console.log("[CardByte] ✅ onSend: recovered from localStorage cache.");
+        }
+    }
+
+    // 3. Nothing — let mail go as-is
+    if (!signature) {
+        console.warn("[CardByte] ⚠️ onSend: no signature found — sending without signature.");
+        logTiming("_onSendCore (no signature — sending as-is)", t0);
+        return;
+    }
+
+    await bodySetSignatureAsync(item, _wrapSignature(signature));
+    console.log("[CardByte] ✅ onSend: signature re-applied successfully.");
+    logTiming("_onSendCore (re-applied)", t0);
 }
 
-// ─── Office action handlers ───────────────────────────────────────────────────
-
+// ─── Public event handlers ────────────────────────────────────────────────────
 const applySignature = async function (event = { completed: () => { } }) {
+    const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
+    const composeType = item ? detectComposeType(item) : "unknown";
+
+    console.log(`[CardByte] === applySignature fired (composeType: ${composeType}) ===`);
+
     try {
-        if (!item) return;
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
+        if (!item) {
+            console.warn("[CardByte] applySignature: no item — completing");
+            return;
+        }
+        await _applySignatureCore(item, mailbox);
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
     } finally {
+        logTiming(`applySignature handler (${composeType})`, t0);
         event.completed();
     }
 };
 
-async function logDraftedContent() {
-    const item = Office?.context?.mailbox?.item;
-    if (!item) { console.error("[CardByte] No item found"); return; }
-
-    item.body.getAsync(Office.CoercionType.Html, (result) => {
-        if (result.status !== Office.AsyncResultStatus.Succeeded) {
-            console.error("[CardByte] getAsync failed:", result.error?.message);
-            return;
-        }
-
-        const fullHtml = result.value;
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(fullHtml, "text/html");
-
-        // Remove everything from the HR (quote divider) onwards
-        const hr = doc.querySelector("hr");
-        const divRply = doc.querySelector("#divRplyFwdMsg");
-        const quoteAnchor = doc.querySelector("a[name='_MailOriginal']");
-
-        const cutPoint = quoteAnchor || hr || divRply;
-
-        if (cutPoint) {
-            // Remove the cutpoint and all following siblings
-            let node = cutPoint;
-            while (node) {
-                const next = node.nextSibling;
-                node.parentNode.removeChild(node);
-                node = next;
-            }
-            cutPoint.remove?.();
-        }
-
-        const draftedHtml = doc.body.innerHTML.trim();
-        console.log("[CardByte] Drafted content only:", draftedHtml);
-    });
-}
-
-// const onSendHandler = async function (event = { completed: () => { } }) {
-//     const mailbox = Office?.context?.mailbox;
-//     const item = mailbox?.item;
-//     try {
-//         if (!item) return;
-//         // Send iframe has its own fresh sessionStorage, so we skip both the
-//         // TTL and the session check and just read whatever is in localStorage.
-
-//         await bodySetSelectedDataAsync(item, " ");
-
-//         await logDraftedContent(); // 👈 add this
-//         await _applySignatureCore(
-//             item, mailbox,
-//             { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
-//             true
-//         );
-//     } catch (err) {
-//         console.error("[CardByte] Error in onSendHandler:", err);
-//     } finally {
-//         event.completed({ allowEvent: true });
-//     }
-// };
-
 const onSendHandler = async function (event = { completed: () => { } }) {
+    const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
+
+    console.log("[CardByte] === onSendHandler fired ===");
+
+    const done = (allow = true) => {
+        logTiming("onSendHandler total", t0);
+        event.completed({ allowEvent: allow });
+    };
+
     try {
-        if (!item) return;
-        await _applySignatureCore(
-            item, mailbox,
-            { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true },
-            true
-        );
+        if (!item) { done(true); return; }
+        await withTimeout(_onSendCore(item, mailbox), 4000);
     } catch (err) {
-        console.error("[CardByte] Error in onSendHandler:", err);
+        console.warn("[CardByte] onSendHandler error/timeout — allowing send:", err.message);
     } finally {
-        event.completed({ allowEvent: true });
+        done(true);
     }
 };
 
-// ─── Associate Office actions ─────────────────────────────────────────────────
+const onFromChangedHandler = async function (event = { completed: () => { } }) {
+    const t0 = Date.now();
+    const mailbox = Office?.context?.mailbox;
+    const item = mailbox?.item;
 
+    console.log("[CardByte] === onFromChangedHandler fired — clearing cache for account switch ===");
+
+    try {
+        if (!item) {
+            console.warn("[CardByte] onFromChangedHandler: no item — completing");
+            return;
+        }
+
+        // Wipe everything for the new account
+        COMPOSE_TIME_SIGNATURE = null;
+        _fetchInFlight = null; // also cancel any in-flight fetch for old account
+        localStorage.removeItem(CACHE_KEY);
+        localStorage.removeItem(CACHE_SESSION_KEY);
+        localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+        console.log("[CardByte] onFromChangedHandler: in-memory + localStorage + in-flight lock cleared");
+
+        await _applySignatureCore(item, mailbox);
+    } catch (err) {
+        console.error("[CardByte] Error in onFromChangedHandler:", err);
+    } finally {
+        logTiming("onFromChangedHandler total", t0);
+        event.completed();
+    }
+};
+
+// ─── Handler registration ─────────────────────────────────────────────────────
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("onSendHandler", onSendHandler);
     Office.actions.associate("applySignature", applySignature);
-    console.log("[CardByte] Office.actions registered: applySignature, onSendHandler");
+    console.log("[CardByte] Office.actions.associate registered: applySignature");
+
+    Office.actions.associate("onSendHandler", onSendHandler);
+    console.log("[CardByte] Office.actions.associate registered: onSendHandler");
+
+    Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+    console.log("[CardByte] Office.actions.associate registered: onFromChangedHandler");
 } else {
     console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
 }

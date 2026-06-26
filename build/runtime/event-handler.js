@@ -14,15 +14,49 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 let COMPOSE_TIME_SIGNATURE = null;
 
 // ─── In-flight fetch deduplicator ────────────────────────────────────────────
-// Shared between _prefetchSignature and _applySignatureCore.
-// If prefetch is already running when applySignature fires, the compose
-// handler waits on the same promise — zero duplicate network requests.
 let _fetchInFlight = null;
+
+// ─── Notification key constant ────────────────────────────────────────────────
+const NOTIF_KEY = "cardbyte_sig_status";
 
 // ─── Timing logger ────────────────────────────────────────────────────────────
 function logTiming(label, startMs) {
     const elapsed = Date.now() - startMs;
     console.log(`[CardByte] ⏱ ${label}: ${elapsed}ms`);
+}
+
+// ─── Notification helpers ─────────────────────────────────────────────────────
+/**
+ * Show or update the notification bar on the compose item.
+ * type: "informationalMessage" | "errorMessage" | "progressIndicator" (OWA only)
+ * We use "informationalMessage" for broad compatibility.
+ */
+function showNotification(item, message, type = "informationalMessage", persistent = false) {
+    if (!item || typeof item.notificationMessages?.addAsync !== "function") return;
+
+    const details = {
+        type,
+        message,
+        icon: "none",
+        persistent,
+    };
+
+    // Replace if already shown (replaceAsync), else add fresh (addAsync)
+    item.notificationMessages.replaceAsync(NOTIF_KEY, details, (result) => {
+        if (result.status !== "succeeded") {
+            // Key didn't exist yet — add it
+            item.notificationMessages.addAsync(NOTIF_KEY, details, (r) => {
+                if (r.status !== "succeeded") {
+                    console.warn("[CardByte] addAsync notification failed:", r.error?.message);
+                }
+            });
+        }
+    });
+}
+
+function removeNotification(item) {
+    if (!item || typeof item.notificationMessages?.removeAsync !== "function") return;
+    item.notificationMessages.removeAsync(NOTIF_KEY, () => { /* ignore */ });
 }
 
 // ─── Session ID ───────────────────────────────────────────────────────────────
@@ -133,10 +167,9 @@ function detectComposeType(item) {
             if (mode === Office.MailboxEnums.ComposeType.Forward) return "forward";
             if (typeof mode === "string") return mode.toLowerCase();
         }
-        // Fallback: inReplyTo populated = reply or forward
         if (item?.inReplyTo) return "reply-or-forward";
     } catch (_) { }
-    return "new"; // safest assumption when unknown
+    return "new";
 }
 
 // ─── Office.onReady ───────────────────────────────────────────────────────────
@@ -144,8 +177,6 @@ Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
     console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
 
-    // Fire-and-forget prefetch. Sets _fetchInFlight so if applySignature
-    // fires before this completes, it waits on the same promise.
     _prefetchSignature().catch((err) => {
         console.warn("[CardByte] onReady prefetch failed silently:", err.message);
     });
@@ -254,7 +285,7 @@ async function renderSignatureOnServer(user) {
             logTiming("API call — response.arrayBuffer() buffering", tBody);
 
             const text = new TextDecoder().decode(data);
-            const decryptedData = await handleAesDecrypt(text); // timing inside
+            const decryptedData = await handleAesDecrypt(text);
             logTiming("API call — primary renderer (total)", t0);
             console.log("[CardByte] Using NEW renderer");
             return JSON.parse(decryptedData)?.html || null;
@@ -285,8 +316,6 @@ async function renderSignatureOnServer(user) {
 }
 
 // ─── Fetch deduplicator ───────────────────────────────────────────────────────
-// Single shared promise across prefetch + applySignature.
-// Whichever fires first starts the fetch; the other awaits the same promise.
 async function _fetchSignatureOnce(userEmail) {
     if (_fetchInFlight) {
         console.log("[CardByte] 🔒 Fetch already in-flight — waiting on existing promise (no duplicate request)");
@@ -318,14 +347,12 @@ async function _prefetchSignature() {
         return;
     }
 
-    // 1. In-memory already warm
     if (COMPOSE_TIME_SIGNATURE) {
         console.log("[CardByte] 🔥 Prefetch: COMPOSE_TIME_SIGNATURE already warm — skipping");
         logTiming("Prefetch (skipped — in-memory warm)", t0);
         return;
     }
 
-    // 2. Valid cache exists — warm in-memory from it, no fetch needed
     const cached = getCachedSignature();
     if (cached) {
         COMPOSE_TIME_SIGNATURE = cached;
@@ -334,8 +361,6 @@ async function _prefetchSignature() {
         return;
     }
 
-    // 3. Cache miss — fetch from server (sets _fetchInFlight so applySignature
-    //    firing concurrently will wait on this same promise, not fire a new one)
     console.log("[CardByte] 🔥 Prefetch: cache miss — fetching from server");
     try {
         const html = await _fetchSignatureOnce(userEmail);
@@ -354,7 +379,6 @@ async function _prefetchSignature() {
     }
 }
 
-// Expose on window so taskpane.js can call window.cardbytePrewarm()
 if (typeof window !== "undefined") {
     window.cardbytePrewarm = _prefetchSignature;
 }
@@ -412,13 +436,13 @@ async function _applySignatureCore(item, mailbox) {
 
     console.log(`[CardByte] _applySignatureCore — composeType: ${composeType}`);
 
-    // 1. In-memory (fastest — set by prefetch or prior compose)
+    // 1. In-memory (fastest — no fetch needed, skip notification)
     let signature = COMPOSE_TIME_SIGNATURE;
     if (signature) {
         console.log("[CardByte] ✅ Compose: using in-memory COMPOSE_TIME_SIGNATURE");
     }
 
-    // 2. Session cache
+    // 2. Session cache (also fast — skip notification)
     if (!signature) {
         signature = getCachedSignature();
         if (signature) {
@@ -427,9 +451,11 @@ async function _applySignatureCore(item, mailbox) {
         }
     }
 
-    // 3. Server fetch — uses _fetchSignatureOnce so if prefetch is already
-    //    in-flight, this waits on that promise instead of firing a new request.
+    // 3. Server fetch — show "loading" notification, then update on completion
     if (!signature && userEmail) {
+        showNotification(item, "CardByte: Loading your email signature…");
+        console.log("[CardByte] 🔔 Notification: loading signature from server");
+
         const MAX_RETRIES = 2;
         let attempt = 0;
         let lastError = null;
@@ -440,7 +466,6 @@ async function _applySignatureCore(item, mailbox) {
                     console.warn(`[CardByte] Retrying fetch (attempt ${attempt}/${MAX_RETRIES})...`);
                     await new Promise(r => setTimeout(r, 1000 * attempt));
                 }
-                // ↓ _fetchSignatureOnce: waits on prefetch if in-flight, else starts new fetch
                 const result = await _fetchSignatureOnce(userEmail);
                 if (result != null) {
                     signature = result;
@@ -459,6 +484,7 @@ async function _applySignatureCore(item, mailbox) {
             setCachedSignature(signature);
         } else {
             console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed:`, lastError);
+            showNotification(item, "CardByte: Could not load signature — sending without one.", "errorMessage");
         }
     }
 
@@ -472,7 +498,7 @@ async function _applySignatureCore(item, mailbox) {
         }
     }
 
-    // 5. Minimal identity fallback (not stored — send-time won't re-apply it)
+    // 5. Minimal identity fallback
     if (!signature) {
         console.warn("[CardByte] No signature available — using fallback identity signature.");
         signature = `
@@ -491,6 +517,20 @@ async function _applySignatureCore(item, mailbox) {
     const finalSignature = _wrapSignature(signature);
     console.log(`[CardByte] Applying signature for composeType: ${composeType}`);
     await bodySetSignatureAsync(item, finalSignature);
+
+    // ── Update notification: success (auto-dismiss after 4 seconds) ──────────
+    // Only show success notification if we had shown a loading one (i.e. fetch path).
+    // For cache/in-memory hits the bar stays silent — no noise for fast paths.
+    // We check by seeing if a notification was pending (the errorMessage case
+    // above already replaced it, so this only fires on the happy path).
+    const wasLoadingShown = !COMPOSE_TIME_SIGNATURE || !getCachedSignature();
+    // Simpler: always update on success so the bar is accurate if it was shown.
+    showNotification(item, "CardByte: Signature applied ✓", "informationalMessage", false);
+    console.log("[CardByte] 🔔 Notification: signature applied");
+
+    // Auto-remove the success message after 4 seconds to keep the UI clean
+    setTimeout(() => removeNotification(item), 4000);
+
     logTiming(`_applySignatureCore (${composeType}) total`, t0);
 }
 
@@ -509,13 +549,11 @@ async function _onSendCore(item, mailbox) {
 
     console.log("[CardByte] ⚠️ onSend: signature missing — attempting recovery (no API calls).");
 
-    // 1. In-memory
     let signature = COMPOSE_TIME_SIGNATURE;
     if (signature) {
         console.log("[CardByte] ✅ onSend: recovered from COMPOSE_TIME_SIGNATURE (in-memory).");
     }
 
-    // 2. localStorage (skip session + TTL — may be different iframe context)
     if (!signature) {
         signature = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (signature) {
@@ -523,7 +561,6 @@ async function _onSendCore(item, mailbox) {
         }
     }
 
-    // 3. Nothing — let mail go as-is
     if (!signature) {
         console.warn("[CardByte] ⚠️ onSend: no signature found — sending without signature.");
         logTiming("_onSendCore (no signature — sending as-is)", t0);
@@ -552,6 +589,9 @@ const applySignature = async function (event = { completed: () => { } }) {
         await _applySignatureCore(item, mailbox);
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
+        // Show error notification if something unexpected blew up
+        showNotification(item, "CardByte: Failed to apply signature.", "errorMessage");
+        setTimeout(() => removeNotification(item), 5000);
     } finally {
         logTiming(`applySignature handler (${composeType})`, t0);
         event.completed();
@@ -593,17 +633,23 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
             return;
         }
 
-        // Wipe everything for the new account
         COMPOSE_TIME_SIGNATURE = null;
-        _fetchInFlight = null; // also cancel any in-flight fetch for old account
+        _fetchInFlight = null;
         localStorage.removeItem(CACHE_KEY);
         localStorage.removeItem(CACHE_SESSION_KEY);
         localStorage.removeItem(CACHE_TIMESTAMP_KEY);
         console.log("[CardByte] onFromChangedHandler: in-memory + localStorage + in-flight lock cleared");
 
+        // Notify that signature is being reloaded for the new account
+        showNotification(item, "CardByte: Switching signature for new account…");
+        console.log("[CardByte] 🔔 Notification: reloading signature for account switch");
+
         await _applySignatureCore(item, mailbox);
+        // _applySignatureCore will update the notification to "applied ✓" internally
     } catch (err) {
         console.error("[CardByte] Error in onFromChangedHandler:", err);
+        showNotification(item, "CardByte: Failed to reload signature.", "errorMessage");
+        setTimeout(() => removeNotification(item), 5000);
     } finally {
         logTiming("onFromChangedHandler total", t0);
         event.completed();
