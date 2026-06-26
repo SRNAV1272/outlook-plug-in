@@ -2,12 +2,22 @@ let CACHED_SIGNATURE_HTML = null;
 const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
+
 // ─── Session-based cache buster ───────────────────────────────────────────────
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// ─── In-memory signature store (set at compose time, read at send time) ───────
+let COMPOSE_TIME_SIGNATURE = null;
+
+// ─── Timing logger ────────────────────────────────────────────────────────────
+function logTiming(label, startMs) {
+    const elapsed = Date.now() - startMs;
+    console.log(`[CardByte] ⏱ ${label}: ${elapsed}ms`);
+}
 
 function getOrCreateSessionId() {
     let sid = sessionStorage.getItem(SESSION_KEY);
@@ -18,14 +28,13 @@ function getOrCreateSessionId() {
     return sid;
 }
 
-// FIX: Added skipSessionCheck option so onSendHandler (which runs in a separate
-// iframe/JS context with a fresh sessionStorage) can still read the cached
-// signature that was stored by applySignature in the compose iframe.
-
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-    // If skipping session check, just return whatever is in cache directly
+    const t0 = Date.now();
+
     if (skipSessionCheck) {
-        return localStorage.getItem(CACHE_KEY);
+        const val = localStorage.getItem(CACHE_KEY);
+        logTiming("getCachedSignature (skipSessionCheck)", t0);
+        return val;
     }
 
     const currentSid = getOrCreateSessionId();
@@ -36,6 +45,7 @@ function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) 
         localStorage.removeItem(CACHE_KEY);
         localStorage.removeItem(CACHE_SESSION_KEY);
         localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+        logTiming("getCachedSignature (session mismatch — cleared)", t0);
         return null;
     }
 
@@ -46,20 +56,27 @@ function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) 
             localStorage.removeItem(CACHE_KEY);
             localStorage.removeItem(CACHE_SESSION_KEY);
             localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+            logTiming("getCachedSignature (TTL expired — cleared)", t0);
             return null;
         }
     }
 
-    return localStorage.getItem(CACHE_KEY);
+    const val = localStorage.getItem(CACHE_KEY);
+    logTiming("getCachedSignature (hit)", t0);
+    return val;
 }
 
 function setCachedSignature(html) {
+    const t0 = Date.now();
     const currentSid = getOrCreateSessionId();
     try {
         localStorage.setItem(CACHE_KEY, html);
         localStorage.setItem(CACHE_SESSION_KEY, currentSid);
         localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now().toString());
-    } catch (_) { }
+        logTiming("setCachedSignature", t0);
+    } catch (_) {
+        logTiming("setCachedSignature (failed — likely quota)", t0);
+    }
 }
 
 const MAX_SAFE_HTML_SIZE = 500_000;
@@ -73,39 +90,26 @@ function detectPlatform() {
 
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
-
     if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android"))
         return ua.includes("android") ? "mobile-android" : "mobile-ios";
-
     if (
         (platform === "officeonline" || platform === "web" || platform === "") &&
         (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
     ) return ua.includes("android") ? "mobile-android" : "mobile-ios";
-
     if (platform === "mac") return "mac";
-
     if (
         (platform === "" || platform === "desktop") &&
         (ua.includes("macintosh") || ua.includes("mac os x")) &&
-        !ua.includes("iphone") &&
-        !ua.includes("ipad")
+        !ua.includes("iphone") && !ua.includes("ipad")
     ) return "mac";
-
     if (platform === "officeonline" || platform === "web" || platform === "") return "owa";
     return "desktop";
 }
 
-function isMobile() {
-    const p = detectPlatform();
-    return p === "mobile-ios" || p === "mobile-android";
-}
-
+function isMobile() { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; }
 function isOWA() { return detectPlatform() === "owa"; }
 function isMac() { return detectPlatform() === "mac"; }
-
-function getMaxHtmlSize() {
-    return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
-}
+function getMaxHtmlSize() { return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE; }
 
 Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
@@ -181,11 +185,13 @@ async function encryptEmail(email = "") {
 }
 
 async function renderSignatureOnServer(user) {
+    const t0 = Date.now();
     const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
     try {
         const encryptedMail = await encryptEmail(user);
+        console.log(`[CardByte] 🌐 API call started — primary renderer`);
         const primaryRes = await fetch(
             "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
@@ -193,22 +199,28 @@ async function renderSignatureOnServer(user) {
         if (primaryRes.ok) {
             const data = await primaryRes.text();
             const decryptedData = await handleAesDecrypt(data);
-            console.log("Using NEW renderer");
+            logTiming("API call — primary renderer (success)", t0);
+            console.log("[CardByte] Using NEW renderer");
             return JSON.parse(decryptedData)?.html || null;
         }
+        logTiming("API call — primary renderer (non-ok response)", t0);
         console.warn("Primary failed. Falling back to legacy...");
     } catch (err) {
+        logTiming("API call — primary renderer (crashed)", t0);
         console.warn("Primary crashed. Falling back to legacy...", err);
     }
 
     try {
+        const t1 = Date.now();
+        console.log(`[CardByte] 🌐 API call started — legacy renderer`);
         const legacyRes = await fetch(
             "https://enterprise.cardbyte.ai/render-signature",
             { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
         );
         if (!legacyRes.ok) throw new Error("Legacy renderer failed");
         const legacyData = await legacyRes.json();
-        console.log("Using LEGACY renderer", legacyData);
+        logTiming("API call — legacy renderer (success)", t1);
+        console.log("[CardByte] Using LEGACY renderer", legacyData);
         return legacyData?.finalHtml || null;
     } catch (legacyError) {
         console.error("Both primary and legacy failed:", legacyError);
@@ -226,7 +238,6 @@ function withTimeout(promise, ms) {
     ]);
 }
 
-// ─── Check if signature already present in body ───────────────────────────────
 function getBodyText(item) {
     return new Promise((resolve) => {
         item.body.getAsync(Office.CoercionType.Html, (result) => {
@@ -236,38 +247,46 @@ function getBodyText(item) {
     });
 }
 
-const SIGNATURE_SENTINEL = "cardbyte-sig";   // a string present in every CardByte signature
+const SIGNATURE_SENTINEL = "cardbyte-sig";
 
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
-        if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
+        if (typeof item.body.setSignatureAsync !== "function") {
+            reject(new Error("setSignatureAsync not available"));
+            return;
+        }
+        const t0 = Date.now();
         item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") resolve(); else reject(r.error);
+            logTiming("setSignatureAsync", t0);
+            if (r.status === "succeeded") resolve();
+            else reject(r.error);
         });
     });
 }
 
-function moveCursorToTop(item) {
-    return new Promise((resolve) => {
-        try {
-            if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-            item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-            });
-        } catch { resolve(); }
-    });
-}
-
-// FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
-// sessionStorage) can still read the signature cached by the compose iframe.
-async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}) {
+// ─── Compose-time: fetch → store in memory + cache → apply ───────────────────
+async function _applySignatureCore(item, mailbox) {
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
 
-    let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
+    // 1. Try in-memory first (fastest — same JS context)
+    let signature = COMPOSE_TIME_SIGNATURE;
+    if (signature) {
+        console.log("[CardByte] ✅ Compose: using in-memory COMPOSE_TIME_SIGNATURE");
+    }
 
-    if (fetchIfMissing && userEmail && fetched == null) {
+    // 2. Try session cache
+    if (!signature) {
+        const t0 = Date.now();
+        signature = getCachedSignature();          // logTiming inside getCachedSignature
+        if (signature) {
+            console.log("[CardByte] ✅ Compose: cache hit");
+            COMPOSE_TIME_SIGNATURE = signature;   // warm the in-memory store
+        }
+    }
+
+    // 3. Fetch from server (with retries)
+    if (!signature && userEmail) {
         const MAX_RETRIES = 2;
         let attempt = 0;
         let lastError = null;
@@ -276,13 +295,11 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             try {
                 if (attempt > 0) {
                     console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, then 2s
+                    await new Promise(r => setTimeout(r, 1000 * attempt));
                 }
-                const result = await renderSignatureOnServer(userEmail);
+                const result = await renderSignatureOnServer(userEmail); // timing inside
                 if (result != null) {
-                    fetched = result;
-                    CACHED_SIGNATURE_HTML = fetched;
-                    setCachedSignature(fetched);
+                    signature = result;
                     break;
                 }
                 lastError = new Error("Server returned null");
@@ -293,60 +310,98 @@ async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skip
             attempt++;
         }
 
-        if (fetched != null) {
-            CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);  // ← store compressed, not raw
-        }
-
-        if (fetched == null) {
+        if (signature) {
+            COMPOSE_TIME_SIGNATURE = signature;   // store for send-time use
+            setCachedSignature(signature);        // logTiming inside setCachedSignature
+        } else {
             console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
         }
     }
 
-    // FIX: If signature is still null (server down, cache miss, no email, etc.)
-    // fall back to a minimal identity signature instead of inserting "null".
-    // Fallback only if everything above — fresh fetch, retries — all came up empty
-    if (!fetched) {
-        // Last-ditch: try reading stale cache, bypassing both session and TTL checks
+    // 4. Last-ditch stale cache (bypasses session + TTL)
+    if (!signature) {
+        const t0 = Date.now();
         const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+        logTiming("getCachedSignature (stale fallback)", t0);
         if (staleCache) {
-            console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
-            fetched = staleCache;
-        } else {
-            console.warn("[CardByte] No signature available — using fallback identity signature.");
-            fetched = `
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                  <tr>
-                    <td style="font-family:Arial,sans-serif;font-size:12px;">
-                      <strong>${userProfile.displayName || ""}</strong><br/>
-                      ${userProfile.emailAddress || ""}<br/>
-                      <span style="color:#999;">Sent via CardByte</span>
-                    </td>
-                  </tr>
-                </table>
-            `;
+            console.warn("[CardByte] Using stale cached signature as last resort.");
+            signature = staleCache;
+            COMPOSE_TIME_SIGNATURE = signature;
         }
     }
 
-    let finalSignature = `<div style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
+    // 5. Minimal identity fallback
+    if (!signature) {
+        console.warn("[CardByte] No signature available — using fallback identity signature.");
+        signature = `
+            <table cellpadding="0" cellspacing="0" border="0" width="400">
+              <tr>
+                <td style="font-family:Arial,sans-serif;font-size:12px;">
+                  <strong>${userProfile.displayName || ""}</strong><br/>
+                  ${userProfile.emailAddress || ""}<br/>
+                  <span style="color:#999;">Sent via CardByte</span>
+                </td>
+              </tr>
+            </table>
+        `;
+        // Do NOT store the fallback in COMPOSE_TIME_SIGNATURE — so send-time
+        // knows there was no real signature and skips re-applying it.
+    }
 
-    console.log("[CardByte] ════════════════════════════════════",
-        fetched ? "Applying signature" : "No cached signature, will fetch from server",
-        finalSignature, item?.body
-    );
-
-    await bodySetSignatureAsync(item, finalSignature);
-    // await moveCursorToTop(item);
+    const finalSignature = `<div style='margin-top:40px'></div>${signature}<div style='margin-top:40px'></div>`;
+    console.log("[CardByte] Applying signature at compose time...");
+    await bodySetSignatureAsync(item, finalSignature); // timing inside
 }
 
-const applySignature = async function (event = { completed: () => { } }, options = {}) {
+// ─── Send-time: NO API calls — in-memory → cache → allow send ────────────────
+async function _onSendCore(item, mailbox) {
+    console.log("[CardByte] ── onSend: checking if signature is already in body...");
+    const t0 = Date.now();
+    const bodyHtml = await getBodyText(item);
+    logTiming("getBodyText", t0);
+
+    if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
+        console.log("[CardByte] ✅ onSend: signature already present — nothing to do.");
+        return;
+    }
+
+    console.log("[CardByte] ⚠️ onSend: signature missing — attempting recovery (no API calls).");
+
+    // 1. In-memory variable set at compose time
+    let signature = COMPOSE_TIME_SIGNATURE;
+    if (signature) {
+        console.log("[CardByte] ✅ onSend: recovered from COMPOSE_TIME_SIGNATURE (in-memory).");
+    }
+
+    // 2. localStorage cache (skip session + TTL — different context)
+    if (!signature) {
+        const t1 = Date.now();
+        signature = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+        // logTiming already inside getCachedSignature
+        if (signature) {
+            console.log("[CardByte] ✅ onSend: recovered from localStorage cache.");
+        }
+    }
+
+    // 3. Nothing available — let the mail go as-is
+    if (!signature) {
+        console.warn("[CardByte] ⚠️ onSend: no signature found in memory or cache — sending without signature.");
+        return;
+    }
+
+    const finalSignature = `<div style='margin-top:40px'></div>${signature}<div style='margin-top:40px'></div>`;
+    await bodySetSignatureAsync(item, finalSignature); // timing inside
+    console.log("[CardByte] ✅ onSend: signature re-applied successfully.");
+}
+
+// ─── Public event handlers ────────────────────────────────────────────────────
+const applySignature = async function (event = { completed: () => { } }) {
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
     try {
         if (!item) return;
-        // compose iframe — normal session check applies
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
+        await _applySignatureCore(item, mailbox);
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
     } finally {
@@ -362,38 +417,13 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) { done(true); return; }
-
-        await withTimeout(_onSendCore(item, mailbox), 4000);   // 4s budget (1s before Outlook's limit)
-
+        await withTimeout(_onSendCore(item, mailbox), 4000);
     } catch (err) {
-        // Timeout or any error — let the mail go, don't block the user
         console.warn("[CardByte] onSendHandler error/timeout — allowing send:", err.message);
     } finally {
         done(true);
     }
 };
-
-async function _onSendCore(item, mailbox) {
-    // 1. Check if signature is already in the body (fast path — avoids setSignatureAsync)
-    const bodyHtml = await getBodyText(item);
-    if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
-        console.log("[CardByte] Signature already present — skipping re-apply on send.");
-        return;
-    }
-
-    // 2. Signature is missing — try to apply from cache (no fetch, no retries)
-    const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-    if (!cached) {
-        console.warn("[CardByte] No cached signature available on send — allowing send without signature.");
-        return;
-    }
-
-    await _applySignatureCore(item, mailbox, {
-        fetchIfMissing: false,
-        skipTtl: true,
-        skipSessionCheck: true
-    });
-}
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("onSendHandler", onSendHandler);
