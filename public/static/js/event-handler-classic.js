@@ -6711,13 +6711,13 @@ var CONFIG = {
     DIAG_ENABLED: false
 };
 
-// ─── In-memory signature store (set at compose time, read at send time) ───────
-//
-// Classic Outlook JS runtime is persistent (not torn down between events),
-// so this variable survives from applySignature → onSendHandler reliably.
-// NOT set for the identity fallback so send-time knows there was no real sig.
+// ─── In-memory signature store ────────────────────────────────────────────────
 
 var COMPOSE_TIME_SIGNATURE = null;
+
+// ─── Notification key ─────────────────────────────────────────────────────────
+
+var NOTIF_KEY = "cardbyte_sig_status";
 
 // ─── Timing logger ────────────────────────────────────────────────────────────
 
@@ -6769,6 +6769,65 @@ var _diag = (function () {
         html: buildHtmlBlock
     };
 })();
+
+// ─── Notification helpers ─────────────────────────────────────────────────────
+//
+// notificationMessages is supported in Classic Outlook via Mailbox 1.3+.
+// We use replaceAsync first so the same NOTIF_KEY is always reused in-place
+// (avoids stacking duplicate bars). If the key doesn't exist yet, replaceAsync
+// fails and we fall through to addAsync.
+//
+// type values:  "informationalMessage" | "errorMessage"
+// persistent:   false = auto-dismissable by Outlook; true = user must close
+//
+// All callbacks are fire-and-forget — Classic event handlers must not
+// block on notification results.
+
+function showNotification(item, message, type, persistent) {
+    if (!item) return;
+    if (!item.notificationMessages ||
+        typeof item.notificationMessages.replaceAsync !== "function") return;
+
+    type = type || "informationalMessage";
+    persistent = persistent === true; // default false
+
+    var details = {
+        type: type,
+        message: message,
+        icon: "none",
+        persistent: persistent
+    };
+
+    item.notificationMessages.replaceAsync(NOTIF_KEY, details, function (result) {
+        if (result.status !== Office.AsyncResultStatus.Succeeded) {
+            // Key did not exist yet — add it fresh
+            if (typeof item.notificationMessages.addAsync === "function") {
+                item.notificationMessages.addAsync(NOTIF_KEY, details, function (r) {
+                    if (r.status !== Office.AsyncResultStatus.Succeeded) {
+                        _diag.warn("showNotification addAsync failed: "
+                            + (r.error && r.error.message));
+                    }
+                });
+            }
+        }
+    });
+}
+
+function removeNotification(item) {
+    if (!item) return;
+    if (!item.notificationMessages ||
+        typeof item.notificationMessages.removeAsync !== "function") return;
+
+    item.notificationMessages.removeAsync(NOTIF_KEY, function () { /* fire-and-forget */ });
+}
+
+// ─── Auto-dismiss helper ──────────────────────────────────────────────────────
+// Removes the notification bar after `delayMs`. Used for success toasts so
+// the bar doesn't linger after the signature is already written.
+
+function removeNotificationAfter(item, delayMs) {
+    setTimeout(function () { removeNotification(item); }, delayMs);
+}
 
 // ─── Encryption (CryptoJS AES-CBC) ────────────────────────────────────────────
 
@@ -6828,7 +6887,6 @@ function cacheGet(cb) {
     var t0 = Date.now();
 
     try {
-        // 1. Runtime memory cache
         var memEntry = _memCache[CONFIG.CACHE_KEY];
         if (memEntry && memEntry.html && memEntry.hash) {
             var memHash = CryptoJS.SHA256(memEntry.html).toString();
@@ -6841,7 +6899,6 @@ function cacheGet(cb) {
             _diag.warn("cacheGet: memory hash mismatch");
         }
 
-        // 2. OfficeRuntime.storage
         OfficeRuntime.storage.getItem(CONFIG.CACHE_KEY).then(
             function (raw) {
                 if (!raw) {
@@ -6912,7 +6969,7 @@ function cacheSet(html, cb) {
             hash: CryptoJS.SHA256(html).toString()
         };
 
-        _memCache[CONFIG.CACHE_KEY] = entry; // fast runtime cache
+        _memCache[CONFIG.CACHE_KEY] = entry;
 
         OfficeRuntime.storage.setItem(CONFIG.CACHE_KEY, JSON.stringify(entry)).then(
             function () {
@@ -6935,7 +6992,7 @@ function cacheSet(html, cb) {
 
 function cacheClear(cb) {
     delete _memCache[CONFIG.CACHE_KEY];
-    COMPOSE_TIME_SIGNATURE = null; // also wipe in-memory store on account switch
+    COMPOSE_TIME_SIGNATURE = null;
     OfficeRuntime.storage.removeItem(CONFIG.CACHE_KEY).then(
         function () {
             _diag.info("cacheClear: OfficeRuntime storage cleared");
@@ -7168,57 +7225,116 @@ function fetchSignature(onSuccess, onError) {
 }
 
 // ─── Compose-time core: fetch → store in memory + cache → write ───────────────
+//
+// Notification lifecycle (only when a live fetch is needed — cache/memory hits
+// are silent so repeat compose windows produce no noise):
+//
+//   API call starts  →  "Loading signature…"
+//   Response arrives →  "Signature fetched successfully."
+//   setSignatureAsync→  "Applying signature…"
+//   Write complete   →  "Signature applied ✓"  (auto-dismissed after 4 s)
+//
+//   Fetch fails + no cache anywhere:
+//                    →  "Signature not found. Please contact your admin."
+//                       (persistent errorMessage — user must dismiss)
 
 function applySignatureCore(item, guardedEvent) {
-    _diag.info("applySignatureCore — attempting backend fetch");
+    _diag.info("applySignatureCore — start");
 
-    fetchSignature(
-        // ── SUCCESS ──────────────────────────────────────────────────────────
-        function (html) {
-            // Store in module-level variable for send-time use
-            COMPOSE_TIME_SIGNATURE = html;
-            _diag.info("applySignatureCore: COMPOSE_TIME_SIGNATURE set (" + html.length + " chars)");
+    // ── Phase 1: In-memory — silent fast path ─────────────────────────────────
+    if (COMPOSE_TIME_SIGNATURE) {
+        _diag.info("applySignatureCore: Phase 1 — using COMPOSE_TIME_SIGNATURE (silent)");
+        _writeAndComplete(item, COMPOSE_TIME_SIGNATURE, false, guardedEvent);
+        return;
+    }
 
-            cacheSet(html, function () {
-                _diag.info("applySignatureCore: cache persisted");
-                writeSignature(item, _wrapSignature(html), function (ok) {
-                    if (!ok) _diag.warn("Fetched signature write failed");
-                    writeDiagnostics(item, function () { guardedEvent.completed(); });
-                });
-            });
-        },
-
-        // ── FAILURE ──────────────────────────────────────────────────────────
-        function (reason) {
-            _diag.warn("Backend failed (" + reason + ") — checking in-memory store");
-
-            // 1. In-memory (may already be set from a prior compose in same session)
-            if (COMPOSE_TIME_SIGNATURE) {
-                _diag.info("applySignatureCore: using COMPOSE_TIME_SIGNATURE after fetch failure");
-                writeSignature(item, _wrapSignature(COMPOSE_TIME_SIGNATURE), function (ok) {
-                    if (!ok) _diag.warn("In-memory signature write failed");
-                    writeDiagnostics(item, function () { guardedEvent.completed(); });
-                });
-                return;
-            }
-
-            // 2. OfficeRuntime cache
-            _diag.warn("applySignatureCore: no in-memory store — falling back to cache");
-            cacheGet(function (cachedHtml) {
-                if (cachedHtml) {
-                    COMPOSE_TIME_SIGNATURE = cachedHtml; // warm the store for send-time
-                    _diag.info("applySignatureCore: using cached signature");
-                    writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
-                        if (!ok) _diag.warn("Cached signature write failed");
-                        writeDiagnostics(item, function () { guardedEvent.completed(); });
-                    });
-                } else {
-                    _diag.error("Backend miss + cache miss — no signature to write");
-                    writeDiagnostics(item, function () { guardedEvent.completed(); });
-                }
-            });
+    // ── Phase 2: OfficeRuntime cache — silent fast path ───────────────────────
+    _diag.info("applySignatureCore: Phase 2 — checking OfficeRuntime cache");
+    cacheGet(function (cachedHtml) {
+        if (cachedHtml) {
+            _diag.info("applySignatureCore: Phase 2 hit — using cached signature (silent)");
+            COMPOSE_TIME_SIGNATURE = cachedHtml;
+            _writeAndComplete(item, cachedHtml, false, guardedEvent);
+            return;
         }
-    );
+
+        // ── Phase 3: Server fetch — full notification lifecycle ───────────────
+        _diag.info("applySignatureCore: Phase 3 — fetching from server");
+
+        // 3a. API call starting
+        showNotification(item, "CardByte: Loading signature\u2026");
+        _diag.info("Notification \u2192 Loading signature\u2026");
+
+        fetchSignature(
+            // 3b. Response received successfully
+            function (html) {
+                showNotification(item, "CardByte: Signature fetched successfully.");
+                _diag.info("Notification \u2192 Signature fetched successfully.");
+
+                COMPOSE_TIME_SIGNATURE = html;
+                cacheSet(html, function () {
+                    _diag.info("applySignatureCore: cache persisted");
+                    _writeAndComplete(item, html, true, guardedEvent);
+                });
+            },
+
+            // 3c. Fetch failed — no cache available either
+            function (reason) {
+                _diag.warn("applySignatureCore: fetch failed (" + reason + ") — no cache — aborting");
+
+                // Persistent error: user must dismiss
+                showNotification(
+                    item,
+                    "CardByte: Signature not found. Please contact your admin.",
+                    "errorMessage",
+                    true
+                );
+                _diag.info("Notification \u2192 Signature not found. Please contact your admin.");
+
+                writeDiagnostics(item, function () { guardedEvent.completed(); });
+            }
+        );
+    });
+}
+
+// ─── Shared write + complete helper ──────────────────────────────────────────
+//
+// showApplyingNotif = true  →  show "Applying…" before write, "Applied ✓" after
+// showApplyingNotif = false →  silent (in-memory / cache fast paths)
+
+function _writeAndComplete(item, html, showApplyingNotif, guardedEvent) {
+    if (showApplyingNotif) {
+        // Phase 6: about to call setSignatureAsync / prependAsync
+        showNotification(item, "CardByte: Applying signature\u2026");
+        _diag.info("Notification \u2192 Applying signature\u2026");
+    }
+
+    writeSignature(item, _wrapSignature(html), function (ok) {
+        if (!ok) {
+            _diag.warn("_writeAndComplete: writeSignature failed");
+        }
+
+        if (showApplyingNotif) {
+            if (ok) {
+                // Phase 7: write succeeded
+                showNotification(item, "CardByte: Signature applied \u2713");
+                _diag.info("Notification \u2192 Signature applied \u2713");
+                removeNotificationAfter(item, 4000);
+            } else {
+                // Write unexpectedly failed after a successful fetch
+                showNotification(
+                    item,
+                    "CardByte: Failed to apply signature.",
+                    "errorMessage",
+                    false
+                );
+                _diag.info("Notification \u2192 Failed to apply signature.");
+                removeNotificationAfter(item, 5000);
+            }
+        }
+
+        writeDiagnostics(item, function () { guardedEvent.completed(); });
+    });
 }
 
 // ─── Send-time core: NO fetch — in-memory → cache → allow send ───────────────
@@ -7226,7 +7342,6 @@ function applySignatureCore(item, guardedEvent) {
 function onSendCore(item, guardedEvent) {
     _diag.info("onSendCore — checking body for existing signature");
 
-    // 1. Fast path: sentinel already in body
     bodyAlreadyHasSignature(item, function (alreadyPresent) {
         if (alreadyPresent) {
             _diag.info("onSendCore: signature present — fast pass-through");
@@ -7236,31 +7351,28 @@ function onSendCore(item, guardedEvent) {
 
         _diag.warn("onSendCore: signature missing — attempting recovery (no API calls)");
 
-        // 2. In-memory variable set at compose time
         if (COMPOSE_TIME_SIGNATURE) {
-            _diag.info("onSendCore: ✅ recovered from COMPOSE_TIME_SIGNATURE ("
-                + COMPOSE_TIME_SIGNATURE.length + " chars)");
+            _diag.info("onSendCore: recovered from COMPOSE_TIME_SIGNATURE");
             writeSignature(item, _wrapSignature(COMPOSE_TIME_SIGNATURE), function (ok) {
                 if (!ok) _diag.warn("onSendCore: in-memory signature write failed");
-                else _diag.info("onSendCore: ✅ signature re-applied from memory");
+                else _diag.info("onSendCore: signature re-applied from memory");
                 guardedEvent.completed({ allowEvent: true });
             });
             return;
         }
 
-        // 3. OfficeRuntime cache (no fetch, no retries)
         _diag.warn("onSendCore: COMPOSE_TIME_SIGNATURE empty — checking cache");
         cacheGet(function (cachedHtml) {
             if (!cachedHtml) {
-                _diag.warn("onSendCore: ⚠️ cache miss — sending without signature");
+                _diag.warn("onSendCore: cache miss — sending without signature");
                 guardedEvent.completed({ allowEvent: true });
                 return;
             }
 
-            _diag.info("onSendCore: ✅ recovered from cache (" + cachedHtml.length + " chars)");
+            _diag.info("onSendCore: recovered from cache");
             writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
                 if (!ok) _diag.warn("onSendCore: cache signature write failed");
-                else _diag.info("onSendCore: ✅ signature re-applied from cache");
+                else _diag.info("onSendCore: signature re-applied from cache");
                 guardedEvent.completed({ allowEvent: true });
             });
         });
@@ -7342,7 +7454,10 @@ function onFromChangedHandler(event) {
     var item = _safeGetItem();
     if (!item) { guarded.completed(); return; }
 
-    // Wipe both stores on account switch so the new account's sig is fetched fresh
+    // Show account-switch notification before clearing and re-fetching
+    showNotification(item, "CardByte: Switching signature for new account\u2026");
+    _diag.info("Notification \u2192 Switching signature for new account\u2026");
+
     cacheClear(function () {
         applySignatureCore(item, guarded);
     });
