@@ -577,57 +577,65 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     const item = mailbox?.item;
 
     console.log("[CardByte] === onSendHandler fired ===");
-
-    // ── Guard: prevents Outlook's "add-in is taking too long" error dialog.
-    //
-    // DESIGN: the guard and _onSendCore race via a single `done` flag.
-    // Whichever finishes first calls event.completed() exactly once.
-    //
-    // If _onSendCore finishes first  → guard timer is cancelled, write is done.
-    // If guard fires first (8 s)     → event.completed() is called to satisfy
-    //   Outlook, but _onSendCore continues running in the background.
-    //   setSignatureAsync/getAsync are Office.js async operations that survive
-    //   the event.completed() call for a short window, so the write usually
-    //   still lands. This is best-effort at that point — acceptable because
-    //   the signature was already present at compose time in the normal flow.
-    //
-    // The guard timeout is 8 s (Outlook's hard limit is ~10 s).
-    // Normal flow (sentinel present) takes ~200–500 ms — guard never fires.
-    // Recovery flow (write needed) takes ~500–2000 ms — guard never fires.
-    // Only a pathological hang (Office.js runtime stall) reaches 8 s.
-
-    let done = false;
-    let guardTimer = null;
-
-    const complete = () => {
-        if (done) return;
-        done = true;
-        if (guardTimer) { clearTimeout(guardTimer); guardTimer = null; }
-        logTiming("onSendHandler total", t0);
-        event.completed({ allowEvent: true });
-    };
-
-    // Start the guard — only fires if _onSendCore hangs
-    guardTimer = setTimeout(() => {
-        if (done) return;
-        console.warn("[CardByte] onSendHandler: guard timeout (8 s) — forcing event.completed()."
-            + " Write may still be in-flight.");
-        complete();
-    }, 8000);
+    console.log(`[CardByte] Platform: ${detectPlatform()}, item present: ${!!item}, COMPOSE_TIME_SIGNATURE present: ${!!COMPOSE_TIME_SIGNATURE}`);
 
     try {
-        // if (!item) {
-        //     console.warn("[CardByte] onSendHandler: no item.");
-        //     complete();
-        //     return;
-        // }
-        await _onSendCore(item);
+
+        showNotification(item, "CardByte: Verifying signature on send…");
+
+        if (isMac()) {
+            // ── Mac: use a simple timeout race (matches v1 behaviour).
+            // The 8s guard pattern causes issues on Mac — withTimeout resolves
+            // the promise chain cleanly and lets Office.js finish the write.
+            try {
+                await withTimeout(_onSendCore(item), 4000);
+                showNotification(item, "CardByte: Signature verified ✓");
+                setTimeout(() => removeNotification(item), 3000);
+            } catch (err) {
+                console.warn("[CardByte] onSendHandler (Mac): timeout/error —", err.message);
+                if (item) showNotification(item, `CardByte: Send error — ${err.message}`, "errorMessage");
+            } finally {
+                logTiming("onSendHandler (Mac) total", t0);
+                event.completed({ allowEvent: true });
+            }
+
+        } else {
+            // ── Windows / OWA / Desktop: 8s guard pattern
+            let done = false;
+            let guardTimer = null;
+
+            const complete = () => {
+                if (done) return;
+                done = true;
+                if (guardTimer) { clearTimeout(guardTimer); guardTimer = null; }
+                logTiming("onSendHandler (non-Mac) total", t0);
+                event.completed({ allowEvent: true });
+            };
+
+            guardTimer = setTimeout(() => {
+                if (done) return;
+                console.warn("[CardByte] onSendHandler: guard timeout (8s) — forcing event.completed().");
+                if (item) showNotification(item, "CardByte: Send guard timeout (8s) — signature write may have failed.", "errorMessage");
+                complete();
+            }, 8000);
+
+            try {
+                await _onSendCore(item);
+                showNotification(item, "CardByte: Signature verified ✓");
+                setTimeout(() => removeNotification(item), 3000);
+            } catch (err) {
+                console.warn("[CardByte] onSendHandler: unexpected error —", err.message);
+                if (item) showNotification(item, `CardByte: Send error — ${err.message}`, "errorMessage");
+            } finally {
+                complete();
+            }
+        }
+
     } catch (err) {
-        // _onSendCore is designed not to throw, but guard against anything unexpected
-        console.warn("[CardByte] onSendHandler: unexpected error —", err.message);
-    } finally {
-        // Normal path: write finished before 8 s — cancel guard and complete cleanly
-        complete();
+        // Outer catch — guards against anything unexpected before the platform split
+        console.warn("[CardByte] onSendHandler: outer error —", err.message);
+        showNotification(item, `CardByte: Send error — ${err.message}`, "errorMessage");
+        event.completed({ allowEvent: true });
     }
 };
 
