@@ -6699,7 +6699,7 @@
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 var CONFIG = {
-    XHR_URL: "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+    XHR_URL: "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
     XHR_TIMEOUT_MS: 6000,
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
