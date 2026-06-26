@@ -516,6 +516,8 @@ async function _applySignatureCore(item, mailbox) {
 // The write itself is awaited to completion — it is NEVER raced against a
 // timeout here. The timeout guard lives in onSendHandler and only fires
 // event.completed() once; if the write finishes first, the guard is cancelled.
+
+
 async function _onSendCore(item) {
     const t0 = Date.now();
     console.log("[CardByte] ── onSend: checking body for existing signature...");
@@ -528,15 +530,6 @@ async function _onSendCore(item) {
         getCachedSignature({ skipTtl: true, skipSessionCheck: true }) ||
         null;
 
-    // ── Step 2: read body to check sentinel
-    const bodyHtml = await getBodyText(item);
-
-    if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
-        console.log("[CardByte] ✅ onSend: signature already present — fast pass-through.");
-        logTiming("_onSendCore (fast pass-through)", t0);
-        return;
-    }
-
     console.log("[CardByte] ⚠️ onSend: signature missing — attempting recovery.");
 
     if (!signature) {
@@ -545,7 +538,7 @@ async function _onSendCore(item) {
         return;
     }
 
-    // ── Step 3: write — awaited to full completion, not raced
+    // ── Step 2: write — awaited to full completion, not raced
     console.log("[CardByte] ✅ onSend: writing signature from "
         + (COMPOSE_TIME_SIGNATURE ? "memory" : "localStorage cache") + ".");
     await bodySetSignatureAsync(item, _wrapSignature(signature));
