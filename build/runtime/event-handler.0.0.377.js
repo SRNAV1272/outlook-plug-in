@@ -177,9 +177,11 @@ Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
     console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
 
-    _prefetchSignature().catch((err) => {
-        console.warn("[CardByte] onReady prefetch failed silently:", err.message);
-    });
+    if (!isMac()) {
+        _prefetchSignature().catch((err) => {
+            console.warn("[CardByte] onReady prefetch failed silently:", err.message);
+        });
+    }
 });
 
 // ─── Crypto helpers ───────────────────────────────────────────────────────────
