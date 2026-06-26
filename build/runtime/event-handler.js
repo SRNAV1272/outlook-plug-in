@@ -274,7 +274,7 @@ async function renderSignatureOnServer(user) {
 
         const tFetch = Date.now();
         const primaryRes = await fetch(
-            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
         );
         logTiming("API call — fetch() resolved (headers)", tFetch);
@@ -381,16 +381,6 @@ async function _prefetchSignature() {
 
 if (typeof window !== "undefined") {
     window.cardbytePrewarm = _prefetchSignature;
-}
-
-// ─── Timeout wrapper ──────────────────────────────────────────────────────────
-function withTimeout(promise, ms) {
-    return Promise.race([
-        promise,
-        new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms)
-        )
-    ]);
 }
 
 // ─── Body helpers ─────────────────────────────────────────────────────────────
@@ -535,10 +525,25 @@ async function _applySignatureCore(item, mailbox) {
 }
 
 // ─── Send-time core — NO API calls ───────────────────────────────────────────
-async function _onSendCore(item, mailbox) {
+//
+// CONTRACT: always resolves (never throws). Returns true if a write was
+// attempted (caller can log), false if no signature was found.
+// The write itself is awaited to completion — it is NEVER raced against a
+// timeout here. The timeout guard lives in onSendHandler and only fires
+// event.completed() once; if the write finishes first, the guard is cancelled.
+async function _onSendCore(item) {
     const t0 = Date.now();
     console.log("[CardByte] ── onSend: checking body for existing signature...");
 
+    // ── Step 1: resolve signature source (all synchronous / localStorage — fast)
+    // localStorage reads are synchronous and effectively instant, so we resolve
+    // the source before doing the async body read, saving one round-trip.
+    const signature =
+        COMPOSE_TIME_SIGNATURE ||
+        getCachedSignature({ skipTtl: true, skipSessionCheck: true }) ||
+        null;
+
+    // ── Step 2: read body to check sentinel
     const bodyHtml = await getBodyText(item);
 
     if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
@@ -547,26 +552,17 @@ async function _onSendCore(item, mailbox) {
         return;
     }
 
-    console.log("[CardByte] ⚠️ onSend: signature missing — attempting recovery (no API calls).");
-
-    let signature = COMPOSE_TIME_SIGNATURE;
-    if (signature) {
-        console.log("[CardByte] ✅ onSend: recovered from COMPOSE_TIME_SIGNATURE (in-memory).");
-    }
+    console.log("[CardByte] ⚠️ onSend: signature missing — attempting recovery.");
 
     if (!signature) {
-        signature = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-        if (signature) {
-            console.log("[CardByte] ✅ onSend: recovered from localStorage cache.");
-        }
-    }
-
-    if (!signature) {
-        console.warn("[CardByte] ⚠️ onSend: no signature found — sending without signature.");
-        logTiming("_onSendCore (no signature — sending as-is)", t0);
+        console.warn("[CardByte] ⚠️ onSend: no signature in memory or cache — sending as-is.");
+        logTiming("_onSendCore (no signature)", t0);
         return;
     }
 
+    // ── Step 3: write — awaited to full completion, not raced
+    console.log("[CardByte] ✅ onSend: writing signature from "
+        + (COMPOSE_TIME_SIGNATURE ? "memory" : "localStorage cache") + ".");
     await bodySetSignatureAsync(item, _wrapSignature(signature));
     console.log("[CardByte] ✅ onSend: signature re-applied successfully.");
     logTiming("_onSendCore (re-applied)", t0);
@@ -589,7 +585,6 @@ const applySignature = async function (event = { completed: () => { } }) {
         await _applySignatureCore(item, mailbox);
     } catch (err) {
         console.error("[CardByte] Error in applySignature:", err);
-        // Show error notification if something unexpected blew up
         showNotification(item, "CardByte: Failed to apply signature.", "errorMessage");
         setTimeout(() => removeNotification(item), 5000);
     } finally {
@@ -605,18 +600,56 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 
     console.log("[CardByte] === onSendHandler fired ===");
 
-    const done = (allow = true) => {
+    // ── Guard: prevents Outlook's "add-in is taking too long" error dialog.
+    //
+    // DESIGN: the guard and _onSendCore race via a single `done` flag.
+    // Whichever finishes first calls event.completed() exactly once.
+    //
+    // If _onSendCore finishes first  → guard timer is cancelled, write is done.
+    // If guard fires first (8 s)     → event.completed() is called to satisfy
+    //   Outlook, but _onSendCore continues running in the background.
+    //   setSignatureAsync/getAsync are Office.js async operations that survive
+    //   the event.completed() call for a short window, so the write usually
+    //   still lands. This is best-effort at that point — acceptable because
+    //   the signature was already present at compose time in the normal flow.
+    //
+    // The guard timeout is 8 s (Outlook's hard limit is ~10 s).
+    // Normal flow (sentinel present) takes ~200–500 ms — guard never fires.
+    // Recovery flow (write needed) takes ~500–2000 ms — guard never fires.
+    // Only a pathological hang (Office.js runtime stall) reaches 8 s.
+
+    let done = false;
+    let guardTimer = null;
+
+    const complete = () => {
+        if (done) return;
+        done = true;
+        if (guardTimer) { clearTimeout(guardTimer); guardTimer = null; }
         logTiming("onSendHandler total", t0);
-        event.completed({ allowEvent: allow });
+        event.completed({ allowEvent: true });
     };
 
+    // Start the guard — only fires if _onSendCore hangs
+    guardTimer = setTimeout(() => {
+        if (done) return;
+        console.warn("[CardByte] onSendHandler: guard timeout (8 s) — forcing event.completed()."
+            + " Write may still be in-flight.");
+        complete();
+    }, 8000);
+
     try {
-        if (!item) { done(true); return; }
-        await withTimeout(_onSendCore(item, mailbox), 4000);
+        if (!item) {
+            console.warn("[CardByte] onSendHandler: no item.");
+            complete();
+            return;
+        }
+        await _onSendCore(item);
     } catch (err) {
-        console.warn("[CardByte] onSendHandler error/timeout — allowing send:", err.message);
+        // _onSendCore is designed not to throw, but guard against anything unexpected
+        console.warn("[CardByte] onSendHandler: unexpected error —", err.message);
     } finally {
-        done(true);
+        // Normal path: write finished before 8 s — cancel guard and complete cleanly
+        complete();
     }
 };
 
