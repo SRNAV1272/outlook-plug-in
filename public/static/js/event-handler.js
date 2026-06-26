@@ -616,11 +616,11 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     }, 8000);
 
     try {
-        if (!item) {
-            console.warn("[CardByte] onSendHandler: no item.");
-            complete();
-            return;
-        }
+        // if (!item) {
+        //     console.warn("[CardByte] onSendHandler: no item.");
+        //     complete();
+        //     return;
+        // }
         await _onSendCore(item);
     } catch (err) {
         // _onSendCore is designed not to throw, but guard against anything unexpected
