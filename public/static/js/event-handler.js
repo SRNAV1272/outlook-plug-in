@@ -134,6 +134,7 @@ function arrayBufferToBase64(buffer) {
 }
 
 async function handleAesDecrypt(encryptedText, generatedKey) {
+    const t0 = Date.now();
     try {
         if (!encryptedText) return "";
         const keyToUse = generatedKey || AES_KEY;
@@ -155,8 +156,11 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
             return encryptedText;
         }
         const decryptedBuffer = await crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBuffer }, key, encryptedBuffer);
-        return new TextDecoder().decode(decryptedBuffer);
+        const result = new TextDecoder().decode(decryptedBuffer);
+        logTiming("handleAesDecrypt (success)", t0);
+        return result;
     } catch (err) {
+        logTiming("handleAesDecrypt (error)", t0);
         if (generatedKey && generatedKey !== AES_KEY && err.message.includes("key data")) {
             try { return await handleAesDecrypt(encryptedText, AES_KEY); }
             catch (e) { console.error("Fallback also failed:", e.message); }
@@ -166,6 +170,7 @@ async function handleAesDecrypt(encryptedText, generatedKey) {
 }
 
 async function encryptEmail(email = "") {
+    const t0 = Date.now();
     try {
         if (!email || email.trim() === "") { console.warn("Warning: Empty email provided"); return ""; }
         const keyBuffer = base64ToArrayBuffer(AES_KEY);
@@ -177,8 +182,10 @@ async function encryptEmail(email = "") {
         const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
         const base64Result = arrayBufferToBase64(encrypted);
         try { atob(base64Result); } catch (e) { console.error("Result is NOT valid base64:", e); }
+        logTiming("encryptEmail (success)", t0);
         return base64Result;
     } catch (err) {
+        logTiming("encryptEmail (error)", t0);
         console.error("Encryption error:", err);
         return "";
     }
