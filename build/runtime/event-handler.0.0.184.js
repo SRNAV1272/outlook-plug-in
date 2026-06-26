@@ -10,11 +10,14 @@ const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-// ─── In-memory signature store (set at compose time, read at send time) ───────
-// Persists for the lifetime of the event-handler iframe / JS context.
-// On WebView clients (OWA, New Outlook, Mac) the context may be torn down
-// between sessions — localStorage is the durable fallback.
+// ─── In-memory signature store ────────────────────────────────────────────────
 let COMPOSE_TIME_SIGNATURE = null;
+
+// ─── In-flight fetch deduplicator ────────────────────────────────────────────
+// Shared between _prefetchSignature and _applySignatureCore.
+// If prefetch is already running when applySignature fires, the compose
+// handler waits on the same promise — zero duplicate network requests.
+let _fetchInFlight = null;
 
 // ─── Timing logger ────────────────────────────────────────────────────────────
 function logTiming(label, startMs) {
@@ -88,8 +91,6 @@ function setCachedSignature(html) {
 // ─── Platform detection ───────────────────────────────────────────────────────
 const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
-const MOBILE_MAX_IMAGE_WIDTH = 200;
-const MOBILE_IMAGE_QUALITY = 0.5;
 
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
@@ -122,21 +123,20 @@ function isMac() { return detectPlatform() === "mac"; }
 function getMaxHtmlSize() { return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE; }
 
 // ─── Compose type detection ───────────────────────────────────────────────────
-// Returns "new" | "reply" | "replyAll" | "forward" | "unknown"
 function detectComposeType(item) {
     try {
         const mode = item?.composeType;
         if (mode) {
-            // Office.MailboxEnums.ComposeType values
             if (mode === Office.MailboxEnums.ComposeType.NewMail) return "new";
             if (mode === Office.MailboxEnums.ComposeType.Reply) return "reply";
             if (mode === Office.MailboxEnums.ComposeType.ReplyAll) return "replyAll";
             if (mode === Office.MailboxEnums.ComposeType.Forward) return "forward";
-            // String fallback (some platforms return strings)
             if (typeof mode === "string") return mode.toLowerCase();
         }
+        // Fallback: inReplyTo populated = reply or forward
+        if (item?.inReplyTo) return "reply-or-forward";
     } catch (_) { }
-    return "unknown";
+    return "new"; // safest assumption when unknown
 }
 
 // ─── Office.onReady ───────────────────────────────────────────────────────────
@@ -144,8 +144,8 @@ Office.onReady(() => {
     console.log("✅ Office.onReady is Started !");
     console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
 
-    // Fire-and-forget prefetch so the signature is warm before the user
-    // opens any compose/reply/forward window.
+    // Fire-and-forget prefetch. Sets _fetchInFlight so if applySignature
+    // fires before this completes, it waits on the same promise.
     _prefetchSignature().catch((err) => {
         console.warn("[CardByte] onReady prefetch failed silently:", err.message);
     });
@@ -250,7 +250,7 @@ async function renderSignatureOnServer(user) {
 
         if (primaryRes.ok) {
             const tBody = Date.now();
-            const data = await primaryRes.arrayBuffer();        // faster than text() — skips string copy
+            const data = await primaryRes.arrayBuffer();
             logTiming("API call — response.arrayBuffer() buffering", tBody);
 
             const text = new TextDecoder().decode(data);
@@ -284,10 +284,28 @@ async function renderSignatureOnServer(user) {
     }
 }
 
+// ─── Fetch deduplicator ───────────────────────────────────────────────────────
+// Single shared promise across prefetch + applySignature.
+// Whichever fires first starts the fetch; the other awaits the same promise.
+async function _fetchSignatureOnce(userEmail) {
+    if (_fetchInFlight) {
+        console.log("[CardByte] 🔒 Fetch already in-flight — waiting on existing promise (no duplicate request)");
+        const t0 = Date.now();
+        const result = await _fetchInFlight;
+        logTiming("_fetchSignatureOnce (waited on in-flight)", t0);
+        return result;
+    }
+
+    console.log("[CardByte] 🔒 No in-flight fetch — starting new request");
+    _fetchInFlight = renderSignatureOnServer(userEmail).finally(() => {
+        _fetchInFlight = null;
+        console.log("[CardByte] 🔒 In-flight fetch settled — lock released");
+    });
+
+    return _fetchInFlight;
+}
+
 // ─── Taskpane prefetch ────────────────────────────────────────────────────────
-// Called from Office.onReady (event-handler context) AND from taskpane.js
-// via window.cardbytePrewarm(). Warms COMPOSE_TIME_SIGNATURE + localStorage
-// so OnNewMessageCompose / reply / forward all hit cache immediately.
 async function _prefetchSignature() {
     const t0 = Date.now();
     console.log("[CardByte] 🔥 Prefetch: started");
@@ -307,8 +325,8 @@ async function _prefetchSignature() {
         return;
     }
 
-    // 2. Valid cache exists — warm in-memory from it
-    const cached = getCachedSignature();           // logTiming inside
+    // 2. Valid cache exists — warm in-memory from it, no fetch needed
+    const cached = getCachedSignature();
     if (cached) {
         COMPOSE_TIME_SIGNATURE = cached;
         console.log("[CardByte] 🔥 Prefetch: cache hit — COMPOSE_TIME_SIGNATURE warmed");
@@ -316,13 +334,14 @@ async function _prefetchSignature() {
         return;
     }
 
-    // 3. Cache miss — fetch from server
+    // 3. Cache miss — fetch from server (sets _fetchInFlight so applySignature
+    //    firing concurrently will wait on this same promise, not fire a new one)
     console.log("[CardByte] 🔥 Prefetch: cache miss — fetching from server");
     try {
-        const html = await renderSignatureOnServer(userEmail); // timing inside
+        const html = await _fetchSignatureOnce(userEmail);
         if (html) {
             COMPOSE_TIME_SIGNATURE = html;
-            setCachedSignature(html);                          // timing inside
+            setCachedSignature(html);
             logTiming("Prefetch (fetch + cache set)", t0);
             console.log("[CardByte] 🔥 Prefetch: ✅ complete — signature ready");
         } else {
@@ -381,14 +400,10 @@ function bodySetSignatureAsync(item, html) {
 
 // ─── Signature wrapper ────────────────────────────────────────────────────────
 function _wrapSignature(html) {
-    // The data-cb attribute carries SIGNATURE_SENTINEL so body checks
-    // (bodyHtml.includes(SIGNATURE_SENTINEL)) work on all compose types.
     return `<div data-cb="${SIGNATURE_SENTINEL}" style="margin-top:40px;margin-bottom:40px;">${html}</div>`;
 }
 
 // ─── Compose-time core ────────────────────────────────────────────────────────
-// Handles new compose, reply, replyAll, forward — all via the same path.
-// Resolution order: in-memory → cache → server fetch (with retries) → stale cache → identity fallback
 async function _applySignatureCore(item, mailbox) {
     const t0 = Date.now();
     const userProfile = mailbox?.userProfile || {};
@@ -397,22 +412,23 @@ async function _applySignatureCore(item, mailbox) {
 
     console.log(`[CardByte] _applySignatureCore — composeType: ${composeType}`);
 
-    // 1. In-memory (fastest — same JS context, set by prefetch or prior compose)
+    // 1. In-memory (fastest — set by prefetch or prior compose)
     let signature = COMPOSE_TIME_SIGNATURE;
     if (signature) {
         console.log("[CardByte] ✅ Compose: using in-memory COMPOSE_TIME_SIGNATURE");
     }
 
-    // 2. Session cache (localStorage)
+    // 2. Session cache
     if (!signature) {
-        signature = getCachedSignature();           // logTiming inside
+        signature = getCachedSignature();
         if (signature) {
             console.log("[CardByte] ✅ Compose: cache hit");
-            COMPOSE_TIME_SIGNATURE = signature;    // warm in-memory for send-time
+            COMPOSE_TIME_SIGNATURE = signature;
         }
     }
 
-    // 3. Server fetch with retries (only when cache cold)
+    // 3. Server fetch — uses _fetchSignatureOnce so if prefetch is already
+    //    in-flight, this waits on that promise instead of firing a new request.
     if (!signature && userEmail) {
         const MAX_RETRIES = 2;
         let attempt = 0;
@@ -424,7 +440,8 @@ async function _applySignatureCore(item, mailbox) {
                     console.warn(`[CardByte] Retrying fetch (attempt ${attempt}/${MAX_RETRIES})...`);
                     await new Promise(r => setTimeout(r, 1000 * attempt));
                 }
-                const result = await renderSignatureOnServer(userEmail); // timing inside
+                // ↓ _fetchSignatureOnce: waits on prefetch if in-flight, else starts new fetch
+                const result = await _fetchSignatureOnce(userEmail);
                 if (result != null) {
                     signature = result;
                     break;
@@ -439,7 +456,7 @@ async function _applySignatureCore(item, mailbox) {
 
         if (signature) {
             COMPOSE_TIME_SIGNATURE = signature;
-            setCachedSignature(signature);          // timing inside
+            setCachedSignature(signature);
         } else {
             console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed:`, lastError);
         }
@@ -447,7 +464,7 @@ async function _applySignatureCore(item, mailbox) {
 
     // 4. Stale cache last-ditch (bypasses session + TTL)
     if (!signature) {
-        const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true }); // timing inside
+        const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (staleCache) {
             console.warn("[CardByte] Using stale cached signature as last resort.");
             signature = staleCache;
@@ -473,17 +490,16 @@ async function _applySignatureCore(item, mailbox) {
 
     const finalSignature = _wrapSignature(signature);
     console.log(`[CardByte] Applying signature for composeType: ${composeType}`);
-    await bodySetSignatureAsync(item, finalSignature); // timing inside
+    await bodySetSignatureAsync(item, finalSignature);
     logTiming(`_applySignatureCore (${composeType}) total`, t0);
 }
 
-// ─── Send-time core ───────────────────────────────────────────────────────────
-// NO API calls. In-memory → cache → allow send as-is.
+// ─── Send-time core — NO API calls ───────────────────────────────────────────
 async function _onSendCore(item, mailbox) {
     const t0 = Date.now();
     console.log("[CardByte] ── onSend: checking body for existing signature...");
 
-    const bodyHtml = await getBodyText(item);      // timing inside getBodyText
+    const bodyHtml = await getBodyText(item);
 
     if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
         console.log("[CardByte] ✅ onSend: signature already present — fast pass-through.");
@@ -493,7 +509,7 @@ async function _onSendCore(item, mailbox) {
 
     console.log("[CardByte] ⚠️ onSend: signature missing — attempting recovery (no API calls).");
 
-    // 1. In-memory variable set at compose / prefetch time
+    // 1. In-memory
     let signature = COMPOSE_TIME_SIGNATURE;
     if (signature) {
         console.log("[CardByte] ✅ onSend: recovered from COMPOSE_TIME_SIGNATURE (in-memory).");
@@ -501,7 +517,7 @@ async function _onSendCore(item, mailbox) {
 
     // 2. localStorage (skip session + TTL — may be different iframe context)
     if (!signature) {
-        signature = getCachedSignature({ skipTtl: true, skipSessionCheck: true }); // timing inside
+        signature = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (signature) {
             console.log("[CardByte] ✅ onSend: recovered from localStorage cache.");
         }
@@ -514,14 +530,12 @@ async function _onSendCore(item, mailbox) {
         return;
     }
 
-    await bodySetSignatureAsync(item, _wrapSignature(signature)); // timing inside
+    await bodySetSignatureAsync(item, _wrapSignature(signature));
     console.log("[CardByte] ✅ onSend: signature re-applied successfully.");
     logTiming("_onSendCore (re-applied)", t0);
 }
 
 // ─── Public event handlers ────────────────────────────────────────────────────
-
-// Handles OnNewMessageCompose — fires for new mail, reply, replyAll, forward
 const applySignature = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
@@ -544,7 +558,6 @@ const applySignature = async function (event = { completed: () => { } }) {
     }
 };
 
-// Handles OnMessageSend — no API calls, fast path only
 const onSendHandler = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
@@ -567,7 +580,6 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     }
 };
 
-// Handles OnMessageFromChanged — account switched, wipe cache and re-fetch
 const onFromChangedHandler = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
@@ -581,12 +593,13 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
             return;
         }
 
-        // Wipe both stores so the new account's signature is fetched fresh
+        // Wipe everything for the new account
         COMPOSE_TIME_SIGNATURE = null;
+        _fetchInFlight = null; // also cancel any in-flight fetch for old account
         localStorage.removeItem(CACHE_KEY);
         localStorage.removeItem(CACHE_SESSION_KEY);
         localStorage.removeItem(CACHE_TIMESTAMP_KEY);
-        console.log("[CardByte] onFromChangedHandler: in-memory + localStorage cleared");
+        console.log("[CardByte] onFromChangedHandler: in-memory + localStorage + in-flight lock cleared");
 
         await _applySignatureCore(item, mailbox);
     } catch (err) {
@@ -598,7 +611,6 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
 };
 
 // ─── Handler registration ─────────────────────────────────────────────────────
-// Must be synchronous at top level — any async wrapper causes silent failures.
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("applySignature", applySignature);
     console.log("[CardByte] Office.actions.associate registered: applySignature");
