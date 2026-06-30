@@ -47,7 +47,7 @@ function showNotification(
     const details = {
         type,
         message: finalMessage,
-        // icon: "none",
+        icon: "",
         persistent,
     };
 
@@ -591,7 +591,7 @@ async function _applySignatureCore(
 ) {
 
     const t0 = Date.now();
-
+    console.error("[CardByte] applySignature called :", t0);
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
 
@@ -631,17 +631,6 @@ async function _applySignatureCore(
 
             notifyWithTiming(item, "Using stale cache ✓", t0);
 
-        } else {
-
-            showNotification(
-                item,
-                "No signature available",
-                "errorMessage",
-                true,
-                t0
-            );
-
-            return;
         }
     }
 
