@@ -43,11 +43,18 @@ function showNotification(
         finalMessage = finalMessage.slice(0, 137) + "...";
     }
 
+    // const details = {
+    //     type,
+    //     message: finalMessage,
+    //     persistent,
+    // };
+
     const details = {
-        type,
-        message: finalMessage,
-        persistent,
-    };
+    type,
+    message: finalMessage,
+    persistent,
+    ...(type === "insightMessage" ? { icon: "v11.icon16" } : {}),
+};
 
     item.notificationMessages.replaceAsync(
         NOTIF_KEY,
