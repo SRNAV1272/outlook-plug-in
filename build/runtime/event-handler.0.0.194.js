@@ -486,8 +486,9 @@ async function renderSignatureOnServer(user) {
             notifyWithTiming(item, "Signature decrypted ✓", apiStart);
 
             logTiming("renderSignatureOnServer", t0);
+            console.warn("API responce Decryting : ", JSON.parse(decryptedData));
 
-            return JSON.parse(decryptedData)?.html || null;
+            return JSON.parse(decryptedData)?.html || "";
         }
 
         console.warn("Primary failed. Falling back to legacy...");
