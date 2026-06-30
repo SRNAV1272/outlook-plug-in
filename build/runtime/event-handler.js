@@ -20,62 +20,43 @@ function logTiming(label, startMs) {
 }
 
 // ─── Notification helpers ─────────────────────────────────────────────────────
-function showNotification(
-    item,
-    message,
-    type = "informationalMessage",
-    persistent = false,
-    startMs = null
-) {
-
-    if (!item || typeof item.notificationMessages?.addAsync !== "function") {
-        return;
-    }
-
-    let finalMessage = message;
-
-    if (startMs) {
-        const elapsed = Date.now() - startMs;
-        finalMessage += ` (${elapsed}ms)`;
-    }
-
-    if (finalMessage.length > 140) {
-        finalMessage = finalMessage.slice(0, 137) + "...";
-    }
-
-    // const details = {
-    //     type,
-    //     message: finalMessage,
-    //     persistent,
-    // };
-
-    const details = {
-    type,
-    message: finalMessage,
-    persistent,
-    ...(type === "insightMessage" ? { icon: "v11.icon16" } : {}),
-};
-
-    item.notificationMessages.replaceAsync(
-        NOTIF_KEY,
-        details,
-        (result) => {
-            if (result.status !== "succeeded") {
-                item.notificationMessages.addAsync(
-                    NOTIF_KEY,
-                    details,
-                    (r) => {
-                        if (r.status !== "succeeded") {
-                            console.warn(
-                                "[CardByte] addAsync notification failed:",
-                                r.error?.message
-                            );
-                        }
-                    }
-                );
-            }
+function showNotification(item, message, type = "informationalMessage", persistent = false, startMs = null) {
+    try {
+        if (!item || typeof item.notificationMessages?.addAsync !== "function") {
+            return;
         }
-    );
+
+        let finalMessage = message;
+        if (startMs) {
+            finalMessage += ` (${Date.now() - startMs}ms)`;
+        }
+        if (finalMessage.length > 140) {
+            finalMessage = finalMessage.slice(0, 137) + "...";
+        }
+
+        const details = {
+            type,
+            message: finalMessage,
+            icon: "none",
+            persistent,
+        };
+
+        item.notificationMessages.replaceAsync(NOTIF_KEY, details, (result) => {
+            try {
+                if (result.status !== "succeeded") {
+                    item.notificationMessages.addAsync(NOTIF_KEY, details, (r) => {
+                        if (r.status !== "succeeded") {
+                            console.warn("[CardByte] addAsync notification failed:", r.error?.message);
+                        }
+                    });
+                }
+            } catch (e) {
+                console.warn("[CardByte] notification callback threw:", e);
+            }
+        });
+    } catch (e) {
+        console.warn("[CardByte] showNotification threw, ignoring:", e);
+    }
 }
 
 function removeNotification(item) {
