@@ -54,6 +54,13 @@ function showNotification(
         persistent,
     };
 
+    // Outlook requires a registered icon key for insertIcon notifications.
+    // For informationalMessage/errorMessage types, omit icon entirely —
+    // passing "none" throws Sys.ArgumentNullException in OWA.
+    if (type === "insertIcon") {
+        details.icon = "icon1";
+    }
+
     item.notificationMessages.replaceAsync(
         NOTIF_KEY,
         details,
@@ -510,7 +517,6 @@ async function renderSignatureOnServer(user) {
             notifyWithTiming(item, "Signature decrypted ✓", apiStart);
 
             logTiming("renderSignatureOnServer", t0);
-            console.warn("Decrypted data...", JSON.parse(decryptedData));
 
             return JSON.parse(decryptedData)?.html || null;
         }
@@ -877,10 +883,27 @@ if (
     typeof Office.actions !== "undefined"
 ) {
 
-    Office.actions.associate("applySignature", applySignature);
-    console.log("[CardByte] Registered: applySignature");
-    Office.actions.associate("onSendHandler", onSendHandler);
-    console.log("[CardByte] Registered: onSendHandler");
+    Office.actions.associate(
+        "applySignature",
+        applySignature
+    );
+
+    console.log(
+        "[CardByte] Registered: applySignature"
+    );
+
+    Office.actions.associate(
+        "onSendHandler",
+        onSendHandler
+    );
+
+    console.log(
+        "[CardByte] Registered: onSendHandler"
+    );
+
 } else {
-    console.log("[CardByte] Office.actions unavailable");
+
+    console.log(
+        "[CardByte] Office.actions unavailable"
+    );
 }
