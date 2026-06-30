@@ -2,96 +2,244 @@ let CACHED_SIGNATURE_HTML = null;
 const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
+
 // ─── Session-based cache buster ───────────────────────────────────────────────
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
 const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+// ─── Notification key constant ────────────────────────────────────────────────
+const NOTIF_KEY = "cardbyte_sig_status";
+
+// ─── Timing logger ────────────────────────────────────────────────────────────
+function logTiming(label, startMs) {
+    const elapsed = Date.now() - startMs;
+    console.log(`[CardByte] ⏱ ${label}: ${elapsed}ms`);
+}
+
+// ─── Notification helpers ─────────────────────────────────────────────────────
+function showNotification(item, message, type = "informationalMessage", persistent = false, startMs = null) {
+    try {
+        if (!item || typeof item.notificationMessages?.addAsync !== "function") {
+            return;
+        }
+
+        let finalMessage = message;
+        if (startMs) {
+            finalMessage += ` (${Date.now() - startMs}ms)`;
+        }
+        if (finalMessage.length > 140) {
+            finalMessage = finalMessage.slice(0, 137) + "...";
+        }
+
+        const details = {
+            type,
+            message: finalMessage,
+            icon: "none",
+            persistent,
+        };
+
+        item.notificationMessages.replaceAsync(NOTIF_KEY, details, (result) => {
+            try {
+                if (result.status !== "succeeded") {
+                    item.notificationMessages.addAsync(NOTIF_KEY, details, (r) => {
+                        if (r.status !== "succeeded") {
+                            console.warn("[CardByte] addAsync notification failed:", r.error?.message);
+                        }
+                    });
+                }
+            } catch (e) {
+                console.warn("[CardByte] notification callback threw:", e);
+            }
+        });
+    } catch (e) {
+        console.warn("[CardByte] showNotification threw, ignoring:", e);
+    }
+}
+
+function removeNotification(item) {
+    if (!item || typeof item.notificationMessages?.removeAsync !== "function") {
+        return;
+    }
+
+    item.notificationMessages.removeAsync(NOTIF_KEY, () => { });
+}
+
+function notifyWithTiming(item, phase, startMs) {
+
+    const elapsed = Date.now() - startMs;
+
+    console.log(`[CardByte] ${phase}: ${elapsed}ms`);
+
+    showNotification(
+        item,
+        phase,
+        "informationalMessage",
+        false,
+        startMs
+    );
+}
 
 function getOrCreateSessionId() {
+
     let sid = sessionStorage.getItem(SESSION_KEY);
+
     if (!sid) {
-        sid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36);
+
+        sid = crypto.randomUUID
+            ? crypto.randomUUID()
+            : Date.now().toString(36);
+
         sessionStorage.setItem(SESSION_KEY, sid);
     }
+
     return sid;
 }
 
-// FIX: Added skipSessionCheck option so onSendHandler (which runs in a separate
-// iframe/JS context with a fresh sessionStorage) can still read the cached
-// signature that was stored by applySignature in the compose iframe.
+// ─── Cache read ───────────────────────────────────────────────────────────────
+function getCachedSignature({
+    skipTtl = false,
+    skipSessionCheck = false
+} = {}) {
 
-function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-    // If skipping session check, just return whatever is in cache directly
+    const t0 = Date.now();
+
     if (skipSessionCheck) {
-        return localStorage.getItem(CACHE_KEY);
+
+        const val = localStorage.getItem(CACHE_KEY);
+
+        logTiming("getCachedSignature (skipSessionCheck)", t0);
+
+        return val;
     }
 
     const currentSid = getOrCreateSessionId();
     const cachedSid = localStorage.getItem(CACHE_SESSION_KEY);
 
     if (cachedSid !== currentSid) {
-        console.log("[CardByte] New session detected — clearing cached signature");
+
+        console.log("[CardByte] New session detected — clearing cache");
+
         localStorage.removeItem(CACHE_KEY);
         localStorage.removeItem(CACHE_SESSION_KEY);
         localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+
+        logTiming("getCachedSignature (session mismatch)", t0);
+
         return null;
     }
 
     if (!skipTtl) {
-        const ts = parseInt(localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0", 10);
+
+        const ts = parseInt(
+            localStorage.getItem(CACHE_TIMESTAMP_KEY) || "0",
+            10
+        );
+
         if (Date.now() - ts > CACHE_TTL_MS) {
-            console.log("[CardByte] Cache TTL expired — clearing cached signature");
+
+            console.log("[CardByte] Cache TTL expired — clearing");
+
             localStorage.removeItem(CACHE_KEY);
             localStorage.removeItem(CACHE_SESSION_KEY);
             localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+
+            logTiming("getCachedSignature (ttl expired)", t0);
+
             return null;
         }
     }
 
-    return localStorage.getItem(CACHE_KEY);
+    const val = localStorage.getItem(CACHE_KEY);
+
+    logTiming("getCachedSignature (hit)", t0);
+
+    return val;
 }
 
+// ─── Cache write ──────────────────────────────────────────────────────────────
 function setCachedSignature(html) {
+
+    const t0 = Date.now();
+
     const currentSid = getOrCreateSessionId();
+
     try {
+
         localStorage.setItem(CACHE_KEY, html);
         localStorage.setItem(CACHE_SESSION_KEY, currentSid);
         localStorage.setItem(CACHE_TIMESTAMP_KEY, Date.now().toString());
-    } catch (_) { }
+
+        logTiming("setCachedSignature", t0);
+
+    } catch (_) {
+
+        logTiming("setCachedSignature (failed)", t0);
+
+    }
 }
 
+// ─── Platform detection ───────────────────────────────────────────────────────
 const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const MOBILE_MAX_IMAGE_WIDTH = 200;
 const MOBILE_IMAGE_QUALITY = 0.5;
 
 function detectPlatform() {
+
     const platform = (Office?.context?.platform || "").toLowerCase();
     const ua = (navigator?.userAgent || "").toLowerCase();
 
-    if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
-    if (platform === "android") return "mobile-android";
+    if (platform === "ios" || platform === "iphone" || platform === "ipad") {
+        return "mobile-ios";
+    }
 
-    if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android"))
-        return ua.includes("android") ? "mobile-android" : "mobile-ios";
+    if (platform === "android") {
+        return "mobile-android";
+    }
+
+    if (
+        ua.includes("outlookmobile") ||
+        ua.includes("outlook-ios") ||
+        ua.includes("outlook-android")
+    ) {
+        return ua.includes("android")
+            ? "mobile-android"
+            : "mobile-ios";
+    }
 
     if (
         (platform === "officeonline" || platform === "web" || platform === "") &&
         (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
-    ) return ua.includes("android") ? "mobile-android" : "mobile-ios";
+    ) {
+        return ua.includes("android")
+            ? "mobile-android"
+            : "mobile-ios";
+    }
 
-    if (platform === "mac") return "mac";
+    if (platform === "mac") {
+        return "mac";
+    }
 
     if (
         (platform === "" || platform === "desktop") &&
         (ua.includes("macintosh") || ua.includes("mac os x")) &&
         !ua.includes("iphone") &&
         !ua.includes("ipad")
-    ) return "mac";
+    ) {
+        return "mac";
+    }
 
-    if (platform === "officeonline" || platform === "web" || platform === "") return "owa";
+    if (
+        platform === "officeonline" ||
+        platform === "web" ||
+        platform === ""
+    ) {
+        return "owa";
+    }
+
     return "desktop";
 }
 
@@ -100,361 +248,542 @@ function isMobile() {
     return p === "mobile-ios" || p === "mobile-android";
 }
 
-function isOWA() { return detectPlatform() === "owa"; }
-function isMac() { return detectPlatform() === "mac"; }
-
-function getMaxHtmlSize() {
-    return isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
+function isOWA() {
+    return detectPlatform() === "owa";
 }
 
+function isMac() {
+    return detectPlatform() === "mac";
+}
+
+function getMaxHtmlSize() {
+    return isMobile()
+        ? MAX_SAFE_HTML_SIZE_MOBILE
+        : MAX_SAFE_HTML_SIZE;
+}
+
+// ─── Office Ready ─────────────────────────────────────────────────────────────
 Office.onReady(() => {
-    console.log("✅ Office.onReady is Started !");
-    console.log(`[CardByte] Platform detected: ${detectPlatform()}`);
+
+    console.log("✅ Office.onReady Started");
+    console.log(`[CardByte] Platform: ${detectPlatform()}`);
+
 });
 
+// ─── Crypto helpers ───────────────────────────────────────────────────────────
 function base64ToArrayBuffer(base64) {
+
     let base64Data = base64.replace(/-/g, "+").replace(/_/g, "/");
+
     const padding = base64Data.length % 4;
-    if (padding) base64Data += "=".repeat(4 - padding);
+
+    if (padding) {
+        base64Data += "=".repeat(4 - padding);
+    }
+
     const binaryString = atob(base64Data);
+
     const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+
+    for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+
     return bytes.buffer;
 }
 
 function arrayBufferToBase64(buffer) {
+
     const bytes = new Uint8Array(buffer);
+
     let binaryString = "";
-    for (let i = 0; i < bytes.length; i++) binaryString += String.fromCharCode(bytes[i]);
+
+    for (let i = 0; i < bytes.length; i++) {
+        binaryString += String.fromCharCode(bytes[i]);
+    }
+
     return btoa(binaryString);
 }
 
 async function handleAesDecrypt(encryptedText, generatedKey) {
+
+    const t0 = Date.now();
+
     try {
-        if (!encryptedText) return "";
+
+        if (!encryptedText) {
+            return "";
+        }
+
         const keyToUse = generatedKey || AES_KEY;
+
         let keyBuffer;
-        try { keyBuffer = base64ToArrayBuffer(keyToUse); }
-        catch (e) { console.error("Failed to decode key as base64:", e); return encryptedText; }
-        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
-            if (generatedKey && generatedKey !== AES_KEY) return handleAesDecrypt(encryptedText, AES_KEY);
+
+        try {
+            keyBuffer = base64ToArrayBuffer(keyToUse);
+        } catch (e) {
+            console.error("Failed to decode key:", e);
             return encryptedText;
         }
+
+        if (
+            keyBuffer.byteLength !== 16 &&
+            keyBuffer.byteLength !== 32
+        ) {
+
+            if (generatedKey && generatedKey !== AES_KEY) {
+                return handleAesDecrypt(encryptedText, AES_KEY);
+            }
+
+            return encryptedText;
+        }
+
         const ivBuffer = base64ToArrayBuffer(AES_IV);
-        if (ivBuffer.byteLength !== 16) return encryptedText;
-        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
-        let encryptedBuffer;
-        try { encryptedBuffer = base64ToArrayBuffer(encryptedText); }
-        catch (e) { return encryptedText; }
-        if (encryptedBuffer.byteLength % 16 !== 0) {
-            console.error(`Invalid encrypted data length: ${encryptedBuffer.byteLength} bytes`);
+
+        if (ivBuffer.byteLength !== 16) {
             return encryptedText;
         }
-        const decryptedBuffer = await crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBuffer }, key, encryptedBuffer);
-        return new TextDecoder().decode(decryptedBuffer);
-    } catch (err) {
-        if (generatedKey && generatedKey !== AES_KEY && err.message.includes("key data")) {
-            try { return await handleAesDecrypt(encryptedText, AES_KEY); }
-            catch (e) { console.error("Fallback also failed:", e.message); }
+
+        const key = await crypto.subtle.importKey(
+            "raw",
+            keyBuffer,
+            { name: "AES-CBC" },
+            false,
+            ["decrypt"]
+        );
+
+        let encryptedBuffer;
+
+        try {
+            encryptedBuffer = base64ToArrayBuffer(encryptedText);
+        } catch {
+            return encryptedText;
         }
+
+        const decryptedBuffer = await crypto.subtle.decrypt(
+            { name: "AES-CBC", iv: ivBuffer },
+            key,
+            encryptedBuffer
+        );
+
+        const result = new TextDecoder().decode(decryptedBuffer);
+
+        logTiming("handleAesDecrypt", t0);
+
+        return result;
+
+    } catch (err) {
+
+        logTiming("handleAesDecrypt (error)", t0);
+
         return encryptedText;
     }
 }
 
 async function encryptEmail(email = "") {
+
+    const t0 = Date.now();
+
     try {
-        if (!email || email.trim() === "") { console.warn("Warning: Empty email provided"); return ""; }
+
+        if (!email || email.trim() === "") {
+            return "";
+        }
+
         const keyBuffer = base64ToArrayBuffer(AES_KEY);
         const ivBuffer = base64ToArrayBuffer(AES_IV);
-        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) { console.error(`Invalid key length: ${keyBuffer.byteLength} bytes`); return ""; }
-        if (ivBuffer.byteLength !== 16) { console.error(`Invalid IV length: ${ivBuffer.byteLength} bytes`); return ""; }
-        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
+
+        const key = await crypto.subtle.importKey(
+            "raw",
+            keyBuffer,
+            { name: "AES-CBC" },
+            false,
+            ["encrypt"]
+        );
+
         const data = new TextEncoder().encode(email);
-        const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
-        const base64Result = arrayBufferToBase64(encrypted);
-        try { atob(base64Result); } catch (e) { console.error("Result is NOT valid base64:", e); }
-        return base64Result;
+
+        const encrypted = await crypto.subtle.encrypt(
+            { name: "AES-CBC", iv: ivBuffer },
+            key,
+            data
+        );
+
+        const result = arrayBufferToBase64(encrypted);
+
+        logTiming("encryptEmail", t0);
+
+        return result;
+
     } catch (err) {
-        console.error("Encryption error:", err);
+
+        logTiming("encryptEmail (error)", t0);
+
         return "";
     }
 }
 
+// ─── Backend fetch ────────────────────────────────────────────────────────────
 async function renderSignatureOnServer(user) {
+    const t0 = Date.now();
+    const item = Office?.context?.mailbox?.item;
     const platform = Office.context.diagnostics.platform;
     const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
     try {
+        notifyWithTiming(item, "Loading signature...", t0);
         const encryptedMail = await encryptEmail(user);
+        const apiStart = Date.now();
+
         const primaryRes = await fetch(
-            "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
-            { method: "GET", headers: { username: encryptedMail, "X-Platform": xPlatform } }
+            "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            {
+                method: "GET",
+                headers: { username: encryptedMail, "X-Platform": xPlatform }
+            }
         );
+
+        notifyWithTiming(item, "API response received ✓", apiStart);
+
         if (primaryRes.ok) {
             const data = await primaryRes.text();
             const decryptedData = await handleAesDecrypt(data);
-            console.log("Using NEW renderer");
-            return JSON.parse(decryptedData)?.html || null;
+
+            notifyWithTiming(item, "Signature decrypted ✓", apiStart);
+            logTiming("renderSignatureOnServer", t0);
+
+            const html = JSON.parse(decryptedData)?.html;
+
+            if (html === "" || html == null) {
+                notifyWithTiming(item, "Signature not assigned. Please Contact Admin.", apiStart);
+                showNotification(
+                    item,
+                    "Signature not assigned. Please Contact Admin.",
+                    "errorMessage",
+                    false,
+                    t0
+                );
+                // Explicit "no signature" — distinct from a fetch failure.
+                return { html: null, explicit: true };
+            }
+
+            return { html, explicit: true };
         }
+
         console.warn("Primary failed. Falling back to legacy...");
+
     } catch (err) {
-        console.warn("Primary crashed. Falling back to legacy...", err);
+        console.warn("Primary crashed:", err);
+        showNotification(item, `API error: ${err.message}`, "errorMessage", false, t0);
     }
 
-    try {
-        const legacyRes = await fetch(
-            "https://enterprise.cardbyte.ai/render-signature",
-            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user }) }
-        );
-        if (!legacyRes.ok) throw new Error("Legacy renderer failed");
-        const legacyData = await legacyRes.json();
-        console.log("Using LEGACY renderer", legacyData);
-        return legacyData?.finalHtml || null;
-    } catch (legacyError) {
-        console.error("Both primary and legacy failed:", legacyError);
-        return null;
-    }
+    // Network/API failure — caller is free to fall back to stale cache.
+    return { html: null, explicit: false };
 }
 
-function compressBase64Image(dataUrl, maxWidth, quality) {
-    if (maxWidth === undefined) maxWidth = isMobile() ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    if (quality === undefined) quality = isMobile() ? MOBILE_IMAGE_QUALITY : 0.7;
+// ─── Timeout wrapper ──────────────────────────────────────────────────────────
+function withTimeout(promise, ms) {
+
+    return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+            setTimeout(
+                () => reject(new Error(`Timed out after ${ms}ms`)),
+                ms
+            )
+        )
+    ]);
+}
+
+// ─── Body helpers ─────────────────────────────────────────────────────────────
+function getBodyText(item) {
 
     return new Promise((resolve) => {
-        if (dataUrl.startsWith("data:image/gif")) { resolve(dataUrl); return; }
-        const img = new Image();
-        img.onload = () => {
-            try {
-                const canvas = document.createElement("canvas");
-                let width = img.width;
-                let height = img.height;
-                if (width > maxWidth) { height = Math.round((height * maxWidth) / width); width = maxWidth; }
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext("2d");
-                const isPng = dataUrl.startsWith("data:image/png");
-                if (isPng) {
-                    ctx.clearRect(0, 0, width, height);
-                    ctx.drawImage(img, 0, 0, width, height);
-                    let result = canvas.toDataURL("image/png");
-                    if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                    console.log(`[CardByte] Compressed PNG: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                    resolve(result); return;
-                }
-                ctx.drawImage(img, 0, 0, width, height);
-                let result = canvas.toDataURL("image/jpeg", quality);
-                if (result.length >= dataUrl.length) result = canvas.toDataURL("image/png");
-                if (result.length >= dataUrl.length) { resolve(dataUrl); return; }
-                console.log(`[CardByte] Compressed: ${(dataUrl.length / 1024).toFixed(0)}KB -> ${(result.length / 1024).toFixed(0)}KB`);
-                resolve(result);
-            } catch (e) { console.warn("[CardByte] Canvas compression failed:", e); resolve(dataUrl); }
-        };
-        img.onerror = () => resolve(dataUrl);
-        img.src = dataUrl;
-    });
-}
 
-async function compressImagesInHtml(html) {
-    if (!html) return html;
+        const t0 = Date.now();
 
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, "text/html");
-    const profileImg = doc.querySelector('img[alt="Profile Photo"]');
-
-    if (!profileImg) return html;
-
-    const src = profileImg.getAttribute('src');
-    if (!src || !src.startsWith('data:image/')) return html;
-
-    console.log(`[CardByte] Compressing profile picture (${(src.length / 1024).toFixed(0)}KB)`);
-
-    const compressed = await compressBase64Image(src);
-    if (compressed === src) return html;
-
-    console.log(`[CardByte] Profile picture compressed: ${(src.length / 1024).toFixed(0)}KB -> ${(compressed.length / 1024).toFixed(0)}KB`);
-
-    return html.replace(src, compressed);
-}
-
-function extractBase64Images(html) {
-    const images = [];
-    let index = 0;
-    const cleanedHtml = html.replace(
-        /src\s*=\s*"data:(image\/([^;]+));base64,([^"]+)"/gi,
-        (_match, mimeType, extension, base64Data) => {
-            const cid = `cardbyte_img_${index}`;
-            const safeExt = extension.replace(/[^a-z0-9]/gi, "") || "png";
-            const fileName = `${cid}.${safeExt}`;
-            images.push({ cid, fileName, mimeType, base64Data });
-            index++;
-            return `src="cid:${cid}"`;
-        }
-    );
-    return { cleanedHtml, images };
-}
-
-function addInlineImageAttachment(item, { cid, fileName, base64Data }) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.addFileAttachmentFromBase64Async !== "function") {
-            console.warn("[CardByte] addFileAttachmentFromBase64Async not available");
-            resolve(false); return;
-        }
-        item.addFileAttachmentFromBase64Async(
-            base64Data, fileName, { isInline: true, contentId: cid },
+        item.body.getAsync(
+            Office.CoercionType.Html,
             (result) => {
-                if (result.status === Office.AsyncResultStatus.Succeeded) resolve(true);
-                else { console.error(`[CardByte] Attach failed ${cid}:`, result.error); reject(result.error); }
+
+                logTiming("getBodyText", t0);
+
+                if (result.status === "succeeded") {
+                    resolve(result.value || "");
+                } else {
+                    resolve("");
+                }
+
             }
         );
     });
 }
 
+const SIGNATURE_SENTINEL = "cardbyte-sig";
+
 function bodySetSignatureAsync(item, html) {
+
     return new Promise((resolve, reject) => {
-        if (typeof item.body.setSignatureAsync !== "function") { reject(new Error("setSignatureAsync not available")); return; }
-        item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            if (r.status === "succeeded") resolve(); else reject(r.error);
-        });
+
+        if (typeof item.body.setSignatureAsync !== "function") {
+            reject(new Error("setSignatureAsync not available"));
+            return;
+        }
+
+        const t0 = Date.now();
+
+        item.body.setSignatureAsync(
+            html,
+            { coercionType: Office.CoercionType.Html },
+            (r) => {
+
+                logTiming("setSignatureAsync", t0);
+
+                if (r.status === "succeeded") {
+                    resolve();
+                } else {
+                    reject(r.error);
+                }
+
+            }
+        );
     });
 }
 
-function moveCursorToTop(item) {
-    return new Promise((resolve) => {
-        try {
-            if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-            item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-                if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-                item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-            });
-        } catch { resolve(); }
-    });
-}
-
-// FIX: Added skipSessionCheck param so onSendHandler (separate iframe, fresh
-// sessionStorage) can still read the signature cached by the compose iframe.
+// ─── Core apply ───────────────────────────────────────────────────────────────
 async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}) {
+    const t0 = Date.now();
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
 
     let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
+    let explicitlyUnassigned = false;
 
     if (fetchIfMissing && userEmail && fetched == null) {
-        const MAX_RETRIES = 2;
-        let attempt = 0;
-        let lastError = null;
+        notifyWithTiming(item, "Fetching signature...", t0);
 
-        while (attempt <= MAX_RETRIES) {
-            try {
-                if (attempt > 0) {
-                    console.warn(`[CardByte] Retrying signature fetch (attempt ${attempt}/${MAX_RETRIES})...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt)); // 1s, then 2s
-                }
-                const result = await renderSignatureOnServer(userEmail);
-                if (result != null) {
-                    fetched = result;
-                    CACHED_SIGNATURE_HTML = fetched;
-                    setCachedSignature(fetched);
-                    break;
-                }
-                lastError = new Error("Server returned null");
-            } catch (err) {
-                lastError = err;
-                console.warn(`[CardByte] Fetch attempt ${attempt + 1} failed:`, err);
-            }
-            attempt++;
-        }
+        const { html, explicit } = await renderSignatureOnServer(userEmail);
 
-        if (fetched != null) {
-            // Compress immediately after fetch and store compressed version
-            fetched = await compressImagesInHtml(fetched);
+        if (html) {
+            fetched = html;
             CACHED_SIGNATURE_HTML = fetched;
-            setCachedSignature(fetched);  // ← store compressed, not raw
-        }
-
-        if (fetched == null) {
-            console.error(`[CardByte] All ${MAX_RETRIES + 1} fetch attempts failed. Last error:`, lastError);
+            setCachedSignature(fetched);
+            notifyWithTiming(item, "Signature fetched ✓", t0);
+        } else if (explicit) {
+            // Server explicitly said no signature — clear any stale cache and stop.
+            explicitlyUnassigned = true;
+            localStorage.removeItem(CACHE_KEY);
+            localStorage.removeItem(CACHE_SESSION_KEY);
+            localStorage.removeItem(CACHE_TIMESTAMP_KEY);
         }
     }
 
-    // FIX: If signature is still null (server down, cache miss, no email, etc.)
-    // fall back to a minimal identity signature instead of inserting "null".
-    // Fallback only if everything above — fresh fetch, retries — all came up empty
-    if (!fetched) {
-        // Last-ditch: try reading stale cache, bypassing both session and TTL checks
+    if (!fetched && !explicitlyUnassigned) {
         const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (staleCache) {
-            console.warn("[CardByte] Using stale cached signature as last resort after all retries failed.");
             fetched = staleCache;
-        } else {
-            console.warn("[CardByte] No signature available — using fallback identity signature.");
-            fetched = `
-                <table cellpadding="0" cellspacing="0" border="0" width="400">
-                  <tr>
-                    <td style="font-family:Arial,sans-serif;font-size:12px;">
-                      <strong>${userProfile.displayName || ""}</strong><br/>
-                      ${userProfile.emailAddress || ""}<br/>
-                      <span style="color:#999;">Sent via CardByte</span>
-                    </td>
-                  </tr>
-                </table>
-            `;
+            notifyWithTiming(item, "Using stale cache ✓", t0);
         }
     }
 
-    // let compressedSignature = await compressImagesInHtml(fetched);
-    // compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature + "<div style='margin-top:40px'></div>";
+    if (!fetched) {
+        // Nothing to apply — do not call setSignatureAsync at all.
+        logTiming("_applySignatureCore total (no signature)", t0);
+        return;
+    }
 
-    let finalSignature = `<div style='margin-top:40px'></div>${fetched}<div style='margin-top:40px'></div>`;
+    notifyWithTiming(item, "Applying signature...", t0);
 
-    console.log("[CardByte] ════════════════════════════════════",
-        fetched ? "Applying signature" : "No cached signature, will fetch from server",
-        finalSignature, item?.body
-    );
+    const finalSignature =
+        `<div style='margin-top:40px'></div>` + fetched + `<div style='margin-top:40px'></div>`;
 
     await bodySetSignatureAsync(item, finalSignature);
-    // await moveCursorToTop(item);
+
+    notifyWithTiming(item, "Signature applied ✓", t0);
+    setTimeout(() => removeNotification(item), 3000);
+    logTiming("_applySignatureCore total", t0);
 }
 
-window.applySignature = async function (event = { completed: () => { } }, options = {}) {
+// ─── Apply signature handler ──────────────────────────────────────────────────
+const applySignature = async function (
+    event = { completed: () => { } }
+) {
+
+    const t0 = Date.now();
+
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
     try {
-        if (!item) return;
-        // compose iframe — normal session check applies
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: true });
+
+        if (!item) {
+            return;
+        }
+
+        notifyWithTiming(item, "Starting signature flow...", t0);
+
+        await _applySignatureCore(
+            item,
+            mailbox,
+            {
+                fetchIfMissing: true
+            }
+        );
+
     } catch (err) {
-        console.error("[CardByte] Error in applySignature:", err);
+
+        console.error("[CardByte] applySignature error:", err);
+        // notifyWithTiming(item, "Error ", t0);
+        // showNotification(
+        //     item,
+        //     `Apply failed: ${err.message}`,
+        //     "errorMessage",
+        //     true,
+        //     t0
+        // );
+
     } finally {
+
+        logTiming("applySignature total", t0);
+
         event.completed();
     }
 };
 
-window.onSendHandler = async function (event = { completed: () => { } }) {
+// ─── Send-time core ───────────────────────────────────────────────────────────
+async function _onSendCore(item, mailbox) {
+
+    const t0 = Date.now();
+
+    const bodyHtml = await getBodyText(item);
+
+    if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
+
+        notifyWithTiming(item, "Signature already present ✓", t0);
+
+        return;
+    }
+
+    const cached = getCachedSignature({
+        skipTtl: true,
+        skipSessionCheck: true
+    });
+
+    if (!cached) {
+
+        showNotification(
+            item,
+            "No cached signature on send",
+            "errorMessage",
+            false,
+            t0
+        );
+
+        return;
+    }
+
+    notifyWithTiming(item, "Re-applying signature...", t0);
+
+    await _applySignatureCore(
+        item,
+        mailbox,
+        {
+            fetchIfMissing: false,
+            skipTtl: true,
+            skipSessionCheck: true
+        }
+    );
+
+    notifyWithTiming(item, "Signature verified ✓", t0);
+
+    logTiming("_onSendCore", t0);
+}
+
+// ─── onSend handler ───────────────────────────────────────────────────────────
+const onSendHandler = async function (
+    event = { completed: () => { } }
+) {
+
+    const t0 = Date.now();
+
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
 
+    const done = (allow = true) => {
+
+        logTiming("onSendHandler total", t0);
+
+        event.completed({
+            allowEvent: allow
+        });
+    };
+
     try {
-        if (!item) return;
-        // FIX: skipSessionCheck:true because onSendHandler runs in a separate
-        // iframe with its own fresh sessionStorage, so the session ID never
-        // matches the one stored by applySignature — causing a false cache miss.
-        await _applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true });
+
+        if (!item) {
+            done(true);
+            return;
+        }
+
+        notifyWithTiming(item, "Verifying before send...", t0);
+
+        await withTimeout(
+            _onSendCore(item, mailbox),
+            4000
+        );
+
+        notifyWithTiming(item, "Send verification complete ✓", t0);
+
+        setTimeout(() => removeNotification(item), 3000);
+
     } catch (err) {
-        console.error("[CardByte] Error in onSendHandler:", err);
+
+        console.warn(
+            "[CardByte] onSend timeout/error:",
+            err.message
+        );
+
+        showNotification(
+            item,
+            `Send timeout/error`,
+            "errorMessage",
+            true,
+            t0
+        );
+
     } finally {
-        event.completed({ allowEvent: true });
+
+        done(true);
     }
 };
 
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("onSendHandler", onSendHandler);
-    console.log("[CardByte] Office.actions.associate registered: onSendHandler");
-}
+// ─── Handler registration ─────────────────────────────────────────────────────
+if (
+    typeof Office !== "undefined" &&
+    typeof Office.actions !== "undefined"
+) {
 
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
-    Office.actions.associate("applySignature", applySignature);
-    console.log("[CardByte] Office.actions.associate registered: applySignature");
+    Office.actions.associate(
+        "applySignature",
+        applySignature
+    );
+
+    console.log(
+        "[CardByte] Registered: applySignature"
+    );
+
+    Office.actions.associate(
+        "onSendHandler",
+        onSendHandler
+    );
+
+    console.log(
+        "[CardByte] Registered: onSendHandler"
+    );
+
 } else {
-    console.log("[CardByte] Office.actions not available — LaunchEvent path not active (expected on 2016/2019)");
+
+    console.log(
+        "[CardByte] Office.actions unavailable"
+    );
 }
