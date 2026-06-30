@@ -680,13 +680,13 @@ const applySignature = async function (
 
         console.error("[CardByte] applySignature error:", err);
         // notifyWithTiming(item, "Error ", t0);
-        showNotification(
-            item,
-            `Apply failed: ${err.message}`,
-            "errorMessage",
-            true,
-            t0
-        );
+        // showNotification(
+        //     item,
+        //     `Apply failed: ${err.message}`,
+        //     "errorMessage",
+        //     true,
+        //     t0
+        // );
 
     } finally {
 
