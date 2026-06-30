@@ -425,79 +425,60 @@ async function encryptEmail(email = "") {
 
 // ─── Backend fetch ────────────────────────────────────────────────────────────
 async function renderSignatureOnServer(user) {
-
     const t0 = Date.now();
-
     const item = Office?.context?.mailbox?.item;
-
     const platform = Office.context.diagnostics.platform;
-
-    const xPlatform =
-        platform === Office.PlatformType.Mac
-            ? "MAC"
-            : "WINDOWS";
+    const xPlatform = platform === Office.PlatformType.Mac ? "MAC" : "WINDOWS";
 
     try {
-
         notifyWithTiming(item, "Loading signature...", t0);
-
         const encryptedMail = await encryptEmail(user);
-
         const apiStart = Date.now();
 
         const primaryRes = await fetch(
             "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             {
                 method: "GET",
-                headers: {
-                    username: encryptedMail,
-                    "X-Platform": xPlatform
-                }
+                headers: { username: encryptedMail, "X-Platform": xPlatform }
             }
         );
 
         notifyWithTiming(item, "API response received ✓", apiStart);
 
         if (primaryRes.ok) {
-
             const data = await primaryRes.text();
-
             const decryptedData = await handleAesDecrypt(data);
 
             notifyWithTiming(item, "Signature decrypted ✓", apiStart);
-
             logTiming("renderSignatureOnServer", t0);
-            console.warn("API responce Decryting : ", JSON.parse(decryptedData));
-            if (JSON.parse(decryptedData)?.html === "") {
+
+            const html = JSON.parse(decryptedData)?.html;
+
+            if (html === "" || html == null) {
                 notifyWithTiming(item, "Signature not assigned. Please Contact Admin.", apiStart);
                 showNotification(
                     item,
-                    `Signature not assigned. Please Contact Admin.`,
+                    "Signature not assigned. Please Contact Admin.",
                     "errorMessage",
                     false,
                     t0
                 );
-                return null
+                // Explicit "no signature" — distinct from a fetch failure.
+                return { html: null, explicit: true };
             }
-            return JSON.parse(decryptedData)?.html || "";
+
+            return { html, explicit: true };
         }
 
         console.warn("Primary failed. Falling back to legacy...");
 
     } catch (err) {
-
         console.warn("Primary crashed:", err);
-
-        showNotification(
-            item,
-            `API error: ${err.message}`,
-            "errorMessage",
-            false,
-            t0
-        );
+        showNotification(item, `API error: ${err.message}`, "errorMessage", false, t0);
     }
 
-    return null;
+    // Network/API failure — caller is free to fall back to stale cache.
+    return { html: null, explicit: false };
 }
 
 // ─── Timeout wrapper ──────────────────────────────────────────────────────────
@@ -570,73 +551,56 @@ function bodySetSignatureAsync(item, html) {
 }
 
 // ─── Core apply ───────────────────────────────────────────────────────────────
-async function _applySignatureCore(
-    item,
-    mailbox,
-    {
-        fetchIfMissing = false,
-        skipTtl = false,
-        skipSessionCheck = false
-    } = {}
-) {
-
+async function _applySignatureCore(item, mailbox, { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false } = {}) {
     const t0 = Date.now();
-    console.error("[CardByte] applySignature called :", t0);
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
 
-    let fetched = getCachedSignature({
-        skipTtl,
-        skipSessionCheck
-    });
+    let fetched = getCachedSignature({ skipTtl, skipSessionCheck });
+    let explicitlyUnassigned = false;
 
     if (fetchIfMissing && userEmail && fetched == null) {
-
         notifyWithTiming(item, "Fetching signature...", t0);
 
-        const result = await renderSignatureOnServer(userEmail);
+        const { html, explicit } = await renderSignatureOnServer(userEmail);
 
-        if (result != null) {
-
-            fetched = result;
-
+        if (html) {
+            fetched = html;
             CACHED_SIGNATURE_HTML = fetched;
-
             setCachedSignature(fetched);
-
             notifyWithTiming(item, "Signature fetched ✓", t0);
+        } else if (explicit) {
+            // Server explicitly said no signature — clear any stale cache and stop.
+            explicitlyUnassigned = true;
+            localStorage.removeItem(CACHE_KEY);
+            localStorage.removeItem(CACHE_SESSION_KEY);
+            localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+        }
+    }
+
+    if (!fetched && !explicitlyUnassigned) {
+        const staleCache = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+        if (staleCache) {
+            fetched = staleCache;
+            notifyWithTiming(item, "Using stale cache ✓", t0);
         }
     }
 
     if (!fetched) {
-
-        const staleCache = getCachedSignature({
-            skipTtl: true,
-            skipSessionCheck: true
-        });
-
-        if (staleCache) {
-
-            fetched = staleCache;
-
-            notifyWithTiming(item, "Using stale cache ✓", t0);
-
-        }
+        // Nothing to apply — do not call setSignatureAsync at all.
+        logTiming("_applySignatureCore total (no signature)", t0);
+        return;
     }
 
     notifyWithTiming(item, "Applying signature...", t0);
 
     const finalSignature =
-        `<div style='margin-top:40px'></div>` +
-        fetched +
-        `<div style='margin-top:40px'></div>`;
+        `<div style='margin-top:40px'></div>` + fetched + `<div style='margin-top:40px'></div>`;
 
     await bodySetSignatureAsync(item, finalSignature);
 
     notifyWithTiming(item, "Signature applied ✓", t0);
-
     setTimeout(() => removeNotification(item), 3000);
-
     logTiming("_applySignatureCore total", t0);
 }
 
