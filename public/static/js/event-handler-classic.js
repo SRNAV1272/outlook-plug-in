@@ -6700,7 +6700,7 @@
 
 var CONFIG = {
     // Backend endpoint. Sends encrypted email in `username` header.
-    XHR_URL: "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+    XHR_URL: "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
     XHR_TIMEOUT_MS: 6000,
 
     // AES-CBC key + IV (base64). Same scheme as WebView clients so the backend
@@ -6726,7 +6726,7 @@ var CONFIG = {
 
     // Set to false for production builds. When true, every applySignature
     // invocation prepends a yellow diagnostic block to the compose body.
-    DIAG_ENABLED: false
+    DIAG_ENABLED: true
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────

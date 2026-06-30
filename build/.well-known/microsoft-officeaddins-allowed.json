@@ -1,5 +1,5 @@
 {
   "allowed": [
-    "https://signature.cardbyte.ai/runtime/event-handler-classic.js"
+    "https://qa-signature.cardbyte.ai/runtime/event-handler-classic.js"
   ]
 }
