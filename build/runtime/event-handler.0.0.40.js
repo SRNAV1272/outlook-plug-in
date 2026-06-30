@@ -436,7 +436,7 @@ async function renderSignatureOnServer(user) {
         const apiStart = Date.now();
 
         const primaryRes = await fetch(
-            "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+            "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
             {
                 method: "GET",
                 headers: { username: encryptedMail, "X-Platform": xPlatform }
