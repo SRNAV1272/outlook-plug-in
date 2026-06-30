@@ -3,6 +3,9 @@ const SIGNATURE_MARKER = "<!-- CARDBYTE_SIGNATURE -->";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
+// ─── Debug flag ────────────────────────────────────────────────────────────────
+const DEBUG_TIMING = false;
+
 // ─── Session-based cache buster ───────────────────────────────────────────────
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
@@ -15,6 +18,7 @@ const NOTIF_KEY = "cardbyte_sig_status";
 
 // ─── Timing logger ────────────────────────────────────────────────────────────
 function logTiming(label, startMs) {
+    if (!DEBUG_TIMING) return;
     const elapsed = Date.now() - startMs;
     console.log(`[CardByte] ⏱ ${label}: ${elapsed}ms`);
 }
@@ -88,9 +92,10 @@ function removeNotification(item) {
 
 function notifyWithTiming(item, phase, startMs) {
 
-    const elapsed = Date.now() - startMs;
-
-    console.log(`[CardByte] ${phase}: ${elapsed}ms`);
+    if (DEBUG_TIMING) {
+        const elapsed = Date.now() - startMs;
+        console.log(`[CardByte] ${phase}: ${elapsed}ms`);
+    }
 
     showNotification(
         item,
@@ -99,6 +104,14 @@ function notifyWithTiming(item, phase, startMs) {
         false,
         startMs
     );
+}
+
+// Silent variant for time-pressured paths (e.g. on-send) — updates console
+// timing only, skips the Outlook notification round-trip.
+function logPhase(phase, startMs) {
+    if (DEBUG_TIMING) {
+        console.log(`[CardByte] ${phase}: ${Date.now() - startMs}ms`);
+    }
 }
 
 function getOrCreateSessionId() {
@@ -125,6 +138,14 @@ function getCachedSignature({
 
     const t0 = Date.now();
 
+    // In-memory fast path — avoids a localStorage hit entirely when we
+    // already have the signature in this session's memory and the caller
+    // isn't asking for a strict TTL/session re-validation.
+    if (CACHED_SIGNATURE_HTML != null && skipSessionCheck && skipTtl) {
+        logTiming("getCachedSignature (memory hit)", t0);
+        return CACHED_SIGNATURE_HTML;
+    }
+
     if (skipSessionCheck) {
 
         const val = localStorage.getItem(CACHE_KEY);
@@ -144,6 +165,7 @@ function getCachedSignature({
         localStorage.removeItem(CACHE_KEY);
         localStorage.removeItem(CACHE_SESSION_KEY);
         localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+        CACHED_SIGNATURE_HTML = null;
 
         logTiming("getCachedSignature (session mismatch)", t0);
 
@@ -164,6 +186,7 @@ function getCachedSignature({
             localStorage.removeItem(CACHE_KEY);
             localStorage.removeItem(CACHE_SESSION_KEY);
             localStorage.removeItem(CACHE_TIMESTAMP_KEY);
+            CACHED_SIGNATURE_HTML = null;
 
             logTiming("getCachedSignature (ttl expired)", t0);
 
@@ -184,6 +207,8 @@ function setCachedSignature(html) {
     const t0 = Date.now();
 
     const currentSid = getOrCreateSessionId();
+
+    CACHED_SIGNATURE_HTML = html;
 
     try {
 
@@ -206,60 +231,56 @@ const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const MOBILE_MAX_IMAGE_WIDTH = 200;
 const MOBILE_IMAGE_QUALITY = 0.5;
 
+let _platformCache = null;
+
 function detectPlatform() {
+
+    if (_platformCache) {
+        return _platformCache;
+    }
 
     const platform = (Office?.context?.platform || "").toLowerCase();
     const ua = (navigator?.userAgent || "").toLowerCase();
 
+    let result;
+
     if (platform === "ios" || platform === "iphone" || platform === "ipad") {
-        return "mobile-ios";
-    }
-
-    if (platform === "android") {
-        return "mobile-android";
-    }
-
-    if (
+        result = "mobile-ios";
+    } else if (platform === "android") {
+        result = "mobile-android";
+    } else if (
         ua.includes("outlookmobile") ||
         ua.includes("outlook-ios") ||
         ua.includes("outlook-android")
     ) {
-        return ua.includes("android")
-            ? "mobile-android"
-            : "mobile-ios";
-    }
-
-    if (
+        result = ua.includes("android") ? "mobile-android" : "mobile-ios";
+    } else if (
         (platform === "officeonline" || platform === "web" || platform === "") &&
         (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
     ) {
-        return ua.includes("android")
-            ? "mobile-android"
-            : "mobile-ios";
-    }
-
-    if (platform === "mac") {
-        return "mac";
-    }
-
-    if (
+        result = ua.includes("android") ? "mobile-android" : "mobile-ios";
+    } else if (platform === "mac") {
+        result = "mac";
+    } else if (
         (platform === "" || platform === "desktop") &&
         (ua.includes("macintosh") || ua.includes("mac os x")) &&
         !ua.includes("iphone") &&
         !ua.includes("ipad")
     ) {
-        return "mac";
-    }
-
-    if (
+        result = "mac";
+    } else if (
         platform === "officeonline" ||
         platform === "web" ||
         platform === ""
     ) {
-        return "owa";
+        result = "owa";
+    } else {
+        result = "desktop";
     }
 
-    return "desktop";
+    _platformCache = result;
+
+    return result;
 }
 
 function isMobile() {
@@ -311,14 +332,18 @@ function base64ToArrayBuffer(base64) {
     return bytes.buffer;
 }
 
+// Chunked to avoid call-stack issues / slow per-char concatenation on
+// large encrypted payloads.
 function arrayBufferToBase64(buffer) {
 
     const bytes = new Uint8Array(buffer);
+    const CHUNK_SIZE = 0x8000;
 
     let binaryString = "";
 
-    for (let i = 0; i < bytes.length; i++) {
-        binaryString += String.fromCharCode(bytes[i]);
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+        const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+        binaryString += String.fromCharCode.apply(null, chunk);
     }
 
     return btoa(binaryString);
@@ -584,14 +609,20 @@ async function _applySignatureCore(
     {
         fetchIfMissing = false,
         skipTtl = false,
-        skipSessionCheck = false
+        skipSessionCheck = false,
+        quiet = false
     } = {}
 ) {
 
     const t0 = Date.now();
+    const notify = quiet
+        ? (phase) => logPhase(phase, t0)
+        : (phase) => notifyWithTiming(item, phase, t0);
 
     const userProfile = mailbox?.userProfile || {};
     const userEmail = userProfile?.emailAddress;
+
+    const usedLooseRead = skipTtl && skipSessionCheck;
 
     let fetched = getCachedSignature({
         skipTtl,
@@ -600,7 +631,7 @@ async function _applySignatureCore(
 
     if (fetchIfMissing && userEmail && fetched == null) {
 
-        notifyWithTiming(item, "Fetching signature...", t0);
+        notify("Fetching signature...");
 
         const result = await renderSignatureOnServer(userEmail);
 
@@ -608,26 +639,28 @@ async function _applySignatureCore(
 
             fetched = result;
 
-            CACHED_SIGNATURE_HTML = fetched;
-
             setCachedSignature(fetched);
 
-            notifyWithTiming(item, "Signature fetched ✓", t0);
+            notify("Signature fetched ✓");
         }
     }
 
     if (!fetched) {
 
-        const staleCache = getCachedSignature({
-            skipTtl: true,
-            skipSessionCheck: true
-        });
+        // Avoid a redundant localStorage read if the first read was
+        // already a loose (skipTtl + skipSessionCheck) read.
+        const staleCache = usedLooseRead
+            ? fetched
+            : getCachedSignature({
+                skipTtl: true,
+                skipSessionCheck: true
+            });
 
         if (staleCache) {
 
             fetched = staleCache;
 
-            notifyWithTiming(item, "Using stale cache ✓", t0);
+            notify("Using stale cache ✓");
 
         } else {
 
@@ -643,16 +676,38 @@ async function _applySignatureCore(
         }
     }
 
-    notifyWithTiming(item, "Applying signature...", t0);
+    notify("Applying signature...");
 
     const finalSignature =
         `<div style='margin-top:40px'></div>` +
         fetched +
         `<div style='margin-top:40px'></div>`;
 
+    // ─── Size guard ─────────────────────────────────────────────────────
+    // Outlook (especially mobile / OWA) can fail silently or hang when
+    // asked to insert an oversized signature body. Catch it up front with
+    // a clear, actionable message rather than letting setSignatureAsync
+    // fail deep in the stack.
+    const maxSize = getMaxHtmlSize();
+
+    if (finalSignature.length > maxSize) {
+
+        showNotification(
+            item,
+            "Signature is very large. Cannot be inserted. Please try smaller profile picture.",
+            "errorMessage",
+            true,
+            t0
+        );
+
+        logTiming("_applySignatureCore (aborted: oversized)", t0);
+
+        return;
+    }
+
     await bodySetSignatureAsync(item, finalSignature);
 
-    notifyWithTiming(item, "Signature applied ✓", t0);
+    notify("Signature applied ✓");
 
     setTimeout(() => removeNotification(item), 3000);
 
@@ -706,6 +761,9 @@ const applySignature = async function (
 };
 
 // ─── Send-time core ───────────────────────────────────────────────────────────
+// Runs under a 4s hard timeout (see onSendHandler), so this stays quiet by
+// default — only boundary notifications are shown from the caller — to
+// spend the time budget on actual work, not Outlook notification round-trips.
 async function _onSendCore(item, mailbox) {
 
     const t0 = Date.now();
@@ -714,7 +772,7 @@ async function _onSendCore(item, mailbox) {
 
     if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
 
-        notifyWithTiming(item, "Signature already present ✓", t0);
+        logPhase("Signature already present ✓", t0);
 
         return;
     }
@@ -737,7 +795,7 @@ async function _onSendCore(item, mailbox) {
         return;
     }
 
-    notifyWithTiming(item, "Re-applying signature...", t0);
+    logPhase("Re-applying signature...", t0);
 
     await _applySignatureCore(
         item,
@@ -745,11 +803,12 @@ async function _onSendCore(item, mailbox) {
         {
             fetchIfMissing: false,
             skipTtl: true,
-            skipSessionCheck: true
+            skipSessionCheck: true,
+            quiet: true
         }
     );
 
-    notifyWithTiming(item, "Signature verified ✓", t0);
+    logPhase("Signature verified ✓", t0);
 
     logTiming("_onSendCore", t0);
 }
@@ -818,27 +877,10 @@ if (
     typeof Office.actions !== "undefined"
 ) {
 
-    Office.actions.associate(
-        "applySignature",
-        applySignature
-    );
-
-    console.log(
-        "[CardByte] Registered: applySignature"
-    );
-
-    Office.actions.associate(
-        "onSendHandler",
-        onSendHandler
-    );
-
-    console.log(
-        "[CardByte] Registered: onSendHandler"
-    );
-
+    Office.actions.associate("applySignature", applySignature);
+    console.log("[CardByte] Registered: applySignature");
+    Office.actions.associate("onSendHandler", onSendHandler);
+    console.log("[CardByte] Registered: onSendHandler");
 } else {
-
-    console.log(
-        "[CardByte] Office.actions unavailable"
-    );
+    console.log("[CardByte] Office.actions unavailable");
 }
