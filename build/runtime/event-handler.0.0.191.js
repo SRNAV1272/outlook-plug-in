@@ -51,7 +51,6 @@ function showNotification(
     const details = {
         type,
         message: finalMessage,
-        icon: "none",
         persistent,
     };
 
@@ -511,6 +510,7 @@ async function renderSignatureOnServer(user) {
             notifyWithTiming(item, "Signature decrypted ✓", apiStart);
 
             logTiming("renderSignatureOnServer", t0);
+            console.warn("Decrypted data...", JSON.parse(decryptedData));
 
             return JSON.parse(decryptedData)?.html || null;
         }
