@@ -6708,7 +6708,7 @@ var CONFIG = {
     WRAP_BOTTOM_PX: 40,
     SEND_HANDLER_TIMEOUT_MS: 6000,  // raised from 4.5s — matches WebView guard
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
-    DIAG_ENABLED: false
+    DIAG_ENABLED: true
 };
 
 // ─── In-memory signature store ────────────────────────────────────────────────
