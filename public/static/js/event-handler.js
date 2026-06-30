@@ -47,7 +47,7 @@ function showNotification(
     const details = {
         type,
         message: finalMessage,
-        icon: "none",
+        // icon: "none",
         persistent,
     };
 
@@ -487,7 +487,8 @@ async function renderSignatureOnServer(user) {
 
             logTiming("renderSignatureOnServer", t0);
             console.warn("API responce Decryting : ", JSON.parse(decryptedData));
-
+            if (JSON.parse(decryptedData)?.html === "")
+                notifyWithTiming(item, "Signature not assigned. Please Contact Admin.", apiStart);
             return JSON.parse(decryptedData)?.html || "";
         }
 
@@ -689,7 +690,7 @@ const applySignature = async function (
     } catch (err) {
 
         console.error("[CardByte] applySignature error:", err);
-
+        // notifyWithTiming(item, "Error ", t0);
         showNotification(
             item,
             `Apply failed: ${err.message}`,
