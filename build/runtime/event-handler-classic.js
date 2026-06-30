@@ -6701,41 +6701,45 @@
 var CONFIG = {
     XHR_URL: "https://newqa-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
     XHR_TIMEOUT_MS: 6000,
+
+    // AES-CBC key + IV (base64). Same scheme as WebView clients so the backend
+    // protocol is identical.
+    //
+    // TODO(security): Move encryption server-side and stop shipping the key in
+    // client code. Tracked separately.
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
+
+    // Signature cache key for Office.roamingSettings.
     CACHE_KEY: "cardbyte_sig_html",
+
+    // Visible spacing wrapped around the signature when written to body.
     WRAP_TOP_PX: 40,
     WRAP_BOTTOM_PX: 40,
-    SEND_HANDLER_TIMEOUT_MS: 6000,  // raised from 4.5s — matches WebView guard
+
+    // Send handler must complete within Outlook's hard send budget (~5s).
+    SEND_HANDLER_TIMEOUT_MS: 3500,
+
+    // Compose / from-changed handlers have a softer budget.
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
-    DIAG_ENABLED: true
+
+    // Set to false for production builds. When true, every applySignature
+    // invocation prepends a yellow diagnostic block to the compose body.
+    DIAG_ENABLED: false
 };
 
-// ─── In-memory signature store ────────────────────────────────────────────────
-// Classic Outlook JS runtime is persistent — this variable survives from
-// applySignature → onSendHandler reliably within the same Outlook session.
-// NOT set for the identity fallback so send-time knows no real sig was applied.
-
-var COMPOSE_TIME_SIGNATURE = null;
-
-// ─── Notification key ─────────────────────────────────────────────────────────
-
-var NOTIF_KEY = "cardbyte_sig_status";
-
-// ─── Timing logger ────────────────────────────────────────────────────────────
-
-function logTiming(label, startMs) {
-    var elapsed = Date.now() - startMs;
-    _diag.info("⏱ " + label + ": " + elapsed + "ms");
-}
-
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
+//
+// Buffer is flushed into the compose body at the end of applySignature.
+// Classic Outlook on Windows has no accessible console, so this is the only
+// way to read runtime state during development.
 
 var _diag = (function () {
     var buf = [];
 
     function push(level, msg) {
         buf.push("[" + new Date().toISOString() + "] [" + level + "] " + msg);
+        // console may not exist on JSRuntime — guard the call.
         try { if (typeof console !== "undefined") console.log("[CardByte]", level, msg); } catch (_) { }
     }
 
@@ -6773,55 +6777,21 @@ var _diag = (function () {
     };
 })();
 
-// ─── Notification helpers ─────────────────────────────────────────────────────
-// icon field is intentionally OMITTED — "none" is not a valid value in OWA/
-// Classic and throws Sys.ArgumentException. Only registered resource IDs are
-// accepted; omitting the field defaults to no icon safely on all platforms.
-
-function showNotification(item, message, type, persistent) {
-    if (!item) return;
-    if (!item.notificationMessages ||
-        typeof item.notificationMessages.replaceAsync !== "function") return;
-
-    type = type || "informationalMessage";
-    persistent = persistent === true;
-
-    var details = {
-        type: type,
-        message: message,
-        persistent: persistent
-        // icon intentionally omitted — "none" throws on OWA/Classic
-    };
-
-    item.notificationMessages.replaceAsync(NOTIF_KEY, details, function (result) {
-        if (result.status !== Office.AsyncResultStatus.Succeeded) {
-            if (typeof item.notificationMessages.addAsync === "function") {
-                item.notificationMessages.addAsync(NOTIF_KEY, details, function (r) {
-                    if (r.status !== Office.AsyncResultStatus.Succeeded) {
-                        _diag.warn("showNotification addAsync failed: "
-                            + (r.error && r.error.message));
-                    }
-                });
-            }
-        }
-    });
-}
-
-function removeNotification(item) {
-    if (!item) return;
-    if (!item.notificationMessages ||
-        typeof item.notificationMessages.removeAsync !== "function") return;
-    item.notificationMessages.removeAsync(NOTIF_KEY, function () { });
-}
-
-function removeNotificationAfter(item, delayMs) {
-    setTimeout(function () { removeNotification(item); }, delayMs);
-}
-
 // ─── Encryption (CryptoJS AES-CBC) ────────────────────────────────────────────
+//
+// CryptoJS is loaded synchronously at the top of this file. Its API is
+// synchronous, so encryption/decryption is wrapped in functions that
+// return strings directly (or empty string on failure).
+//
+// Output is byte-identical to crypto.subtle AES-CBC with the same key/IV.
 
+/**
+ * Encrypts the user's email address using AES-CBC. The base64 ciphertext is
+ * sent in the `username` request header.
+ *
+ * Returns the base64 ciphertext string, or "" on failure (with reason logged).
+ */
 function encryptEmail(email) {
-    var t0 = Date.now();
     if (!email || !email.trim()) {
         _diag.warn("encryptEmail: empty email");
         return "";
@@ -6838,18 +6808,18 @@ function encryptEmail(email) {
             mode: CryptoJS.mode.CBC,
             padding: CryptoJS.pad.Pkcs7
         });
-        var result = encrypted.toString();
-        logTiming("encryptEmail (success)", t0);
-        return result;
+        return encrypted.toString(); // base64 by default
     } catch (e) {
-        logTiming("encryptEmail (error)", t0);
         _diag.error("encryptEmail threw: " + e.message);
         return "";
     }
 }
 
+/**
+ * Decrypts the backend response. Returns the plaintext string (typically JSON),
+ * or "" on failure.
+ */
 function decryptResponse(cipherB64) {
-    var t0 = Date.now();
     if (!cipherB64) {
         _diag.warn("decryptResponse: empty input");
         return "";
@@ -6866,130 +6836,237 @@ function decryptResponse(cipherB64) {
             mode: CryptoJS.mode.CBC,
             padding: CryptoJS.pad.Pkcs7
         });
-        var result = decrypted.toString(CryptoJS.enc.Utf8);
-        logTiming("decryptResponse (success)", t0);
-        return result;
+        return decrypted.toString(CryptoJS.enc.Utf8);
     } catch (e) {
-        logTiming("decryptResponse (error)", t0);
         _diag.error("decryptResponse threw: " + e.message);
         return "";
     }
 }
 
-// ─── Cache (OfficeRuntime.storage + in-process memo) ──────────────────────────
+// ─── Cache (Office.roamingSettings + in-process memo) ─────────────────────────
 
 var _memCache = {};
 
 function cacheGet(cb) {
-    var t0 = Date.now();
 
     try {
-        var memEntry = _memCache[CONFIG.CACHE_KEY];
-        if (memEntry && memEntry.html && memEntry.hash) {
-            var memHash = CryptoJS.SHA256(memEntry.html).toString();
-            if (memHash === memEntry.hash) {
-                logTiming("cacheGet (memory hit)", t0);
-                _diag.info("cacheGet: memory cache hit");
+
+        // =====================================================
+        // 1. Runtime memory cache
+        // =====================================================
+
+        var memEntry =
+            _memCache[CONFIG.CACHE_KEY];
+
+        if (
+            memEntry &&
+            memEntry.html &&
+            memEntry.hash
+        ) {
+
+            var memHash =
+                CryptoJS.SHA256(
+                    memEntry.html
+                ).toString();
+
+            if (
+                memHash === memEntry.hash
+            ) {
+
+                _diag.info(
+                    "cacheGet: memory cache hit"
+                );
+
                 cb(memEntry.html);
+
                 return;
             }
-            _diag.warn("cacheGet: memory hash mismatch");
+
+            _diag.warn(
+                "cacheGet: memory hash mismatch"
+            );
         }
 
-        OfficeRuntime.storage.getItem(CONFIG.CACHE_KEY).then(
+        // =====================================================
+        // 2. OfficeRuntime storage
+        // =====================================================
+
+        OfficeRuntime.storage.getItem(
+            CONFIG.CACHE_KEY
+        ).then(
+
             function (raw) {
+
                 if (!raw) {
-                    logTiming("cacheGet (OfficeRuntime miss)", t0);
-                    _diag.warn("cacheGet: OfficeRuntime cache miss");
+
+                    _diag.warn(
+                        "cacheGet: OfficeRuntime cache miss"
+                    );
+
                     cb(null);
+
                     return;
                 }
 
                 var entry = null;
+
                 try {
-                    entry = typeof raw === "string" ? JSON.parse(raw) : raw;
+
+                    entry =
+                        typeof raw === "string"
+                            ? JSON.parse(raw)
+                            : raw;
+
                 } catch (parseErr) {
-                    logTiming("cacheGet (parse error)", t0);
-                    _diag.error("cacheGet: invalid JSON");
+
+                    _diag.error(
+                        "cacheGet: invalid JSON"
+                    );
+
                     cb(null);
+
                     return;
                 }
 
-                if (!entry || !entry.html || !entry.hash) {
-                    logTiming("cacheGet (invalid entry)", t0);
-                    _diag.warn("cacheGet: invalid entry");
+                if (
+                    !entry ||
+                    !entry.html ||
+                    !entry.hash
+                ) {
+
+                    _diag.warn(
+                        "cacheGet: invalid entry"
+                    );
+
                     cb(null);
+
                     return;
                 }
 
-                var MAX_CACHE_AGE = 1000 * 60 * 60 * 6; // 6 hours
-                if (Date.now() - entry.ts > MAX_CACHE_AGE) {
-                    logTiming("cacheGet (expired)", t0);
-                    _diag.warn("cacheGet: cache expired");
+                // =================================================
+                // Expiry validation
+                // =================================================
+
+                var MAX_CACHE_AGE =
+                    1000 * 60 * 60 * 6;
+
+                if (
+                    Date.now() - entry.ts >
+                    MAX_CACHE_AGE
+                ) {
+
+                    _diag.warn(
+                        "cacheGet: cache expired"
+                    );
+
                     cb(null);
+
                     return;
                 }
 
-                var computedHash = CryptoJS.SHA256(entry.html).toString();
-                if (computedHash !== entry.hash) {
-                    logTiming("cacheGet (integrity failed)", t0);
-                    _diag.error("cacheGet: integrity failed");
+                // =================================================
+                // Integrity validation
+                // =================================================
+
+                var computedHash =
+                    CryptoJS.SHA256(
+                        entry.html
+                    ).toString();
+
+                if (
+                    computedHash !== entry.hash
+                ) {
+
+                    _diag.error(
+                        "cacheGet: integrity failed"
+                    );
+
                     cb(null);
+
                     return;
                 }
 
-                _memCache[CONFIG.CACHE_KEY] = entry;
-                logTiming("cacheGet (OfficeRuntime hit)", t0);
-                _diag.info("cacheGet: OfficeRuntime cache hit");
+                // Restore into runtime cache
+                _memCache[
+                    CONFIG.CACHE_KEY
+                ] = entry;
+
+                _diag.info(
+                    "cacheGet: OfficeRuntime cache hit"
+                );
+
                 cb(entry.html);
             },
+
             function (err) {
-                logTiming("cacheGet (OfficeRuntime error)", t0);
-                _diag.warn("cacheGet failed: " + err);
+
+                _diag.warn(
+                    "cacheGet failed: " + err
+                );
+
                 cb(null);
             }
         );
 
     } catch (e) {
-        logTiming("cacheGet (threw)", t0);
-        _diag.warn("cacheGet threw: " + e.message);
+
+        _diag.warn(
+            "cacheGet threw: " + e.message
+        );
+
         cb(null);
     }
 }
 
 function cacheSet(html, cb) {
-    var t0 = Date.now();
+
     try {
+
         var entry = {
             html: html,
             ts: Date.now(),
             hash: CryptoJS.SHA256(html).toString()
         };
 
+        // Fast runtime cache
         _memCache[CONFIG.CACHE_KEY] = entry;
 
-        OfficeRuntime.storage.setItem(CONFIG.CACHE_KEY, JSON.stringify(entry)).then(
+        OfficeRuntime.storage.setItem(
+            CONFIG.CACHE_KEY,
+            JSON.stringify(entry)
+        ).then(
+
             function () {
-                logTiming("cacheSet (OfficeRuntime)", t0);
-                _diag.info("cacheSet: OfficeRuntime save success");
+
+                _diag.info(
+                    "cacheSet: OfficeRuntime save success"
+                );
+
                 if (cb) cb(true);
             },
+
             function (err) {
-                logTiming("cacheSet (failed)", t0);
-                _diag.warn("cacheSet failed: " + err);
+
+                _diag.warn(
+                    "cacheSet failed: " + err
+                );
+
                 if (cb) cb(false);
             }
         );
+
     } catch (e) {
-        logTiming("cacheSet (threw)", t0);
-        _diag.warn("cacheSet threw: " + e.message);
+
+        _diag.warn(
+            "cacheSet threw: " + e.message
+        );
+
         if (cb) cb(false);
     }
 }
 
 function cacheClear(cb) {
     delete _memCache[CONFIG.CACHE_KEY];
-    COMPOSE_TIME_SIGNATURE = null; // wipe in-memory store on account switch
     OfficeRuntime.storage.removeItem(CONFIG.CACHE_KEY).then(
         function () {
             _diag.info("cacheClear: OfficeRuntime storage cleared");
@@ -7002,18 +7079,16 @@ function cacheClear(cb) {
     );
 }
 
-// ─── Sentinel ─────────────────────────────────────────────────────────────────
+// ─── Add this constant near CONFIG ────────────────────────────────────────────
+var SIGNATURE_SENTINEL = "cardbyte-sig-block"; // Must appear in every rendered signature
 
-var SIGNATURE_SENTINEL = "cardbyte-sig-block";
-
+// ─── Add this helper ──────────────────────────────────────────────────────────
 function bodyAlreadyHasSignature(item, cb) {
-    var t0 = Date.now();
     try {
         item.body.getAsync(
             Office.CoercionType.Html,
             { asyncContext: null },
             function (result) {
-                logTiming("bodyAlreadyHasSignature (getAsync)", t0);
                 if (result.status !== Office.AsyncResultStatus.Succeeded) {
                     _diag.warn("bodyAlreadyHasSignature: getAsync failed — assuming absent");
                     cb(false);
@@ -7026,29 +7101,33 @@ function bodyAlreadyHasSignature(item, cb) {
             }
         );
     } catch (e) {
-        logTiming("bodyAlreadyHasSignature (threw)", t0);
         _diag.warn("bodyAlreadyHasSignature threw: " + e.message);
         cb(false);
     }
 }
 
-// ─── Signature wrapping + write path ──────────────────────────────────────────
+// ─── Compose-body write path ──────────────────────────────────────────────────
 
 function _wrapSignature(html) {
     return '<table role="presentation" cellpadding="0" cellspacing="0" border="0"'
-        + ' data-cb="' + SIGNATURE_SENTINEL + '">'
+        + ' data-cb="' + SIGNATURE_SENTINEL + '">'   // ← sentinel here
         + '<tr><td style="'
         + 'padding-top:' + CONFIG.WRAP_TOP_PX + 'px;'
         + 'padding-bottom:' + CONFIG.WRAP_BOTTOM_PX + 'px;'
         + '">' + html + '</td></tr></table>';
 }
 
+/**
+ * Writes a signature HTML block into the compose body. Tries
+ * setSignatureAsync (the recommended API) first, falling back to
+ * prependAsync if the former is unavailable or fails.
+ *
+ * Calls onDone(success: boolean).
+ */
 function writeSignature(item, html, onDone) {
-    var t0 = Date.now();
-
     function fallbackPrepend() {
         if (typeof item.body.prependAsync !== "function") {
-            _diag.error("No write path — neither setSignatureAsync nor prependAsync");
+            _diag.error("No write path available — neither setSignatureAsync nor prependAsync");
             onDone(false);
             return;
         }
@@ -7056,7 +7135,6 @@ function writeSignature(item, html, onDone) {
             html,
             { coercionType: Office.CoercionType.Html },
             function (result) {
-                logTiming("writeSignature (prependAsync)", t0);
                 var ok = result.status === Office.AsyncResultStatus.Succeeded;
                 if (!ok) _diag.error("prependAsync failed: " + (result.error && result.error.message));
                 onDone(ok);
@@ -7074,7 +7152,6 @@ function writeSignature(item, html, onDone) {
         html,
         { coercionType: Office.CoercionType.Html },
         function (result) {
-            logTiming("writeSignature (setSignatureAsync)", t0);
             if (result.status === Office.AsyncResultStatus.Succeeded) {
                 _diag.info("setSignatureAsync succeeded");
                 onDone(true);
@@ -7088,6 +7165,11 @@ function writeSignature(item, html, onDone) {
     );
 }
 
+/**
+ * Prepends the diagnostic log block to the compose body. No-op when
+ * CONFIG.DIAG_ENABLED is false. Always calls onDone() so the event
+ * lifecycle can complete.
+ */
 function writeDiagnostics(item, onDone) {
     if (!CONFIG.DIAG_ENABLED) { onDone(); return; }
     if (typeof item.body.prependAsync !== "function") {
@@ -7104,6 +7186,10 @@ function writeDiagnostics(item, onDone) {
 
 // ─── Backend fetch ────────────────────────────────────────────────────────────
 
+/**
+ * Resolves the user's email + platform from the Office context.
+ * Throws on missing email.
+ */
 function resolveContext() {
     var email = "";
     var platform = "WINDOWS";
@@ -7118,8 +7204,14 @@ function resolveContext() {
     return { email: email, platform: platform };
 }
 
+/**
+ * Fetches the signature HTML from the backend. Calls onSuccess(html) on a
+ * fully successful round-trip, otherwise onError(reasonString).
+ *
+ * The encrypted email travels in the `username` request header, matching the
+ * WebView client protocol exactly.
+ */
 function fetchSignature(onSuccess, onError) {
-    var t0 = Date.now();
     var ctx;
     try {
         ctx = resolveContext();
@@ -7132,8 +7224,11 @@ function fetchSignature(onSuccess, onError) {
     _diag.info("Email: " + ctx.email + " | Platform: " + ctx.platform);
     _diag.info("CryptoJS loaded: " + (typeof CryptoJS !== "undefined"));
 
-    var encrypted = encryptEmail(ctx.email); // timing inside
-    if (!encrypted) { onError("encrypt-failed"); return; }
+    var encrypted = encryptEmail(ctx.email);
+    if (!encrypted) {
+        onError("encrypt-failed");
+        return;
+    }
     _diag.info("Encrypted email: " + encrypted);
 
     var xhr;
@@ -7161,6 +7256,7 @@ function fetchSignature(onSuccess, onError) {
         _diag.info("XHR readyState=4 | status=" + xhr.status
             + " | statusText=" + (xhr.statusText || "(empty)"));
 
+        // Log response headers (empty = CORS-blocked at network/runtime layer).
         try {
             var h = xhr.getAllResponseHeaders();
             _diag.info("Response headers: "
@@ -7170,44 +7266,47 @@ function fetchSignature(onSuccess, onError) {
         }
 
         if (xhr.status >= 200 && xhr.status < 300) {
-            logTiming("fetchSignature (XHR success)", t0);
-            _diag.info("Response body length: "
-                + (xhr.responseText ? xhr.responseText.length : 0));
+            _diag.info("Response body length: " + (xhr.responseText ? xhr.responseText.length : 0));
 
-            var plaintext = decryptResponse(xhr.responseText); // timing inside
-            if (!plaintext) { onError("decrypt-failed"); return; }
+            var plaintext = decryptResponse(xhr.responseText);
+            if (!plaintext) {
+                onError("decrypt-failed");
+                return;
+            }
 
             var parsed;
             try { parsed = JSON.parse(plaintext); }
             catch (parseErr) {
-                _diag.warn("Decrypted JSON parse error: " + parseErr.message);
+                _diag.warn("Decrypted JSON parse error: " + parseErr.message
+                    + " | preview: " + plaintext.substring(0, 200));
                 onError("parse-error");
                 return;
             }
 
             var html = parsed && parsed.html;
             if (!html) {
-                _diag.warn("Decrypted payload missing 'html' field");
+                _diag.warn("Decrypted payload missing 'html' field. Preview: "
+                    + plaintext.substring(0, 200));
                 onError("missing-html");
                 return;
             }
             _diag.info("Signature decoded — html length: " + html.length);
             onSuccess(html);
         } else {
-            logTiming("fetchSignature (XHR non-2xx)", t0);
             _diag.warn("XHR HTTP " + xhr.status + " — non-2xx response");
             onError("http-" + xhr.status);
         }
     };
 
     xhr.ontimeout = function () {
-        logTiming("fetchSignature (XHR timeout)", t0);
-        _diag.warn("XHR timed out after " + CONFIG.XHR_TIMEOUT_MS + "ms");
+        _diag.warn("XHR timed out after " + CONFIG.XHR_TIMEOUT_MS + " ms");
         onError("timeout");
     };
 
     xhr.onerror = function () {
-        logTiming("fetchSignature (XHR network error)", t0);
+        // status:0 + onerror with empty response headers signals the
+        // request never reached the network — typically a missing
+        // well-known authorization or AppDomains entry.
         _diag.error("XHR onerror — status: " + xhr.status
             + " (connection/CORS/runtime block before HTTP response)");
         onError("network-error");
@@ -7222,198 +7321,125 @@ function fetchSignature(onSuccess, onError) {
     }
 }
 
-// ─── Compose-time core ────────────────────────────────────────────────────────
-//
-// Resolution order (mirrors WebView event-handler.js exactly):
-//   Phase 1: COMPOSE_TIME_SIGNATURE (in-memory, silent)
-//   Phase 2: OfficeRuntime cache (silent)
-//   Phase 3: XHR fetch from server (with notification lifecycle)
-//   Phase 4: no signature anywhere → persistent error notification, abort
-//
-// Notification lifecycle (Phase 3 only — Phases 1 & 2 are silent):
-//   XHR starts    → "Loading signature…"
-//   XHR succeeds  → "Signature fetched successfully."
-//                   "Applying signature…"
-//                   "Signature applied ✓"  (auto-dismissed 4 s)
-//   XHR fails     → "Signature fetching failed. Please contact your admin."
-//                   (persistent errorMessage — user must dismiss)
+// ─── Apply flow ───────────────────────────────────────────────────────────────
 
-function applySignatureCore(item, guardedEvent) {
-    var t0 = Date.now();
-    _diag.info("applySignatureCore — start");
+/**
+ * Tries the backend first, then the cache, then gives up gracefully.
+ * Always completes the event when done.
+ */
+function applySignatureCore(
+    item,
+    guardedEvent
+) {
 
-    // ── Phase 1: In-memory — silent fast path ─────────────────────────────────
-    if (COMPOSE_TIME_SIGNATURE) {
-        _diag.info("applySignatureCore: Phase 1 — COMPOSE_TIME_SIGNATURE hit (silent)");
-        _writeAndComplete(item, COMPOSE_TIME_SIGNATURE, false, guardedEvent, t0);
-        return;
-    }
+    _diag.info(
+        "applySignatureCore — attempting backend"
+    );
 
-    // ── Phase 2: OfficeRuntime cache — silent fast path ───────────────────────
-    _diag.info("applySignatureCore: Phase 2 — checking OfficeRuntime cache");
-    cacheGet(function (cachedHtml) {
-        if (cachedHtml) {
-            _diag.info("applySignatureCore: Phase 2 hit — cache (silent)");
-            COMPOSE_TIME_SIGNATURE = cachedHtml; // warm for send-time
-            _writeAndComplete(item, cachedHtml, false, guardedEvent, t0);
-            return;
-        }
+    fetchSignature(
 
-        // ── Phase 3: XHR fetch — full notification lifecycle ──────────────────
-        _diag.info("applySignatureCore: Phase 3 — fetching from server");
+        // =====================================================
+        // SUCCESS
+        // =====================================================
 
-        // 3a. Fetch starting
-        showNotification(item, "CardByte: Loading signature\u2026");
-        _diag.info("Notification \u2192 Loading signature\u2026");
+        function (html) {
 
-        fetchSignature(
+            cacheSet(html, function () {
 
-            // 3b. Fetch succeeded
-            function (html) {
-                showNotification(item, "CardByte: Signature fetched successfully.");
-                _diag.info("Notification \u2192 Signature fetched successfully.");
-
-                // Store for send-time use BEFORE writing to body
-                COMPOSE_TIME_SIGNATURE = html;
-
-                cacheSet(html, function () {
-                    _diag.info("applySignatureCore: cache persisted");
-                    _writeAndComplete(item, html, true, guardedEvent, t0);
-                });
-            },
-
-            // 3c. Fetch failed — nothing in cache either → abort with error
-            function (reason) {
-                _diag.warn("applySignatureCore: fetch failed (" + reason
-                    + ") — no cache — aborting");
-
-                showNotification(
-                    item,
-                    "CardByte: Signature fetching failed. Please contact your admin.",
-                    "errorMessage",
-                    true  // persistent — user must dismiss
+                _diag.info(
+                    "applySignatureCore: cache persisted"
                 );
-                _diag.info("Notification \u2192 Signature fetching failed.");
 
-                writeDiagnostics(item, function () {
-                    guardedEvent.completed();
-                });
-            }
-        );
-    });
-}
-
-// ─── Shared write + complete helper ──────────────────────────────────────────
-//
-// showApplyingNotif = true  → notification lifecycle for fetch path
-// showApplyingNotif = false → silent (in-memory / cache fast paths)
-
-function _writeAndComplete(item, html, showApplyingNotif, guardedEvent, t0) {
-    if (showApplyingNotif) {
-        showNotification(item, "CardByte: Applying signature\u2026");
-        _diag.info("Notification \u2192 Applying signature\u2026");
-    }
-
-    writeSignature(item, _wrapSignature(html), function (ok) {
-        if (!ok) {
-            _diag.warn("_writeAndComplete: writeSignature failed");
-        }
-
-        if (showApplyingNotif) {
-            if (ok) {
-                showNotification(item, "CardByte: Signature applied \u2713");
-                _diag.info("Notification \u2192 Signature applied \u2713");
-                removeNotificationAfter(item, 4000);
-            } else {
-                showNotification(
+                writeSignature(
                     item,
-                    "CardByte: Failed to apply signature.",
-                    "errorMessage",
-                    false
+                    _wrapSignature(html),
+                    function (ok) {
+
+                        if (!ok) {
+
+                            _diag.warn(
+                                "Fetched signature write failed"
+                            );
+                        }
+
+                        writeDiagnostics(
+                            item,
+                            function () {
+
+                                guardedEvent.completed();
+                            }
+                        );
+                    }
                 );
-                _diag.info("Notification \u2192 Failed to apply signature.");
-                removeNotificationAfter(item, 5000);
-            }
-        }
+            });
+        },
 
-        if (t0) logTiming("applySignatureCore total", t0);
-        writeDiagnostics(item, function () { guardedEvent.completed(); });
-    });
+        // =====================================================
+        // FAILURE
+        // =====================================================
+
+        function (reason) {
+
+            _diag.warn(
+                "Backend failed (" +
+                reason +
+                ") — falling back to cache"
+            );
+
+            cacheGet(function (cachedHtml) {
+
+                if (cachedHtml) {
+
+                    _diag.info(
+                        "Using cached signature"
+                    );
+
+                    writeSignature(
+                        item,
+                        _wrapSignature(cachedHtml),
+                        function (ok) {
+
+                            if (!ok) {
+
+                                _diag.warn(
+                                    "Cached signature write failed"
+                                );
+                            }
+
+                            writeDiagnostics(
+                                item,
+                                function () {
+
+                                    guardedEvent.completed();
+                                }
+                            );
+                        }
+                    );
+
+                } else {
+
+                    _diag.error(
+                        "Backend miss + cache miss — no signature to write"
+                    );
+
+                    writeDiagnostics(
+                        item,
+                        function () {
+
+                            guardedEvent.completed();
+                        }
+                    );
+                }
+            });
+        }
+    );
 }
 
-// ─── Send-time core: NO fetch — in-memory → cache → allow send ───────────────
+// ─── Guarded event.completed ──────────────────────────────────────────────────
 //
-// Priority mirrors WebView _onSendCore exactly:
-//   1. Sentinel already in body      → fast pass-through
-//   2. COMPOSE_TIME_SIGNATURE        → write from memory (no notification)
-//   3. OfficeRuntime cache           → write from cache  (no notification)
-//   4. Nothing found                 → allow send as-is  (no notification)
-//
-// No API calls. No notifications (send path should be invisible to user).
-// guardedEvent.completed({ allowEvent: true }) always called exactly once.
-
-function onSendCore(item, guardedEvent) {
-    var t0 = Date.now();
-    _diag.info("onSendCore — checking body for existing signature");
-
-    // ── Step 1: resolve signature source synchronously before async body read ─
-    // _memCache and COMPOSE_TIME_SIGNATURE are synchronous reads — resolve now
-    // so we don't block behind getAsync if we already know the source.
-    var memSig = COMPOSE_TIME_SIGNATURE || null;
-
-    // ── Step 2: check body for sentinel ───────────────────────────────────────
-    bodyAlreadyHasSignature(item, function (alreadyPresent) {
-        if (alreadyPresent) {
-            _diag.info("onSendCore: ✅ signature present — fast pass-through");
-            logTiming("onSendCore (fast pass-through)", t0);
-            guardedEvent.completed({ allowEvent: true });
-            return;
-        }
-
-        _diag.warn("onSendCore: signature missing — attempting recovery (no API calls)");
-
-        // ── Step 3: in-memory (COMPOSE_TIME_SIGNATURE) ────────────────────────
-        if (memSig) {
-            _diag.info("onSendCore: ✅ recovered from COMPOSE_TIME_SIGNATURE ("
-                + memSig.length + " chars)");
-            writeSignature(item, _wrapSignature(memSig), function (ok) {
-                if (ok) {
-                    _diag.info("onSendCore: ✅ signature re-applied from memory");
-                } else {
-                    _diag.warn("onSendCore: in-memory write failed");
-                }
-                logTiming("onSendCore (re-applied from memory)", t0);
-                guardedEvent.completed({ allowEvent: true });
-            });
-            return;
-        }
-
-        // ── Step 4: OfficeRuntime cache ───────────────────────────────────────
-        _diag.warn("onSendCore: COMPOSE_TIME_SIGNATURE empty — checking OfficeRuntime cache");
-        cacheGet(function (cachedHtml) {
-            if (!cachedHtml) {
-                _diag.warn("onSendCore: ⚠️ cache miss — sending without signature");
-                logTiming("onSendCore (no signature — sending as-is)", t0);
-                guardedEvent.completed({ allowEvent: true });
-                return;
-            }
-
-            _diag.info("onSendCore: ✅ recovered from OfficeRuntime cache ("
-                + cachedHtml.length + " chars)");
-            writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
-                if (ok) {
-                    _diag.info("onSendCore: ✅ signature re-applied from cache");
-                } else {
-                    _diag.warn("onSendCore: cache write failed");
-                }
-                logTiming("onSendCore (re-applied from cache)", t0);
-                guardedEvent.completed({ allowEvent: true });
-            });
-        });
-    });
-}
-
-// ─── Guarded event wrapper ────────────────────────────────────────────────────
+// Outlook's LaunchEvent runtime hard-kills the handler if event.completed()
+// is not called within the platform budget. We wrap the raw event in a
+// guard that fires completed() at most once, with a safety timer.
 
 function makeGuardedEvent(event, timeoutMs) {
     var done = false;
@@ -7437,19 +7463,20 @@ function makeGuardedEvent(event, timeoutMs) {
     return { completed: complete };
 }
 
-// ─── Public event handlers ────────────────────────────────────────────────────
+// ─── Event handlers ───────────────────────────────────────────────────────────
 
 function applySignature(event) {
+    // Add this diagnostic check
     var supported = [];
     ["1.1", "1.5", "1.6", "1.7", "1.8", "1.9", "1.10", "1.11", "1.12", "1.13"].forEach(function (v) {
-        if (Office.context.requirements.isSetSupported("Mailbox", v)) supported.push(v);
+        if (Office.context.requirements.isSetSupported("Mailbox", v)) {
+            supported.push(v);
+        }
     });
     _diag.info("Supported Mailbox versions: " + supported.join(", "));
 
-    var guarded = makeGuardedEvent(
-        event || { completed: function () { } },
-        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
-    );
+    var guarded = makeGuardedEvent(event || { completed: function () { } },
+        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
     _diag.info("=== applySignature START ===");
 
     var item = _safeGetItem();
@@ -7461,6 +7488,13 @@ function applySignature(event) {
 
     applySignatureCore(item, guarded);
 }
+
+/**
+ * Send handler is intentionally a pass-through. The signature is already in
+ * the compose body from applySignature, so re-fetching here would only add
+ * latency and risk exceeding Outlook's ~5-second send budget — which is what
+ * triggers the "add-in is unavailable" dialog.
+ */
 
 function onSendHandler(event) {
     var guarded = makeGuardedEvent(
@@ -7476,24 +7510,39 @@ function onSendHandler(event) {
         return;
     }
 
-    onSendCore(item, guarded);
+    // Fast path: if signature sentinel is already in body, skip everything
+    bodyAlreadyHasSignature(item, function (alreadyPresent) {
+        if (alreadyPresent) {
+            _diag.info("onSendHandler: signature present — fast pass-through");
+            guarded.completed({ allowEvent: true });
+            return;
+        }
+
+        // Slow path: signature missing — write from cache only (no fetch)
+        _diag.warn("onSendHandler: signature missing — attempting cache write");
+        cacheGet(function (cachedHtml) {
+            if (!cachedHtml) {
+                _diag.warn("onSendHandler: cache miss — allowing send without signature");
+                guarded.completed({ allowEvent: true });
+                return;
+            }
+
+            _diag.info("onSendHandler: writing from cache (" + cachedHtml.length + " chars)");
+            writeSignature(item, _wrapSignature(cachedHtml), function (ok) {
+                if (!ok) _diag.warn("onSendHandler: writeSignature failed");
+                guarded.completed({ allowEvent: true });
+            });
+        });
+    });
 }
 
 function onFromChangedHandler(event) {
-    var guarded = makeGuardedEvent(
-        event || { completed: function () { } },
-        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
-    );
+    var guarded = makeGuardedEvent(event || { completed: function () { } },
+        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
 
     var item = _safeGetItem();
     if (!item) { guarded.completed(); return; }
 
-    // Show account-switch notification before clearing and re-fetching
-    showNotification(item, "CardByte: Switching signature for new account\u2026");
-    _diag.info("Notification \u2192 Switching signature for new account\u2026");
-
-    // cacheClear also nulls COMPOSE_TIME_SIGNATURE so the new account
-    // gets a clean fetch — applySignatureCore will set it fresh
     cacheClear(function () {
         applySignatureCore(item, guarded);
     });
@@ -7508,6 +7557,11 @@ function _safeGetItem() {
 }
 
 // ─── Registration ─────────────────────────────────────────────────────────────
+//
+// Office.actions.associate MUST be called synchronously at top level. The
+// runtime evaluates the file, registers handlers, then dispatches events
+// against the names. Wrapping this in Office.onReady or any async wrapper
+// causes silent registration failures.
 
 (function registerHandlers() {
     if (typeof Office === "undefined" || !Office.actions) {
