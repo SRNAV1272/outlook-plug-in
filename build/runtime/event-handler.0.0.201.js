@@ -468,8 +468,17 @@ async function renderSignatureOnServer(user) {
 
             logTiming("renderSignatureOnServer", t0);
             console.warn("API responce Decryting : ", JSON.parse(decryptedData));
-            if (JSON.parse(decryptedData)?.html === "")
+            if (JSON.parse(decryptedData)?.html === "") {
                 notifyWithTiming(item, "Signature not assigned. Please Contact Admin.", apiStart);
+                showNotification(
+                    item,
+                    `Signature not assigned. Please Contact Admin.`,
+                    "errorMessage",
+                    false,
+                    t0
+                );
+                return null
+            }
             return JSON.parse(decryptedData)?.html || "";
         }
 
