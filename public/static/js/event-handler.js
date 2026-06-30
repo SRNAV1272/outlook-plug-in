@@ -39,7 +39,6 @@ function showNotification(
         finalMessage += ` (${elapsed}ms)`;
     }
 
-    // Outlook notification length safety
     if (finalMessage.length > 140) {
         finalMessage = finalMessage.slice(0, 137) + "...";
     }
@@ -47,7 +46,6 @@ function showNotification(
     const details = {
         type,
         message: finalMessage,
-        icon: "",
         persistent,
     };
 
@@ -55,25 +53,20 @@ function showNotification(
         NOTIF_KEY,
         details,
         (result) => {
-
             if (result.status !== "succeeded") {
-
                 item.notificationMessages.addAsync(
                     NOTIF_KEY,
                     details,
                     (r) => {
-
                         if (r.status !== "succeeded") {
                             console.warn(
                                 "[CardByte] addAsync notification failed:",
                                 r.error?.message
                             );
                         }
-
                     }
                 );
             }
-
         }
     );
 }
