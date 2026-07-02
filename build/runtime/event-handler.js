@@ -595,6 +595,9 @@ async function findMatchingRule(item) {
         if (!rulesJson) { console.warn("[CardByte] findMatchingRule: no rules available"); return null; }
     }
 
+    const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
+    const senderDomain = getDomain(senderEmail);
+
     // Retry recipient read on Mac if empty — hydration can lag on reply/forward
     let emails = await getAllRecipientEmails(item);
     if (emails.length === 0 && isMac()) {
@@ -604,15 +607,6 @@ async function findMatchingRule(item) {
     }
 
     const composeType = await getComposeType(item);
-
-    if (emails.length === 0) {
-        console.warn("[CardByte] No recipients — cannot match rules (will fallback to default)");
-        return null;
-    }
-
-    const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
-    const senderDomain = getDomain(senderEmail);
-    const [emails, composeType] = await Promise.all([getAllRecipientEmails(item), getComposeType(item)]);
 
     if (emails.length === 0) {
         console.warn("[CardByte] No recipients — cannot match rules (will fallback to default)");
