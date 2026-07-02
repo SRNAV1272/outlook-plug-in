@@ -925,26 +925,35 @@ const SIGNATURE_SENTINEL = "cardbyte-sig";
 
 async function _onSendCore(item, mailbox) {
     const t0 = Date.now();
-
     notifyWithTiming(item, "Re-applying correct signature...", t0);
 
-    if (_activeSignatureId !== null) {
-        console.log(`[CardByte] onSend: injecting rule signature id=${_activeSignatureId}`);
+    const rulesJson = getCachedRules({ skipTtl: true });
 
-        const userEmail = mailbox?.userProfile?.emailAddress;
-        const xPlatform = getXPlatform();
-        const encryptedMail = await encryptEmail(userEmail);
+    if (rulesJson) {
+        const matched = await findMatchingRule(item);
 
-        const ruleHtml = await getOrFetchSignatureById(_activeSignatureId, encryptedMail, xPlatform);
-        if (ruleHtml) {
-            await applySignatureWithFallback(item, ruleHtml, true);
-            notifyWithTiming(item, "Rule signature applied ✓", t0);
-            logTiming("_onSendCore (rule)", t0);
-            return;
+        if (matched) {
+            console.log(`[CardByte] onSend: rule matched id=${matched.signatureId}`);
+
+            // Cache-only — no XHR at send time
+            const ruleHtml = getSigById(String(matched.signatureId), { skipTtl: true });
+
+            if (ruleHtml) {
+                console.log(`[CardByte] onSend: injecting rule sig id=${matched.signatureId} from cache`);
+                await applySignatureWithFallback(item, ruleHtml, false); // ← false, not isSendTime
+                notifyWithTiming(item, "Rule signature applied ✓", t0);
+                logTiming("_onSendCore (rule)", t0);
+                return;
+            }
+            console.warn(`[CardByte] onSend: rule sig id=${matched.signatureId} not in cache — falling back to default`);
+        } else {
+            console.log("[CardByte] onSend: no rule matched — applying default");
         }
-        console.warn(`[CardByte] onSend: rule sig id=${_activeSignatureId} unavailable — falling back to default`);
+    } else {
+        console.warn("[CardByte] onSend: no rules in cache — applying default");
     }
 
+    // Default path
     const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
     if (!cached) {
         showNotification(item, "No cached signature on send", "errorMessage", false, t0);
@@ -952,8 +961,8 @@ async function _onSendCore(item, mailbox) {
         return;
     }
 
-    notifyWithTiming(item, "Applying default signature...", t0);
-    await applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true }, true);
+    console.log("[CardByte] onSend: injecting default sig from cache");
+    await applySignatureWithFallback(item, cached, false); // ← false, not isSendTime
     notifyWithTiming(item, "Signature applied ✓", t0);
     logTiming("_onSendCore (default)", t0);
 }
