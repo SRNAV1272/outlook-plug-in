@@ -7141,17 +7141,33 @@ function getRecipientsAsync(field, cb) {
  * Collects all unique recipient email addresses from To + Cc.
  * Calls cb(emailArray).
  */
+// function getAllRecipientEmails(item, cb) {
+//     getRecipientsAsync(item.to, function (toList) {
+//         getRecipientsAsync(item.cc, function (ccList) {
+//             const all = [];
+//             const seen = {};
+//             (toList || []).concat(ccList || []).forEach(function (r) {
+//                 const e = (r.emailAddress || "").toLowerCase();
+//                 if (e && !seen[e]) { seen[e] = true; all.push(e); }
+//             });
+//             cb(all);
+//         });
+//     });
+// }
 function getAllRecipientEmails(item, cb) {
     getRecipientsAsync(item.to, function (toList) {
-        getRecipientsAsync(item.cc, function (ccList) {
-            const all = [];
-            const seen = {};
-            (toList || []).concat(ccList || []).forEach(function (r) {
-                const e = (r.emailAddress || "").toLowerCase();
-                if (e && !seen[e]) { seen[e] = true; all.push(e); }
-            });
-            cb(all);
+        const all = [];
+        const seen = {};
+
+        (toList || []).forEach(function (r) {
+            const email = (r.emailAddress || "").toLowerCase();
+            if (email && !seen[email]) {
+                seen[email] = true;
+                all.push(email);
+            }
         });
+
+        cb(all);
     });
 }
 
