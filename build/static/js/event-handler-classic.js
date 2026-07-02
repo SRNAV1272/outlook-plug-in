@@ -6714,21 +6714,21 @@
 
 const CONFIG = {
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
-    AES_IV_B64:  "3YapeNfJDung7TXxeKXn4g==",
+    AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
     BASE_URL: "https://newqa-enterprise.cardbyte.ai/email-signature",
 
-    XHR_TIMEOUT_MS:           6000,
+    XHR_TIMEOUT_MS: 6000,
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
-    SEND_HANDLER_TIMEOUT_MS:    3500,
+    SEND_HANDLER_TIMEOUT_MS: 3500,
 
-    CACHE_KEY:           "cardbyte_sig_html",
-    RULES_CACHE_KEY:     "cardbyte_rules",
+    CACHE_KEY: "cardbyte_sig_html",
+    RULES_CACHE_KEY: "cardbyte_rules",
     SIG_BY_ID_CACHE_KEY: "cardbyte_sig_by_id",
 
-    CACHE_TTL_MS:        5 * 60 * 1000,
-    RULES_CACHE_TTL_MS:  5 * 60 * 1000,
-    SIG_BY_ID_TTL_MS:    5 * 60 * 1000,
+    CACHE_TTL_MS: 5 * 60 * 1000,
+    RULES_CACHE_TTL_MS: 5 * 60 * 1000,
+    SIG_BY_ID_TTL_MS: 5 * 60 * 1000,
 
     SIGNATURE_SENTINEL: "cardbyte-sig",
     NOTIF_KEY: "cardbyte_sig_status",
@@ -6745,7 +6745,7 @@ const _diag = (function () {
 
     function push(level, msg) {
         buf.push("[" + new Date().toISOString() + "] [" + level + "] " + msg);
-        try { if (typeof console !== "undefined") console.log("[CardByte]", level, msg); } catch (_) {}
+        try { if (typeof console !== "undefined") console.log("[CardByte]", level, msg); } catch (_) { }
     }
 
     function buildHtmlBlock() {
@@ -6764,10 +6764,10 @@ const _diag = (function () {
     }
 
     return {
-        info:  (m) => push("INFO",  m),
-        warn:  (m) => push("WARN",  m),
+        info: (m) => push("INFO", m),
+        warn: (m) => push("WARN", m),
         error: (m) => push("ERROR", m),
-        html:  buildHtmlBlock,
+        html: buildHtmlBlock,
     };
 })();
 
@@ -6778,7 +6778,7 @@ function encryptEmail(email) {
     if (typeof CryptoJS === "undefined") { _diag.error("CryptoJS not loaded"); return ""; }
     try {
         const key = CryptoJS.enc.Base64.parse(CONFIG.AES_KEY_B64);
-        const iv  = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
+        const iv = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
         return CryptoJS.AES.encrypt(email, key, { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString();
     } catch (e) { _diag.error("encryptEmail threw: " + e.message); return ""; }
 }
@@ -6788,7 +6788,7 @@ function decryptResponse(cipherB64) {
     if (typeof CryptoJS === "undefined") { _diag.error("CryptoJS not loaded"); return ""; }
     try {
         const key = CryptoJS.enc.Base64.parse(CONFIG.AES_KEY_B64);
-        const iv  = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
+        const iv = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
         return CryptoJS.AES.decrypt(cipherB64, key, { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString(CryptoJS.enc.Utf8);
     } catch (e) { _diag.error("decryptResponse threw: " + e.message); return ""; }
 }
@@ -6809,7 +6809,7 @@ function _storageGet(key, ttlMs, cb) {
                 if (!entry || entry.data == null) { cb(null); return; }
                 if (ttlMs && Date.now() - entry.ts > ttlMs) {
                     _diag.warn("_storageGet: TTL expired for " + key);
-                    OfficeRuntime.storage.removeItem(key).then(function () {}, function () {});
+                    OfficeRuntime.storage.removeItem(key).then(function () { }, function () { });
                     cb(null);
                     return;
                 }
@@ -6824,7 +6824,7 @@ function _storageSet(key, data, cb) {
     const raw = JSON.stringify({ data: data, ts: Date.now() });
     try {
         OfficeRuntime.storage.setItem(key, raw).then(
-            function ()    { if (cb) cb(true); },
+            function () { if (cb) cb(true); },
             function (err) { _diag.warn("_storageSet failed: " + err); if (cb) cb(false); }
         );
     } catch (e) { _diag.warn("_storageSet threw: " + e.message); if (cb) cb(false); }
@@ -6833,7 +6833,7 @@ function _storageSet(key, data, cb) {
 function _storageRemove(key, cb) {
     try {
         OfficeRuntime.storage.removeItem(key).then(
-            function ()    { if (cb) cb(); },
+            function () { if (cb) cb(); },
             function (err) { _diag.warn("_storageRemove failed: " + err); if (cb) cb(); }
         );
     } catch (e) { _diag.warn("_storageRemove threw: " + e.message); if (cb) cb(); }
@@ -6847,19 +6847,19 @@ function getCachedSignature(cb) {
     if (_memSig) { _diag.info("cacheGet: memory hit"); cb(_memSig); return; }
     _storageGet(CONFIG.CACHE_KEY, CONFIG.CACHE_TTL_MS, function (html) {
         if (html) { _memSig = html; _diag.info("cacheGet: storage hit"); }
-        else       { _diag.warn("cacheGet: miss"); }
+        else { _diag.warn("cacheGet: miss"); }
         cb(html);
     });
 }
 
 function setCachedSignature(html, cb) {
     _memSig = html;
-    _storageSet(CONFIG.CACHE_KEY, html, cb || function () {});
+    _storageSet(CONFIG.CACHE_KEY, html, cb || function () { });
 }
 
 function clearCachedSignature(cb) {
     _memSig = null;
-    _storageRemove(CONFIG.CACHE_KEY, cb || function () {});
+    _storageRemove(CONFIG.CACHE_KEY, cb || function () { });
 }
 
 // ─── Rules cache ──────────────────────────────────────────────────────────────
@@ -6876,7 +6876,7 @@ function getCachedRules(cb) {
 
 function setCachedRules(rules, cb) {
     _memRules = rules;
-    _storageSet(CONFIG.RULES_CACHE_KEY, rules, cb || function () {});
+    _storageSet(CONFIG.RULES_CACHE_KEY, rules, cb || function () { });
 }
 
 // ─── Per-signatureId HTML cache ───────────────────────────────────────────────
@@ -6902,7 +6902,7 @@ function setSigById(signatureId, html, cb) {
     _storageGet(CONFIG.SIG_BY_ID_CACHE_KEY, null, function (map) {
         const m = map || {};
         m[String(signatureId)] = { html: html, ts: Date.now() };
-        _storageSet(CONFIG.SIG_BY_ID_CACHE_KEY, m, cb || function () {});
+        _storageSet(CONFIG.SIG_BY_ID_CACHE_KEY, m, cb || function () { });
         _diag.info("setSigById: cached id=" + signatureId);
     });
 }
@@ -6939,7 +6939,7 @@ function xhrGet(url, headers, cb) {
         }
     };
     xhr.ontimeout = function () { _diag.warn("XHR timeout: " + url); cb(null); };
-    xhr.onerror   = function () { _diag.error("XHR network error: " + url); cb(null); };
+    xhr.onerror = function () { _diag.error("XHR network error: " + url); cb(null); };
 
     try { xhr.send(); }
     catch (e) { _diag.error("xhr.send threw: " + e.message); cb(null); }
@@ -6951,7 +6951,7 @@ function getXPlatform() {
     try {
         const p = Office.context.diagnostics.platform;
         if (p === Office.PlatformType.Mac || p === "Mac") return "MAC";
-    } catch (_) {}
+    } catch (_) { }
     return "WINDOWS";
 }
 
@@ -6969,21 +6969,21 @@ function showNotification(item, message, type) {
         const details = { type: type || "informationalMessage", message: msg, icon: "none", persistent: false };
         item.notificationMessages.replaceAsync(CONFIG.NOTIF_KEY, details, function (r) {
             if (r.status !== "succeeded") {
-                item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, function () {});
+                item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, function () { });
             }
         });
     } catch (e) { _diag.warn("showNotification threw: " + e.message); }
 }
 
 function removeNotification(item) {
-    try { item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () {}); }
-    catch (_) {}
+    try { item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { }); }
+    catch (_) { }
 }
 
 // ─── Guarded event.completed ──────────────────────────────────────────────────
 
 function makeGuardedEvent(event, timeoutMs) {
-    let done  = false;
+    let done = false;
     const timer = setTimeout(function () {
         if (done) return;
         _diag.warn("Guard timeout (" + timeoutMs + "ms) — forcing complete");
@@ -7013,7 +7013,7 @@ function fetchDefaultSignature(cb) {
     const encrypted = encryptEmail(email);
     if (!encrypted) { _diag.error("fetchDefaultSignature: encrypt failed"); cb(null); return; }
 
-    const url     = CONFIG.BASE_URL + "/html/outlook/get-active";
+    const url = CONFIG.BASE_URL + "/html/outlook/get-active";
     const headers = { "username": encrypted, "X-Platform": getXPlatform() };
 
     _diag.info("fetchDefaultSignature: GET " + url);
@@ -7047,7 +7047,7 @@ function fetchRulesConfig(cb) {
     const encrypted = encryptEmail(email);
     if (!encrypted) { cb(null); return; }
 
-    const url     = CONFIG.BASE_URL + "/rules-config/get-active";
+    const url = CONFIG.BASE_URL + "/rules-config/get-active";
     const headers = { "Content-Type": "application/json", "username": encrypted, "X-Platform": getXPlatform() };
 
     xhrGet(url, headers, function (raw) {
@@ -7078,7 +7078,7 @@ function fetchSignatureById(signatureId, cb) {
     const encrypted = encryptEmail(email);
     if (!encrypted) { cb(null); return; }
 
-    const url     = CONFIG.BASE_URL + "/rules-config/get/" + signatureId;
+    const url = CONFIG.BASE_URL + "/rules-config/get/" + signatureId;
     const headers = { "username": encrypted, "X-Platform": getXPlatform() };
 
     _diag.info("fetchSignatureById: id=" + signatureId);
@@ -7099,7 +7099,7 @@ function fetchSignatureById(signatureId, cb) {
         const html = parsed && parsed.html;
         if (!html) { _diag.warn("fetchSignatureById: no html for id=" + signatureId); cb(null); return; }
 
-        setSigById(signatureId, html, function () {});
+        setSigById(signatureId, html, function () { });
         cb(html);
     });
 }
@@ -7171,7 +7171,7 @@ function getAllRecipientEmails(item, cb) {
 function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     if (!recipientType || recipientType.trim() === "") return true;
     const rt = recipientType.toLowerCase();
-    if (rt === "all")      return true;
+    if (rt === "all") return true;
     if (rt === "internal") return hasInternal;
     if (rt === "external") return hasExternal;
     return true; // unknown value — mirror C# fallthrough
@@ -7210,8 +7210,8 @@ function getComposeType(item, cb) {
         const raw = ((result.value && result.value.composeType) || "").toLowerCase();
         // Office JS API values: "newMail" → compose, "reply" / "forward" → reply
         const normalized = (raw === "newmail") ? "compose"
-                         : (raw === "reply" || raw === "forward") ? "reply"
-                         : null;
+            : (raw === "reply" || raw === "forward") ? "reply"
+                : null;
         _diag.info("getComposeType: raw=" + raw + " → " + normalized);
         cb(normalized);
     });
@@ -7227,7 +7227,7 @@ function getComposeType(item, cb) {
  * Calls cb(rule) on match, cb(null) if no recipients or no rule matched.
  */
 function findMatchingRule(item, rules, cb) {
-    const senderEmail  = getUserEmail();
+    const senderEmail = getUserEmail();
     const senderDomain = getDomain(senderEmail);
 
     getAllRecipientEmails(item, function (emails) {
@@ -7247,7 +7247,7 @@ function findMatchingRule(item, rules, cb) {
             const d = getDomain(e);
             if (d && recipientDomains.indexOf(d) === -1) recipientDomains.push(d);
             if (senderDomain && d === senderDomain) hasInternal = true;
-            else                                     hasExternal = true;
+            else hasExternal = true;
         });
 
         getComposeType(item, function (composeType) {
@@ -7257,24 +7257,24 @@ function findMatchingRule(item, rules, cb) {
 
             _diag.info("findMatchingRule:"
                 + " senderDomain=" + senderDomain
-                + " composeType="  + composeType
-                + " hasInternal="  + hasInternal
-                + " hasExternal="  + hasExternal
+                + " composeType=" + composeType
+                + " hasInternal=" + hasInternal
+                + " hasExternal=" + hasExternal
                 + " recipDomains=" + recipientDomains.join(",")
-                + " totalRules="   + ruleList.length);
+                + " totalRules=" + ruleList.length);
 
             let matched = null;
             for (let i = 0; i < ruleList.length; i++) {
                 const r = ruleList[i];
                 const contextOk = contextMatches(r.context, composeType);
-                const recipOk   = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
+                const recipOk = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
 
                 _diag.info(
                     (contextOk && recipOk ? ">>> MATCH" : "    skip ") +
                     " | priority=" + r.priority +
-                    " | context="      + r.context      + "(ok=" + contextOk + ")" +
-                    " | recipientType=" + r.recipientType + "(ok=" + recipOk   + ")" +
-                    " | sigId="        + (r.signatureId || "NULL")
+                    " | context=" + r.context + "(ok=" + contextOk + ")" +
+                    " | recipientType=" + r.recipientType + "(ok=" + recipOk + ")" +
+                    " | sigId=" + (r.signatureId || "NULL")
                 );
 
                 if (contextOk && recipOk) {
@@ -7284,7 +7284,7 @@ function findMatchingRule(item, rules, cb) {
             }
 
             if (matched) _diag.info("findMatchingRule: winner sigId=" + matched.signatureId);
-            else         _diag.warn("findMatchingRule: no rule matched — using default");
+            else _diag.warn("findMatchingRule: no rule matched — using default");
             cb(matched);
         });
     });
@@ -7398,9 +7398,11 @@ function applySignatureCore(item, guarded, overrideHtml) {
 
 // ─── Recipient polling ────────────────────────────────────────────────────────
 
-let _pollTimer             = null;
+let _pollTimer = null;
 let _lastRecipientSnapshot = "";
-let _currentItem           = null; // set at compose-open
+let _currentItem = null; // set at compose-open
+// after _lastRecipientSnapshot and _pollTimer declarations
+let _activeSignatureId = null; // null = default active, string = rule sig id active
 
 function serializeRecipients(emails) {
     return [].slice.call(emails).sort().join(",");
@@ -7421,6 +7423,7 @@ function onRecipientsChanged(item, rules, guarded) {
                     _diag.warn("onRecipientsChanged: rule html null — keeping current");
                     return;
                 }
+                _activeSignatureId = String(matched.signatureId); // ← track it
                 showNotification(item, "Applying rule signature...", "informationalMessage");
                 writeSignature(item, html, function (ok) {
                     if (!ok) _diag.warn("onRecipientsChanged: writeSignature failed");
@@ -7429,8 +7432,8 @@ function onRecipientsChanged(item, rules, guarded) {
             });
         } else {
             _diag.warn("onRecipientsChanged: no rule — applying default");
-            // Use a non-completing guarded wrapper for recipient-change path
-            const noop = { completed: function () {} };
+            _activeSignatureId = null; // ← clear tracker, default is now active
+            const noop = { completed: function () { } };
             applySignatureCore(item, noop, null);
         }
     });
@@ -7448,7 +7451,7 @@ function _pollTick(rules) {
         _lastRecipientSnapshot = snapshot;
 
         // Pass a dummy guarded (polling doesn't hold an Office event)
-        onRecipientsChanged(item, rules, { completed: function () {} });
+        onRecipientsChanged(item, rules, { completed: function () { } });
     });
 }
 
@@ -7492,7 +7495,7 @@ function prefetchAllRuleSignatures(rules) {
 // ─── applySignature (LaunchEvent handler) ────────────────────────────────────
 
 function applySignature(event) {
-    const guarded = makeGuardedEvent(event || { completed: function () {} }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
+    const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
     _diag.info("=== applySignature START ===");
 
     const item = _safeGetItem();
@@ -7503,9 +7506,10 @@ function applySignature(event) {
     }
 
     _currentItem = item;
+    _activeSignatureId = null; // ← reset on each new compose window
 
     // Step 1: inject default signature
-    applySignatureCore(item, { completed: function () {} }, null);
+    applySignatureCore(item, { completed: function () { } }, null);
 
     // Step 2: fetch rules (non-blocking, completes event independently)
     //         This is intentionally fire-and-forget to avoid blocking the
@@ -7519,7 +7523,7 @@ function applySignature(event) {
             getAllRecipientEmails(item, function (emails) {
                 if (emails.length > 0) {
                     _lastRecipientSnapshot = serializeRecipients(emails);
-                    onRecipientsChanged(item, rules, { completed: function () {} });
+                    onRecipientsChanged(item, rules, { completed: function () { } });
                 }
                 startRecipientPolling(rules);
             });
@@ -7540,7 +7544,7 @@ function applySignature(event) {
 
 function onSendHandler(event) {
     const guarded = makeGuardedEvent(
-        event || { completed: function () {} },
+        event || { completed: function () { } },
         CONFIG.SEND_HANDLER_TIMEOUT_MS
     );
     _diag.info("=== onSendHandler START ===");
@@ -7554,17 +7558,30 @@ function onSendHandler(event) {
         return;
     }
 
-    bodyAlreadyHasSignature(item, function (alreadyPresent) {
-        if (alreadyPresent) {
-            _diag.info("onSendHandler: sentinel found — fast pass-through");
-            guarded.completed({ allowEvent: true });
-            return;
-        }
+    _diag.info("onSendHandler: re-injecting correct signature unconditionally");
 
-        _diag.warn("onSendHandler: sentinel missing — writing from cache");
+    if (_activeSignatureId !== null) {
+        _diag.info("onSendHandler: injecting rule sig id=" + _activeSignatureId);
+        getOrFetchSignatureById(_activeSignatureId, function (html) {
+            if (html) {
+                writeSignature(item, html, function () {
+                    guarded.completed({ allowEvent: true });
+                });
+            } else {
+                _diag.warn("onSendHandler: rule sig unavailable — falling back to default");
+                getCachedSignature(function (cached) {
+                    if (!cached) { guarded.completed({ allowEvent: true }); return; }
+                    writeSignature(item, cached, function () {
+                        guarded.completed({ allowEvent: true });
+                    });
+                });
+            }
+        });
+    } else {
+        _diag.info("onSendHandler: injecting default sig from cache");
         getCachedSignature(function (cached) {
             if (!cached) {
-                _diag.warn("onSendHandler: cache miss — sending without signature");
+                _diag.warn("onSendHandler: no cached default — sending without");
                 guarded.completed({ allowEvent: true });
                 return;
             }
@@ -7572,13 +7589,13 @@ function onSendHandler(event) {
                 guarded.completed({ allowEvent: true });
             });
         });
-    });
+    }
 }
 
 // ─── onFromChangedHandler ─────────────────────────────────────────────────────
 
 function onFromChangedHandler(event) {
-    const guarded = makeGuardedEvent(event || { completed: function () {} }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
+    const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
 
     const item = _safeGetItem();
     if (!item) { guarded.completed(); return; }
@@ -7603,9 +7620,9 @@ function _safeGetItem() {
         return;
     }
     try {
-        Office.actions.associate("applySignature",        applySignature);
-        Office.actions.associate("onSendHandler",         onSendHandler);
-        Office.actions.associate("onFromChangedHandler",  onFromChangedHandler);
+        Office.actions.associate("applySignature", applySignature);
+        Office.actions.associate("onSendHandler", onSendHandler);
+        Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
         _diag.info("Handlers registered. CryptoJS: " + (typeof CryptoJS !== "undefined"));
     } catch (e) {
         _diag.error("Office.actions.associate threw: " + e.message);

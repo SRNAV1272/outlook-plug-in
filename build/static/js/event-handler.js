@@ -10,28 +10,28 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
-const AES_IV  = "3YapeNfJDung7TXxeKXn4g==";
+const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
 const BASE_URL = "https://newqa-enterprise.cardbyte.ai/email-signature";
 
-const SESSION_KEY           = "cardbyte_session_id";
-const CACHE_KEY             = "cardbyte_cached_signature";
-const CACHE_SESSION_KEY     = "cardbyte_cached_signature_session";
-const CACHE_TIMESTAMP_KEY   = "cardbyte_cached_signature_ts";
-const CACHE_TTL_MS          = 5 * 60 * 1000;
+const SESSION_KEY = "cardbyte_session_id";
+const CACHE_KEY = "cardbyte_cached_signature";
+const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
+const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
-const RULES_CACHE_KEY           = "cardbyte_cached_rules";
+const RULES_CACHE_KEY = "cardbyte_cached_rules";
 const RULES_CACHE_TIMESTAMP_KEY = "cardbyte_cached_rules_ts";
-const RULES_CACHE_TTL_MS        = 5 * 60 * 1000;
+const RULES_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const SIG_BY_ID_CACHE_KEY = "cardbyte_sig_by_id";
-const SIG_BY_ID_TTL_MS    = 5 * 60 * 1000;
+const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;
 
-const MAX_SAFE_HTML_SIZE        = 500_000;
+const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
-const HEAVY_THRESHOLD           = 100 * 1024;
-const MAX_RETRIES               = 2;
-const RECIPIENT_POLL_MS         = 1500;
+const HEAVY_THRESHOLD = 100 * 1024;
+const MAX_RETRIES = 2;
+const RECIPIENT_POLL_MS = 1500;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
@@ -52,7 +52,7 @@ function logTiming(label, startMs) {
 
 function detectPlatform() {
     const platform = (Office?.context?.platform || "").toLowerCase();
-    const ua       = (navigator?.userAgent  || "").toLowerCase();
+    const ua = (navigator?.userAgent || "").toLowerCase();
 
     if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
     if (platform === "android") return "mobile-android";
@@ -76,15 +76,15 @@ function detectPlatform() {
     return "desktop";
 }
 
-const isMobile     = () => { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; };
-const isOWA        = () => detectPlatform() === "owa";
-const isMac        = () => detectPlatform() === "mac";
+const isMobile = () => { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; };
+const isOWA = () => detectPlatform() === "owa";
+const isMac = () => detectPlatform() === "mac";
 const getMaxHtmlSize = () => isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
 
 function getXPlatform() {
     const p = detectPlatform();
-    if (p === "mac")                                    return "MAC";
-    if (p === "mobile-ios" || p === "mobile-android")  return "MOBILE";
+    if (p === "mac") return "MAC";
+    if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
     return "WINDOWS";
 }
 
@@ -121,7 +121,7 @@ function showNotification(item, message, type = "informationalMessage", persiste
 
 function removeNotification(item) {
     if (!item || typeof item.notificationMessages?.removeAsync !== "function") return;
-    item.notificationMessages.removeAsync(NOTIF_KEY, () => {});
+    item.notificationMessages.removeAsync(NOTIF_KEY, () => { });
 }
 
 function notifyWithTiming(item, phase, startMs) {
@@ -189,7 +189,7 @@ async function encryptEmail(email = "") {
     try {
         if (!email || email.trim() === "") return "";
         const keyBuffer = base64ToArrayBuffer(AES_KEY);
-        const ivBuffer  = base64ToArrayBuffer(AES_IV);
+        const ivBuffer = base64ToArrayBuffer(AES_IV);
         const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
         const data = new TextEncoder().encode(email);
         const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
@@ -207,11 +207,11 @@ async function encryptEmail(email = "") {
 // =============================================================================
 
 const store = {
-    get:     (key)      => { try { return localStorage.getItem(key); }               catch (_) { return null; } },
-    set:     (key, val) => { try { localStorage.setItem(key, val); }                 catch (_) {} },
-    remove:  (...keys)  => { try { keys.forEach(k => localStorage.removeItem(k)); }  catch (_) {} },
-    getJson: (key)      => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch (_) { return null; } },
-    setJson: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch (_) {} },
+    get: (key) => { try { return localStorage.getItem(key); } catch (_) { return null; } },
+    set: (key, val) => { try { localStorage.setItem(key, val); } catch (_) { } },
+    remove: (...keys) => { try { keys.forEach(k => localStorage.removeItem(k)); } catch (_) { } },
+    getJson: (key) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch (_) { return null; } },
+    setJson: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch (_) { } },
 };
 
 // =============================================================================
@@ -268,11 +268,11 @@ function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) 
 }
 
 function setCachedSignature(html) {
-    const t0  = Date.now();
+    const t0 = Date.now();
     const sid = getOrCreateSessionId();
     try {
-        store.set(CACHE_KEY,           html);
-        store.set(CACHE_SESSION_KEY,   sid);
+        store.set(CACHE_KEY, html);
+        store.set(CACHE_SESSION_KEY, sid);
         store.set(CACHE_TIMESTAMP_KEY, Date.now().toString());
         logTiming("setCachedSignature", t0);
     } catch (_) {
@@ -305,12 +305,12 @@ function setCachedRules(rulesJson) {
 //  PER-SIGNATURE-ID HTML CACHE
 // =============================================================================
 
-function _readSigByIdMap()     { return store.getJson(SIG_BY_ID_CACHE_KEY) || {}; }
+function _readSigByIdMap() { return store.getJson(SIG_BY_ID_CACHE_KEY) || {}; }
 function _writeSigByIdMap(map) { store.setJson(SIG_BY_ID_CACHE_KEY, map); }
 
 function getSigById(signatureId, { skipTtl = false } = {}) {
-    const id    = String(signatureId);
-    const map   = _readSigByIdMap();
+    const id = String(signatureId);
+    const map = _readSigByIdMap();
     const entry = map[id];
     if (!entry) return null;
     if (!skipTtl && Date.now() - entry.ts > SIG_BY_ID_TTL_MS) {
@@ -321,9 +321,9 @@ function getSigById(signatureId, { skipTtl = false } = {}) {
 }
 
 function setSigById(signatureId, html) {
-    const id  = String(signatureId);
+    const id = String(signatureId);
     const map = _readSigByIdMap();
-    map[id]   = { html, ts: Date.now() };
+    map[id] = { html, ts: Date.now() };
     _writeSigByIdMap(map);
     console.log(`[CardByte] sigById cached: id=${id}`);
 }
@@ -358,7 +358,7 @@ async function fetchAndCacheRules(encryptedMail, xPlatform) {
         });
         if (!res.ok) { console.warn("[CardByte] Rules fetch returned", res.status); return null; }
 
-        const parsed    = JSON.parse(await res.text());
+        const parsed = JSON.parse(await res.text());
         const rulesJson = parsed?.rulesJson;
         if (!rulesJson) { console.warn("[CardByte] Rules response had no rulesJson"); return null; }
 
@@ -372,8 +372,8 @@ async function fetchAndCacheRules(encryptedMail, xPlatform) {
 }
 
 async function renderSignatureOnServer(userEmail) {
-    const t0        = Date.now();
-    const item      = Office?.context?.mailbox?.item;
+    const t0 = Date.now();
+    const item = Office?.context?.mailbox?.item;
     const xPlatform = getXPlatform();
 
     try {
@@ -388,7 +388,7 @@ async function renderSignatureOnServer(userEmail) {
         notifyWithTiming(item, "API response received ✓", t0);
 
         if (primaryRes.ok) {
-            const data          = await primaryRes.text();
+            const data = await primaryRes.text();
             const decryptedData = await handleAesDecrypt(data);
             notifyWithTiming(item, "Signature decrypted ✓", t0);
             logTiming("renderSignatureOnServer", t0);
@@ -429,7 +429,7 @@ async function fetchSignatureById(signatureId, encryptedMail, xPlatform) {
 }
 
 async function getOrFetchSignatureById(signatureId, encryptedMail, xPlatform, { skipTtl = false } = {}) {
-    const id     = String(signatureId);
+    const id = String(signatureId);
     const cached = getSigById(id, { skipTtl });
     if (cached) {
         console.log(`[CardByte] ✅ sigById cache hit: id=${id}`);
@@ -450,7 +450,7 @@ async function prefetchAllRuleSignatures(userEmail) {
     const enabledRules = (rulesJson?.rulesList || []).filter(r => r.enabled && r.signatureId != null);
     if (enabledRules.length === 0) return;
 
-    const xPlatform     = getXPlatform();
+    const xPlatform = getXPlatform();
     const encryptedMail = await encryptEmail(userEmail);
 
     console.log(`[CardByte] 🔄 Prefetching signatures for ${enabledRules.length} rule(s)...`);
@@ -460,7 +460,7 @@ async function prefetchAllRuleSignatures(userEmail) {
             getOrFetchSignatureById(r.signatureId, encryptedMail, xPlatform)
                 .then(html => {
                     if (html) console.log(`[CardByte] ✅ Prefetched signatureId=${r.signatureId}`);
-                    else      console.warn(`[CardByte] ⚠️  Prefetch null for signatureId=${r.signatureId}`);
+                    else console.warn(`[CardByte] ⚠️  Prefetch null for signatureId=${r.signatureId}`);
                 })
                 .catch(err => console.warn(`[CardByte] Prefetch error signatureId=${r.signatureId}:`, err))
         )
@@ -521,7 +521,7 @@ function getDomain(email) {
 function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     if (!recipientType || recipientType.trim() === "") return true;
     const rt = recipientType.toLowerCase();
-    if (rt === "all")      return true;
+    if (rt === "all") return true;
     if (rt === "internal") return hasInternal;
     if (rt === "external") return hasExternal;
     return true;
@@ -538,7 +538,7 @@ function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
 function contextMatches(ruleContext, composeType) {
     if (!ruleContext || ruleContext.trim() === "") return true;
     const rc = ruleContext.toLowerCase();
-    if (rc === "all")         return true;
+    if (rc === "all") return true;
     if (composeType === null) return true; // API unavailable — don't silently drop rules
     return rc === composeType.toLowerCase();
 }
@@ -559,10 +559,10 @@ function getComposeType(item) {
                 resolve(null);
                 return;
             }
-            const raw        = (result.value?.composeType || "").toLowerCase();
+            const raw = (result.value?.composeType || "").toLowerCase();
             const normalized = raw === "newmail" ? "compose"
-                             : (raw === "reply" || raw === "forward") ? "reply"
-                             : null;
+                : (raw === "reply" || raw === "forward") ? "reply"
+                    : null;
             _composeTypeByItem.set(item, normalized);
             console.log("[CardByte] composeType resolved:", raw, "→", normalized);
             resolve(normalized);
@@ -595,9 +595,9 @@ async function findMatchingRule(item) {
         if (!rulesJson) { console.warn("[CardByte] findMatchingRule: no rules available"); return null; }
     }
 
-    const senderEmail               = Office?.context?.mailbox?.userProfile?.emailAddress;
-    const senderDomain              = getDomain(senderEmail);
-    const [emails, composeType]     = await Promise.all([getAllRecipientEmails(item), getComposeType(item)]);
+    const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
+    const senderDomain = getDomain(senderEmail);
+    const [emails, composeType] = await Promise.all([getAllRecipientEmails(item), getComposeType(item)]);
 
     if (emails.length === 0) {
         console.warn("[CardByte] No recipients — cannot match rules (will fallback to default)");
@@ -614,7 +614,7 @@ async function findMatchingRule(item) {
         const d = getDomain(e);
         if (d && !recipientDomains.includes(d)) recipientDomains.push(d);
         if (senderDomain && d === senderDomain) hasInternal = true;
-        else                                     hasExternal = true;
+        else hasExternal = true;
     });
 
     console.log("[CardByte] Rule evaluation context:", {
@@ -635,8 +635,8 @@ async function findMatchingRule(item) {
 
     for (const r of sortedRules) {
         const contextOk = contextMatches(r.context, composeType);
-        const recipOk   = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
-        const allMatch  = contextOk && recipOk;
+        const recipOk = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
+        const allMatch = contextOk && recipOk;
 
         console.log(
             (allMatch ? ">>> MATCH" : "    skip "),
@@ -762,7 +762,7 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
     const { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, overrideHtml = null } = opts;
     const userEmail = mailbox?.userProfile?.emailAddress;
 
-    let html                 = overrideHtml;
+    let html = overrideHtml;
     let explicitlyUnassigned = false;
 
     if (!html) html = getCachedSignature({ skipTtl, skipSessionCheck });
@@ -831,8 +831,8 @@ async function onRecipientsChanged(item, mailbox) {
     if (matched) {
         console.log(`[CardByte] 🎯 Rule matched → "${matched.rule ?? matched.description}" | signatureId: ${matched.signatureId}`);
 
-        const userEmail     = Office?.context?.mailbox?.userProfile?.emailAddress;
-        const xPlatform     = getXPlatform();
+        const userEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
+        const xPlatform = getXPlatform();
         const encryptedMail = await encryptEmail(userEmail);
 
         const ruleHtml = await getOrFetchSignatureById(matched.signatureId, encryptedMail, xPlatform);
@@ -840,11 +840,17 @@ async function onRecipientsChanged(item, mailbox) {
             console.warn("[CardByte] Rule signature fetch returned null — keeping current signature");
             return;
         }
-        console.log("[CardByte] Injecting rule-matched signature");
+        console.log("[CardByte] Injecting rule-matched signature, signatureId:", matched.signatureId);
         await applySignatureWithFallback(item, ruleHtml, false);
+        // Record which rule signature is now live in the compose body.
+        // _onSendCore reads this to re-inject the correct signature if
+        // the sentinel is missing at send time.
+        _activeSignatureId = String(matched.signatureId);
 
     } else {
         console.warn("[CardByte] No rule matched / empty recipients — falling back to default signature");
+        // Clear the tracker so send-time falls back to the default cache.
+        _activeSignatureId = null;
         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
     }
 }
@@ -854,7 +860,13 @@ async function onRecipientsChanged(item, mailbox) {
 // =============================================================================
 
 let _lastRecipientSnapshot = "";
-let _recipientPollTimer    = null;
+let _recipientPollTimer = null;
+
+// Tracks the signatureId that was last injected by the rules engine.
+// null   = default signature is currently active (no rule matched).
+// string = a rule-matched signatureId is currently active.
+// Reset to null whenever the default signature is applied.
+let _activeSignatureId = null;
 
 function serializeRecipients(emails) {
     return [...emails].sort().join(",");
@@ -862,10 +874,10 @@ function serializeRecipients(emails) {
 
 async function pollRecipients() {
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
     if (!item) return;
 
-    const emails   = await getAllRecipientEmails(item);
+    const emails = await getAllRecipientEmails(item);
     const snapshot = serializeRecipients(emails);
 
     if (snapshot === _lastRecipientSnapshot) return;
@@ -912,24 +924,38 @@ function withTimeout(promise, ms) {
 const SIGNATURE_SENTINEL = "cardbyte-sig";
 
 async function _onSendCore(item, mailbox) {
-    const t0       = Date.now();
-    const bodyHtml = await getBodyText(item);
+    const t0 = Date.now();
 
-    if (bodyHtml.includes(SIGNATURE_SENTINEL)) {
-        notifyWithTiming(item, "Signature already present ✓", t0);
-        return;
+    notifyWithTiming(item, "Re-applying correct signature...", t0);
+
+    if (_activeSignatureId !== null) {
+        console.log(`[CardByte] onSend: injecting rule signature id=${_activeSignatureId}`);
+
+        const userEmail = mailbox?.userProfile?.emailAddress;
+        const xPlatform = getXPlatform();
+        const encryptedMail = await encryptEmail(userEmail);
+
+        const ruleHtml = await getOrFetchSignatureById(_activeSignatureId, encryptedMail, xPlatform);
+        if (ruleHtml) {
+            await applySignatureWithFallback(item, ruleHtml, true);
+            notifyWithTiming(item, "Rule signature applied ✓", t0);
+            logTiming("_onSendCore (rule)", t0);
+            return;
+        }
+        console.warn(`[CardByte] onSend: rule sig id=${_activeSignatureId} unavailable — falling back to default`);
     }
 
     const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
     if (!cached) {
         showNotification(item, "No cached signature on send", "errorMessage", false, t0);
+        logTiming("_onSendCore (no sig)", t0);
         return;
     }
 
-    notifyWithTiming(item, "Re-applying signature...", t0);
+    notifyWithTiming(item, "Applying default signature...", t0);
     await applySignatureCore(item, mailbox, { fetchIfMissing: false, skipTtl: true, skipSessionCheck: true }, true);
-    notifyWithTiming(item, "Signature verified ✓", t0);
-    logTiming("_onSendCore", t0);
+    notifyWithTiming(item, "Signature applied ✓", t0);
+    logTiming("_onSendCore (default)", t0);
 }
 
 // =============================================================================
@@ -946,15 +972,19 @@ Office.onReady(() => {
 //  PUBLIC ENTRY POINTS
 // =============================================================================
 
-const applySignature = async function (event = { completed: () => {} }) {
-    const t0      = Date.now();
+const applySignature = async function (event = { completed: () => { } }) {
+    const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
 
     try {
         if (!item) return;
 
         notifyWithTiming(item, "Starting signature flow...", t0);
+
+        // Reset rule tracker — each compose window starts with the default
+        // signature until the rules engine fires for this session's recipients.
+        _activeSignatureId = null;
 
         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
 
@@ -984,10 +1014,10 @@ const applySignature = async function (event = { completed: () => {} }) {
     }
 };
 
-const onSendHandler = async function (event = { completed: () => {} }) {
-    const t0      = Date.now();
+const onSendHandler = async function (event = { completed: () => { } }) {
+    const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
-    const item    = mailbox?.item;
+    const item = mailbox?.item;
 
     const done = (allow = true) => {
         logTiming("onSendHandler total", t0);
@@ -1020,7 +1050,7 @@ const onSendHandler = async function (event = { completed: () => {} }) {
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("applySignature", applySignature);
-    Office.actions.associate("onSendHandler",  onSendHandler);
+    Office.actions.associate("onSendHandler", onSendHandler);
     console.log("[CardByte] Registered: applySignature, onSendHandler");
 } else {
     console.log("[CardByte] Office.actions unavailable — LaunchEvent path inactive (Outlook 2016/2019)");
