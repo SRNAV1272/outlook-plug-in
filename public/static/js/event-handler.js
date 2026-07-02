@@ -595,6 +595,21 @@ async function findMatchingRule(item) {
         if (!rulesJson) { console.warn("[CardByte] findMatchingRule: no rules available"); return null; }
     }
 
+    // Retry recipient read on Mac if empty — hydration can lag on reply/forward
+    let emails = await getAllRecipientEmails(item);
+    if (emails.length === 0 && isMac()) {
+        console.warn("[CardByte] Mac: recipients empty on first read — retrying after short delay");
+        await new Promise(r => setTimeout(r, 400));
+        emails = await getAllRecipientEmails(item);
+    }
+
+    const composeType = await getComposeType(item);
+
+    if (emails.length === 0) {
+        console.warn("[CardByte] No recipients — cannot match rules (will fallback to default)");
+        return null;
+    }
+
     const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
     const senderDomain = getDomain(senderEmail);
     const [emails, composeType] = await Promise.all([getAllRecipientEmails(item), getComposeType(item)]);
@@ -931,6 +946,20 @@ async function _onSendCore(item, mailbox) {
 
     if (rulesJson) {
         const matched = await findMatchingRule(item);
+
+        // Mac fallback: if live match is inconclusive but we had an active
+        // rule signature applied during compose, trust that instead of
+        // silently reverting to default.
+        if (!matched && isMac() && _activeSignatureId) {
+            console.warn("[CardByte] Mac onSend: findMatchingRule inconclusive — trusting _activeSignatureId:", _activeSignatureId);
+            const ruleHtml = getSigById(_activeSignatureId, { skipTtl: true });
+            if (ruleHtml) {
+                await applySignatureWithFallback(item, ruleHtml, false);
+                notifyWithTiming(item, "Rule signature applied ✓ (Mac fallback)", t0);
+                logTiming("_onSendCore (mac fallback)", t0);
+                return;
+            }
+        }
 
         if (matched) {
             console.log(`[CardByte] onSend: rule matched id=${matched.signatureId}`);
