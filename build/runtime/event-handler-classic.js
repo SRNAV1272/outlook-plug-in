@@ -6735,7 +6735,7 @@ const CONFIG = {
 
     RECIPIENT_POLL_MS: 1500,
 
-    DIAG_ENABLED: false,
+    DIAG_ENABLED: true,
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
@@ -7155,57 +7155,136 @@ function getAllRecipientEmails(item, cb) {
     });
 }
 
-function classifyRecipients(senderEmail, recipientEmails) {
-    const senderDomain = getDomain(senderEmail);
-    if (!senderDomain || recipientEmails.length === 0) return null;
-    return recipientEmails.every(function (e) { return getDomain(e) === senderDomain; })
-        ? "internal"
-        : "external";
+/**
+ * Mirrors C# RecipientTypeMatches(recipientType, hasInternal, hasExternal).
+ *
+ * Unlike a single-bucket classification, the C# backend independently tracks
+ * whether any recipient is internal and whether any is external, so a mixed
+ * To/Cc list sets BOTH flags true. A rule with recipientType="internal" fires
+ * if at least one recipient is internal — it does not require ALL to be.
+ *
+ * "all" / null / empty → always matches (same as C# null/whitespace branch).
+ * "internal"           → matches when hasInternal is true.
+ * "external"           → matches when hasExternal is true.
+ * anything else        → treated as match (defensive, mirrors C# fallthrough `return true`).
+ */
+function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
+    if (!recipientType || recipientType.trim() === "") return true;
+    const rt = recipientType.toLowerCase();
+    if (rt === "all")      return true;
+    if (rt === "internal") return hasInternal;
+    if (rt === "external") return hasExternal;
+    return true; // unknown value — mirror C# fallthrough
 }
 
-const _composeTypeCache = {}; // item doesn't work as WeakMap key in classic, use simple object
+/**
+ * Mirrors C# ContextMatches(context, mailContext).
+ *
+ * C# MailContext enum values map to these JS strings as sent by the backend:
+ *   Compose → "compose"   (newMail in Office JS API)
+ *   Reply   → "reply"     (reply / forward in Office JS API)
+ *
+ * "all" / null / empty → always matches.
+ */
+function contextMatches(ruleContext, composeType) {
+    if (!ruleContext || ruleContext.trim() === "") return true;
+    const rc = ruleContext.toLowerCase();
+    if (rc === "all") return true;
+    // composeType may be null (getComposeTypeAsync unavailable) — treat as match
+    if (composeType === null) return true;
+    return rc === composeType.toLowerCase();
+}
 
 function getComposeType(item, cb) {
-    if (typeof item.getComposeTypeAsync !== "function") { cb(null); return; }
+    if (typeof item.getComposeTypeAsync !== "function") {
+        _diag.warn("getComposeTypeAsync unavailable — context filter disabled");
+        cb(null);
+        return;
+    }
     item.getComposeTypeAsync(function (result) {
-        if (result.status !== Office.AsyncResultStatus.Succeeded) { cb(null); return; }
+        if (result.status !== Office.AsyncResultStatus.Succeeded) {
+            _diag.warn("getComposeTypeAsync failed: " + (result.error && result.error.message));
+            cb(null);
+            return;
+        }
         const raw = ((result.value && result.value.composeType) || "").toLowerCase();
-        const normalized = raw === "newmail" ? "compose" : (raw === "reply" || raw === "forward") ? "reply" : null;
+        // Office JS API values: "newMail" → compose, "reply" / "forward" → reply
+        const normalized = (raw === "newmail") ? "compose"
+                         : (raw === "reply" || raw === "forward") ? "reply"
+                         : null;
+        _diag.info("getComposeType: raw=" + raw + " → " + normalized);
         cb(normalized);
     });
 }
 
 /**
  * Finds the highest-priority matching rule for the current compose item.
- * Calls cb(rule) on match, cb(null) if no match or no recipients.
+ *
+ * Mirrors the C# evaluation loop:
+ *   foreach rule ordered by Priority:
+ *     if Enabled && ContextMatches && RecipientTypeMatches → first match wins
+ *
+ * Calls cb(rule) on match, cb(null) if no recipients or no rule matched.
  */
 function findMatchingRule(item, rules, cb) {
-    const senderEmail = getUserEmail();
+    const senderEmail  = getUserEmail();
+    const senderDomain = getDomain(senderEmail);
 
     getAllRecipientEmails(item, function (emails) {
         if (emails.length === 0) {
-            _diag.warn("findMatchingRule: no recipients — cannot match");
+            _diag.warn("findMatchingRule: no recipients — fallback to default");
             cb(null);
             return;
         }
 
-        const recipientType = classifyRecipients(senderEmail, emails);
+        // Compute hasInternal / hasExternal independently (mirrors C# bool flags).
+        // A single mixed list sets both to true — same as C# backend.
+        let hasInternal = false;
+        let hasExternal = false;
+        const recipientDomains = [];
+
+        emails.forEach(function (e) {
+            const d = getDomain(e);
+            if (d && recipientDomains.indexOf(d) === -1) recipientDomains.push(d);
+            if (senderDomain && d === senderDomain) hasInternal = true;
+            else                                     hasExternal = true;
+        });
 
         getComposeType(item, function (composeType) {
-            const enabled = ((rules && rules.rulesList) || [])
+            const ruleList = ((rules && rules.rulesList) || [])
                 .filter(function (r) { return r.enabled; })
-                .filter(function (r) { return r.context     === composeType  || r.context     === "all"; })
-                .filter(function (r) { return r.recipientType === recipientType || r.recipientType === "all"; })
                 .sort(function (a, b) { return a.priority - b.priority; });
 
-            _diag.info("findMatchingRule: composeType=" + composeType
-                + " recipientType=" + recipientType
-                + " emails=" + emails.join(",")
-                + " candidates=" + enabled.length);
+            _diag.info("findMatchingRule:"
+                + " senderDomain=" + senderDomain
+                + " composeType="  + composeType
+                + " hasInternal="  + hasInternal
+                + " hasExternal="  + hasExternal
+                + " recipDomains=" + recipientDomains.join(",")
+                + " totalRules="   + ruleList.length);
 
-            const matched = enabled[0] || null;
-            if (matched) _diag.info("findMatchingRule: matched id=" + matched.signatureId);
-            else         _diag.warn("findMatchingRule: no match");
+            let matched = null;
+            for (let i = 0; i < ruleList.length; i++) {
+                const r = ruleList[i];
+                const contextOk = contextMatches(r.context, composeType);
+                const recipOk   = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
+
+                _diag.info(
+                    (contextOk && recipOk ? ">>> MATCH" : "    skip ") +
+                    " | priority=" + r.priority +
+                    " | context="      + r.context      + "(ok=" + contextOk + ")" +
+                    " | recipientType=" + r.recipientType + "(ok=" + recipOk   + ")" +
+                    " | sigId="        + (r.signatureId || "NULL")
+                );
+
+                if (contextOk && recipOk) {
+                    matched = r;
+                    break; // first match wins (lowest priority number)
+                }
+            }
+
+            if (matched) _diag.info("findMatchingRule: winner sigId=" + matched.signatureId);
+            else         _diag.warn("findMatchingRule: no rule matched — using default");
             cb(matched);
         });
     });
