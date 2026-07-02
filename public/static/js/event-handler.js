@@ -518,7 +518,7 @@ async function getAllRecipientEmails(item) {
 }
 
 // =============================================================================
-//  RULES MATCHING ENGINE  (doc 1)
+//  RULES MATCHING ENGINE
 // =============================================================================
 
 const _composeTypeByItem = new WeakMap();
@@ -551,10 +551,46 @@ function getDomain(email) {
     return at === -1 ? "" : email.slice(at + 1).toLowerCase();
 }
 
+/**
+ * Returns a SET of recipient type labels that are eligible to match rules,
+ * given the full recipient list vs the sender's domain.
+ *
+ * ALL recipients internal  →  { "internal", "all" }
+ * ANY recipient external   →  { "external", "all" }   ← mixed set lands here too
+ * Unknown domain / empty   →  { "all" }               ← conservative fallback
+ *
+ * "internal" rules are only eligible when EVERY recipient is on the sender's domain.
+ * "external" rules are eligible whenever at least one recipient is external.
+ * "all"      rules are always eligible.
+ */
 function classifyRecipients(senderEmail, recipientEmails) {
     const senderDomain = getDomain(senderEmail);
-    if (!senderDomain || recipientEmails.length === 0) return null;
-    return recipientEmails.every(e => getDomain(e) === senderDomain) ? "internal" : "external";
+
+    if (!senderDomain || recipientEmails.length === 0) {
+        console.warn("[CardByte] classifyRecipients: sender domain unknown or no recipients — eligible: ['all']");
+        return new Set(["all"]);
+    }
+
+    const breakdown = recipientEmails.map(e => ({
+        email: e,
+        domain: getDomain(e),
+        internal: getDomain(e) === senderDomain,
+    }));
+
+    const allInternal = breakdown.every(r => r.internal);
+
+    const eligibleTypes = allInternal
+        ? new Set(["internal", "all"])
+        : new Set(["external", "all"]);
+
+    console.log("[CardByte] classifyRecipients:", {
+        senderDomain,
+        breakdown,
+        allInternal,
+        eligibleTypes: [...eligibleTypes],
+    });
+
+    return eligibleTypes;
 }
 
 async function findMatchingRule(item) {
@@ -578,22 +614,46 @@ async function findMatchingRule(item) {
         return null;
     }
 
-    const recipientType = classifyRecipients(senderEmail, emails);
+    // Returns Set e.g. { "external", "all" } or { "internal", "all" }
+    const eligibleTypes = classifyRecipients(senderEmail, emails);
 
     const enabledRules = (rulesJson?.rulesList || [])
         .filter(r => r.enabled)
         .filter(r => r?.context === composeType || r?.context === "all")
-        .filter(r => r?.recipientType === recipientType || r?.recipientType === "all")
+        .filter(r => eligibleTypes.has(r.recipientType))   // ← Set lookup replaces string equality
         .sort((a, b) => a.priority - b.priority);
 
-    console.log("[CardByte] Selector engine:", { composeType, recipientType, emails, enabledRules });
+    console.log("[CardByte] Selector engine:", {
+        composeType,
+        eligibleTypes: [...eligibleTypes],
+        recipientCount: emails.length,
+        candidateRules: enabledRules.map(r => ({
+            rule: r.rule,
+            priority: r.priority,
+            context: r.context,
+            recipientType: r.recipientType,
+            signatureId: r.signatureId,
+        })),
+    });
 
     const matched = enabledRules[0] || null;
+
     if (matched) {
-        console.log(`[CardByte] ✅ Matched rule: "${matched.rule}" (priority ${matched.priority}) → signatureId: ${matched.signatureId}`);
+        console.log(
+            `[CardByte] ✅ Matched rule: "${matched.rule}"`,
+            `| priority: ${matched.priority}`,
+            `| context: ${matched.context}`,
+            `| recipientType: ${matched.recipientType} (eligible: [${[...eligibleTypes]}])`,
+            `| signatureId: ${matched.signatureId}`
+        );
     } else {
-        console.warn("[CardByte] ❌ No rules matched", { composeType, recipientType });
+        console.warn("[CardByte] ❌ No rules matched", {
+            composeType,
+            eligibleTypes: [...eligibleTypes],
+            totalRules: rulesJson?.rulesList?.length ?? 0,
+        });
     }
+
     return matched;
 }
 
