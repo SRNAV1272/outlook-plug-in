@@ -7309,22 +7309,10 @@ function findMatchingRule(item, rules, cb) {
 // ─── Signature injection ──────────────────────────────────────────────────────
 
 function writeSignature(item, html, onDone) {
-    function fallback() {
-        if (typeof item.body.prependAsync !== "function") {
-            _diag.error("No write path (no setSignatureAsync or prependAsync)");
-            onDone(false);
-            return;
-        }
-        item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, function (r) {
-            const ok = r.status === Office.AsyncResultStatus.Succeeded;
-            if (!ok) _diag.error("prependAsync failed: " + (r.error && r.error.message));
-            onDone(ok);
-        });
-    }
-
     if (typeof item.body.setSignatureAsync !== "function") {
-        _diag.warn("setSignatureAsync unavailable — prependAsync fallback");
-        fallback();
+        _diag.error("writeSignature: setSignatureAsync not available");
+        showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+        onDone(false);
         return;
     }
 
@@ -7333,8 +7321,9 @@ function writeSignature(item, html, onDone) {
             _diag.info("setSignatureAsync: success");
             onDone(true);
         } else {
-            _diag.warn("setSignatureAsync failed: " + (r.error && r.error.message) + " — trying prependAsync");
-            fallback();
+            _diag.warn("setSignatureAsync failed: " + (r.error && r.error.message));
+            showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+            onDone(false);
         }
     });
 }
@@ -7361,12 +7350,24 @@ function bodyAlreadyHasSignature(item, cb) {
  * Injects `html` into the compose body, then fires cb(ok).
  * Appends diagnostic block if DIAG_ENABLED.
  */
+// function injectAndComplete(item, html, guarded) {
+//     showNotification(item, "Applying signature...", "informationalMessage");
+//     writeSignature(item, html, function (ok) {
+//         if (!ok) _diag.warn("writeSignature returned false");
+//         writeDiagnostics(item, function () {
+//             removeNotification(item);
+//             guarded.completed();
+//         });
+//     });
+// }
 function injectAndComplete(item, html, guarded) {
     showNotification(item, "Applying signature...", "informationalMessage");
     writeSignature(item, html, function (ok) {
         if (!ok) _diag.warn("writeSignature returned false");
         writeDiagnostics(item, function () {
-            removeNotification(item);
+            if (ok) removeNotification(item);
+            else setTimeout(function () { removeNotification(item); }, 6000);
+
             guarded.completed();
         });
     });
