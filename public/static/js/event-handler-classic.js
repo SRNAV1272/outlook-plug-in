@@ -7402,7 +7402,6 @@ let _pollTimer = null;
 let _lastRecipientSnapshot = "";
 let _currentItem = null; // set at compose-open
 // after _lastRecipientSnapshot and _pollTimer declarations
-let _activeSignatureId = null; // null = default active, string = rule sig id active
 
 function serializeRecipients(emails) {
     return [].slice.call(emails).sort().join(",");
@@ -7423,7 +7422,6 @@ function onRecipientsChanged(item, rules, guarded) {
                     _diag.warn("onRecipientsChanged: rule html null — keeping current");
                     return;
                 }
-                _activeSignatureId = String(matched.signatureId); // ← track it
                 showNotification(item, "Applying rule signature...", "informationalMessage");
                 writeSignature(item, html, function (ok) {
                     if (!ok) _diag.warn("onRecipientsChanged: writeSignature failed");
@@ -7432,7 +7430,6 @@ function onRecipientsChanged(item, rules, guarded) {
             });
         } else {
             _diag.warn("onRecipientsChanged: no rule — applying default");
-            _activeSignatureId = null; // ← clear tracker, default is now active
             const noop = { completed: function () { } };
             applySignatureCore(item, noop, null);
         }
@@ -7506,7 +7503,6 @@ function applySignature(event) {
     }
 
     _currentItem = item;
-    _activeSignatureId = null; // ← reset on each new compose window
 
     // Step 1: inject default signature
     applySignatureCore(item, { completed: function () { } }, null);
@@ -7558,38 +7554,53 @@ function onSendHandler(event) {
         return;
     }
 
-    _diag.info("onSendHandler: re-injecting correct signature unconditionally");
+    _diag.info("onSendHandler: resolving correct signature via rules");
 
-    if (_activeSignatureId !== null) {
-        _diag.info("onSendHandler: injecting rule sig id=" + _activeSignatureId);
-        getOrFetchSignatureById(_activeSignatureId, function (html) {
-            if (html) {
-                writeSignature(item, html, function () {
-                    guarded.completed({ allowEvent: true });
-                });
-            } else {
-                _diag.warn("onSendHandler: rule sig unavailable — falling back to default");
-                getCachedSignature(function (cached) {
-                    if (!cached) { guarded.completed({ allowEvent: true }); return; }
-                    writeSignature(item, cached, function () {
-                        guarded.completed({ allowEvent: true });
-                    });
-                });
-            }
-        });
-    } else {
-        _diag.info("onSendHandler: injecting default sig from cache");
-        getCachedSignature(function (cached) {
-            if (!cached) {
-                _diag.warn("onSendHandler: no cached default — sending without");
-                guarded.completed({ allowEvent: true });
+    // Always re-run rule matching at send time.
+    // This is authoritative — don't rely on _activeSignatureId which may not
+    // have been set yet if the user sent before fetchRulesConfig completed.
+    getCachedRules(function (rules) {
+        if (!rules) {
+            _diag.warn("onSendHandler: no rules in cache — injecting default");
+            _injectDefaultAtSend(item, guarded);
+            return;
+        }
+
+        findMatchingRule(item, rules, function (matched) {
+            if (!matched) {
+                _diag.info("onSendHandler: no rule matched — injecting default");
+                _injectDefaultAtSend(item, guarded);
                 return;
             }
-            writeSignature(item, cached, function () {
-                guarded.completed({ allowEvent: true });
+
+            _diag.info("onSendHandler: rule matched id=" + matched.signatureId);
+            getOrFetchSignatureById(matched.signatureId, function (html) {
+                if (html) {
+                    _diag.info("onSendHandler: injecting rule sig id=" + matched.signatureId);
+                    writeSignature(item, html, function () {
+                        guarded.completed({ allowEvent: true });
+                    });
+                } else {
+                    _diag.warn("onSendHandler: rule sig unavailable — falling back to default");
+                    _injectDefaultAtSend(item, guarded);
+                }
             });
         });
-    }
+    });
+}
+
+function _injectDefaultAtSend(item, guarded) {
+    getCachedSignature(function (cached) {
+        if (!cached) {
+            _diag.warn("_injectDefaultAtSend: no cached default — sending without");
+            guarded.completed({ allowEvent: true });
+            return;
+        }
+        _diag.info("_injectDefaultAtSend: injecting default sig");
+        writeSignature(item, cached, function () {
+            guarded.completed({ allowEvent: true });
+        });
+    });
 }
 
 // ─── onFromChangedHandler ─────────────────────────────────────────────────────
