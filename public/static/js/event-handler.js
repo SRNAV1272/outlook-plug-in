@@ -682,16 +682,6 @@ async function findMatchingRule(item) {
 //  SIGNATURE INJECTION
 // =============================================================================
 
-function getBodyText(item) {
-    return new Promise((resolve) => {
-        const t0 = Date.now();
-        item.body.getAsync(Office.CoercionType.Html, (result) => {
-            logTiming("getBodyText", t0);
-            resolve(result.status === "succeeded" ? (result.value || "") : "");
-        });
-    });
-}
-
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.setSignatureAsync !== "function") {
@@ -710,7 +700,7 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
 
-    const maxSize = getMaxHtmlSize();
+    const maxSize = 100 * 1024; // 100KB — hard ceiling, matches signature builder constraint
     if (htmlSize > maxSize) {
         console.warn(`[CardByte] Signature exceeds max size (${htmlSize} > ${maxSize} bytes) — not applying`);
         showNotification(item, "Signature could not be applied — size exceeds allowed threshold. Please contact Admin.", "errorMessage", false);
