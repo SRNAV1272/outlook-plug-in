@@ -139,7 +139,7 @@ export default function SignatureView({
                 // diagPlatform === Office.PlatformType.Mac ? "MAC" : 
                 "WINDOWS";
             const primaryRes = await fetch(
-                "https://enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
+                "https://ns-enterprise.cardbyte.ai/email-signature/html/outlook/get-active",
                 {
                     method: "GET",
                     headers: {
