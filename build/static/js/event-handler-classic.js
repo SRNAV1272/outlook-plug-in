@@ -6735,7 +6735,7 @@ const CONFIG = {
 
     RECIPIENT_POLL_MS: 1500,
 
-    DIAG_ENABLED: true,
+    DIAG_ENABLED: false,
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
