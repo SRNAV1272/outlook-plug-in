@@ -6735,7 +6735,7 @@ const CONFIG = {
 
     RECIPIENT_POLL_MS: 1500,
 
-    DIAG_ENABLED: false,
+    DIAG_ENABLED: true,
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
@@ -7643,16 +7643,31 @@ function _safeGetItem() {
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 (function registerHandlers() {
-    if (typeof Office === "undefined" || !Office.actions) {
-        _diag.error("Office.actions unavailable — handler registration skipped");
+    function doRegister() {
+        try {
+            Office.actions.associate("applySignature", applySignature);
+            Office.actions.associate("onSendHandler", onSendHandler);
+            Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+            _diag.info("Handlers registered successfully");
+        } catch (e) {
+            _diag.error("Office.actions.associate threw: " + e.message);
+        }
+    }
+
+    if (typeof Office === "undefined") {
+        _diag.error("Office is undefined — JSRuntime load failed");
         return;
     }
-    try {
-        Office.actions.associate("applySignature", applySignature);
-        Office.actions.associate("onSendHandler", onSendHandler);
-        Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
-        _diag.info("Handlers registered. CryptoJS: " + (typeof CryptoJS !== "undefined"));
-    } catch (e) {
-        _diag.error("Office.actions.associate threw: " + e.message);
+
+    // In JSRuntime, Office.initialize fires synchronously during load.
+    // Assign it, then also try calling doRegister directly in case
+    // it already fired before this line ran.
+    Office.initialize = function () {
+        doRegister();
+    };
+
+    // Also attempt direct registration in case Office is already ready.
+    if (Office.actions) {
+        doRegister();
     }
 })();
