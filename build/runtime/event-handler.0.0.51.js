@@ -47,12 +47,16 @@ const CONFIG = Object.freeze({
     CACHE_TTL_MS: 5 * 60 * 1000,          // default sig / rules / sig-by-id
     HTML_HARD_MAX_BYTES: 100 * 1024,       // matches signature-builder ceiling
 
+    // Inline (base64 → CID) image conversion — see SIGNATURE INJECTION section
+    INLINE_IMG_PREFIX: "cardbyte-inline-",
+    INLINE_IMG_MAX: 10,
+
     FETCH_TIMEOUT_MS: 8000,
     FETCH_TIMEOUT_MS_MOBILE: 6000,         // mobile runtime is capped at 60s total
     MAX_RETRIES: 2,
     RETRY_BASE_DELAY_MS: 500,
 
-    RECIPIENT_POLL_MS: 2000,               // fallback only (legacy 1.10 clients)
+    RECIPIENT_POLL_MS: 900,               // fallback only (legacy 1.10 clients)
     RECIPIENT_DEBOUNCE_MS: 700,
     PREFETCH_CONCURRENCY: 3,
     PREFETCH_BUDGET_MS_MOBILE: 5000,
@@ -63,8 +67,8 @@ const CONFIG = Object.freeze({
     NOTIF_KEY: "cardbyte_sig_status",
     SESSION_KEY: "cardbyte_session_id",
 
-    // Set true only for troubleshooting builds — surfaces step-by-step timing
-    // notifications inside the compose window and verbose console output.
+    // Console verbosity ONLY. User-facing notification-bar messages (timed
+    // progress at every stage + errors) are ALWAYS shown regardless of DEBUG.
     DEBUG: false,
 });
 
@@ -234,19 +238,25 @@ function getOrCreateSessionId() {
 }
 
 // =============================================================================
-//  NOTIFICATIONS  (quiet by default — errors always shown, progress only in DEBUG)
+//  NOTIFICATIONS — always visible, with elapsed-time suffix at every stage
+//  (loading, API received, decrypted, applying, applied, send verification,
+//  failures). CONFIG.DEBUG only controls console verbosity, never visibility.
 // =============================================================================
 
-function showNotification(item, message, type = "informationalMessage", persistent = false) {
+function showNotification(item, message, type = "informationalMessage", persistent = false, startMs = null) {
     try {
         if (!item || typeof item.notificationMessages?.replaceAsync !== "function") return;
         let msg = String(message);
+        if (startMs) msg += ` (${Date.now() - startMs}ms)`;
         if (msg.length > 140) msg = msg.slice(0, 137) + "...";
         const details = { type, message: msg, icon: "none", persistent };
         item.notificationMessages.replaceAsync(CONFIG.NOTIF_KEY, details, (result) => {
             try {
                 if (result.status !== "succeeded" && typeof item.notificationMessages.addAsync === "function") {
-                    item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, () => { });
+                    item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, (r) => {
+                        if (r.status !== "succeeded")
+                            log.warn("addAsync notification failed:", r.error?.message);
+                    });
                 }
             } catch (_) { }
         });
@@ -255,11 +265,14 @@ function showNotification(item, message, type = "informationalMessage", persiste
     }
 }
 
-function showError(item, message) { showNotification(item, message, "errorMessage", false); }
+function showError(item, message, startMs = null, persistent = false) {
+    showNotification(item, message, "errorMessage", persistent, startMs);
+}
 
-function showProgress(item, message) {
-    if (!CONFIG.DEBUG) return; // progress chatter is a debug-build feature
-    showNotification(item, message, "informationalMessage", false);
+/** Progress notification with elapsed time — always shown to the user. */
+function notifyWithTiming(item, phase, startMs) {
+    log.debug(`${phase}: ${Date.now() - startMs}ms`);
+    showNotification(item, phase, "informationalMessage", false, startMs);
 }
 
 function removeNotification(item) {
@@ -527,22 +540,26 @@ async function fetchAndCacheRules(userEmail) {
  *   signature assigned"); explicit=false → transport failure.
  */
 async function renderSignatureOnServer(userEmail) {
+    const t0 = Date.now();
     const item = Office?.context?.mailbox?.item;
     try {
-        showProgress(item, "Loading signature...");
+        notifyWithTiming(item, "Loading signature...", t0);
         const encryptedMail = await encryptEmail(userEmail);
         const res = await httpGet("/html/outlook/get-active", {
             username: encryptedMail,
             "X-Platform": getXPlatform(),
         });
 
+        notifyWithTiming(item, "API response received ✓", t0);
+
         if (res.ok) {
             const decrypted = await handleAesDecrypt(await res.text());
+            notifyWithTiming(item, "Signature decrypted ✓", t0);
             let html = null;
             try { html = JSON.parse(decrypted)?.html; } catch (_) { html = null; }
 
             if (html === "" || html == null) {
-                showError(item, "Signature not assigned. Please contact Admin.");
+                showError(item, "Signature not assigned. Please contact Admin.", t0);
                 return { html: null, explicit: true };
             }
             return { html, explicit: true };
@@ -550,6 +567,7 @@ async function renderSignatureOnServer(userEmail) {
         log.warn("primary signature fetch failed:", res.status);
     } catch (err) {
         log.warn("renderSignatureOnServer failed:", err?.message || err);
+        showError(item, `API error: ${err?.message || err}`, t0);
     }
     return { html: null, explicit: false };
 }
@@ -734,6 +752,174 @@ async function findMatchingRule(item) {
 }
 
 // =============================================================================
+//  INLINE IMAGE HANDLING — base64 data URIs → CID inline attachments
+//
+//  WHY: `<img src="data:image/...;base64,...">` does not survive sending.
+//  Classic Outlook's Word rendering engine cannot display data URIs, and on
+//  send Exchange/Outlook strips them or converts them into regular
+//  attachments — recipients see a paperclip instead of the image.
+//
+//  FIX (Microsoft-prescribed pattern): before injecting the signature, every
+//  embedded base64 image is uploaded once as an INLINE attachment via
+//  item.addFileAttachmentFromBase64Async(..., { isInline: true }) and the
+//  <img src> is rewritten to `cid:<attachmentName>`. CID inline images render
+//  in-body at the receiver in Outlook, Gmail, Apple Mail, etc.
+//  addFileAttachmentFromBase64Async (Mailbox 1.8) is also on the mobile
+//  event-activation API allow-list, so this path works on iOS/Android too.
+//
+//  Details:
+//    • Attachment names are content-hashed → the same image is attached
+//      exactly once per compose item, including on send-time re-injection.
+//    • The tracker is seeded from item.getAttachmentsAsync on first use, so
+//      a fresh runtime activation (mobile is ephemeral; each LaunchEvent may
+//      be a new runtime) never duplicates an already-attached image.
+//    • On signature switches, our attachments that are no longer referenced
+//      are removed — stale unreferenced inline attachments are exactly what
+//      shows up as a "mystery attachment" at the receiver.
+//    • If an attach fails or the API is unavailable, that image keeps its
+//      original data URI (previous behavior) — degrade, never break.
+//    • Limitation: only <img src="data:..."> is converted; CSS
+//      background-image data URIs are left untouched. Long-term fix remains
+//      hosted HTTPS image URLs served by the signature backend.
+// =============================================================================
+
+let _inlineAttachedNames = {};   // name → true (attached on the current item)
+let _inlineTrackerSeeded = false;
+
+function _hashString(s) {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+}
+
+function _extFromMime(mime) {
+    const m = (mime || "").toLowerCase();
+    if (m.includes("png")) return "png";
+    if (m.includes("gif")) return "gif";
+    if (m.includes("webp")) return "webp";
+    if (m.includes("bmp")) return "bmp";
+    return "jpg";
+}
+
+function resetInlineImageTracker() {
+    _inlineAttachedNames = {};
+    _inlineTrackerSeeded = false;
+}
+
+function _getAttachmentsSafe(item) {
+    return new Promise((resolve) => {
+        if (typeof item?.getAttachmentsAsync !== "function") return resolve(null);
+        try {
+            item.getAttachmentsAsync((r) => {
+                resolve(r.status === Office.AsyncResultStatus.Succeeded ? (r.value || []) : null);
+            });
+        } catch (_) { resolve(null); }
+    });
+}
+
+/** Seed the attached-name tracker from the item's real attachment list once
+ *  per activation, so we never re-attach an image that already exists —
+ *  critical on mobile, where every LaunchEvent may be a fresh runtime. */
+async function _seedInlineTracker(item) {
+    if (_inlineTrackerSeeded) return;
+    _inlineTrackerSeeded = true;
+    const atts = await _getAttachmentsSafe(item);
+    if (!atts) return;
+    for (const att of atts) {
+        const nm = att.name || "";
+        if (nm.startsWith(CONFIG.INLINE_IMG_PREFIX)) _inlineAttachedNames[nm] = true;
+    }
+}
+
+function _attachInlineBase64(item, b64, name) {
+    return new Promise((resolve) => {
+        try {
+            item.addFileAttachmentFromBase64Async(b64, name, { isInline: true }, (r) => {
+                resolve(r.status === Office.AsyncResultStatus.Succeeded
+                    ? true
+                    : (log.warn(`inline attach failed for ${name}:`, r.error?.message), false));
+            });
+        } catch (e) {
+            log.warn("inline attach threw:", e?.message || e);
+            resolve(false);
+        }
+    });
+}
+
+/**
+ * Converts embedded base64 images in `html` to CID inline attachments.
+ * Returns { html: processedHtml, usedNames: {name: true} }. Images that fail
+ * to attach keep their original data URI.
+ */
+async function processInlineImages(item, html) {
+    if (!html || !html.includes("data:image/")) return { html, usedNames: {} };
+
+    if (typeof item?.addFileAttachmentFromBase64Async !== "function") {
+        log.warn("inline images: addFileAttachmentFromBase64Async unavailable (< Mailbox 1.8) — leaving data URIs");
+        return { html, usedNames: {} };
+    }
+
+    // src="data:image/<mime>;base64,<data>"  (single- or double-quoted)
+    const re = /src\s*=\s*(['"])data:image\/([a-z0-9.+-]+);base64,([^'"]+)\1/gi;
+    const jobs = [];
+    const byName = {};
+    let m;
+    while ((m = re.exec(html)) !== null && jobs.length < CONFIG.INLINE_IMG_MAX) {
+        const b64 = m[3].replace(/\s+/g, "");
+        if (!b64) continue;
+        const name = CONFIG.INLINE_IMG_PREFIX + _hashString(b64) + "." + _extFromMime(m[2]);
+        if (byName[name]) continue; // same image repeated — one attach covers all
+        byName[name] = true;
+        jobs.push({ full: m[0], quote: m[1], b64, name, ok: false });
+    }
+    if (jobs.length === 0) return { html, usedNames: {} };
+
+    log.debug(`processInlineImages: ${jobs.length} embedded image(s) found`);
+    await _seedInlineTracker(item);
+
+    for (const j of jobs) { // sequential: Office attachment APIs dislike parallel writes
+        if (_inlineAttachedNames[j.name]) { j.ok = true; continue; }
+        j.ok = await _attachInlineBase64(item, j.b64, j.name);
+        if (j.ok) {
+            _inlineAttachedNames[j.name] = true;
+            log.debug("inline image attached:", j.name);
+        }
+    }
+
+    let out = html;
+    const usedNames = {};
+    for (const j of jobs) {
+        if (!j.ok) continue; // attach failed → keep original data URI
+        usedNames[j.name] = true;
+        // Same data URI may appear multiple times — replace every occurrence.
+        out = out.split(j.full).join(`src=${j.quote}cid:${j.name}${j.quote}`);
+    }
+    return { html: out, usedNames };
+}
+
+/** Removes attachments this add-in created that the current signature no
+ *  longer references (fire-and-forget). Only touches our prefixed names. */
+async function cleanupStaleInlineAttachments(item, keepNames) {
+    if (typeof item?.removeAttachmentAsync !== "function") return;
+    const atts = await _getAttachmentsSafe(item);
+    if (!atts) return;
+    for (const att of atts) {
+        const nm = att.name || "";
+        if (!nm.startsWith(CONFIG.INLINE_IMG_PREFIX) || keepNames[nm]) continue;
+        try {
+            item.removeAttachmentAsync(att.id, (r) => {
+                if (r.status === Office.AsyncResultStatus.Succeeded) {
+                    delete _inlineAttachedNames[nm];
+                    log.debug("removed stale inline attachment:", nm);
+                } else {
+                    log.warn("stale attachment remove failed:", nm);
+                }
+            });
+        } catch (e) { log.warn("cleanup threw:", e?.message || e); }
+    }
+}
+
+// =============================================================================
 //  SIGNATURE INJECTION — serialized through an apply-queue
 // =============================================================================
 
@@ -764,17 +950,35 @@ function enqueueApply(taskFn) {
     return run;
 }
 
-async function applySignatureWithFallback(item, html) {
+async function applySignatureWithFallback(item, html, opts = {}) {
+    // opts.skipImageCleanup — set by the send path: attachments must not be
+    // added/removed while the item is mid-send. At send time the images are
+    // already attached (content-hashed names → tracker/attachment-list hits),
+    // so processing only rewrites data URIs to existing cid: references.
+    const { skipImageCleanup = false } = opts;
+
     return enqueueApply(async () => {
-        const size = byteLength(html);
+        // Step 1: base64 data URIs → CID inline attachments (see section above).
+        const { html: processedHtml, usedNames } = await processInlineImages(item, html);
+
+        const size = byteLength(processedHtml);
         if (size > CONFIG.HTML_HARD_MAX_BYTES) {
             log.warn(`signature exceeds max size (${size} > ${CONFIG.HTML_HARD_MAX_BYTES})`);
             showError(item, "Signature could not be applied — size exceeds allowed threshold. Please contact Admin.");
             return false;
         }
         try {
-            removeNotification(item);
-            await bodySetSignatureAsync(item, html);
+            // Do NOT removeNotification here — the "Applying signature..."
+            // message must remain on the bar until it is replaced by the
+            // "applied ✓" notification from the caller.
+            await bodySetSignatureAsync(item, processedHtml);
+            // Step 2: drop our attachments the new signature no longer
+            // references — stale unreferenced inline attachments surface as
+            // "mystery attachments" at the receiver. Fire-and-forget.
+            if (!skipImageCleanup) {
+                cleanupStaleInlineAttachments(item, usedNames)
+                    .catch(err => log.warn("inline cleanup failed:", err?.message || err));
+            }
             return true;
         } catch (err) {
             log.error("setSignatureAsync failed:", err?.message || err);
@@ -793,6 +997,7 @@ async function applySignatureWithFallback(item, html) {
 let _activeSignatureId = null;
 
 async function applySignatureCore(item, mailbox, opts = {}) {
+    const t0 = Date.now();
     const { fetchIfMissing = false, skipTtl = false, skipSessionCheck = false, overrideHtml = null } = opts;
     const userEmail = getUserEmail();
 
@@ -802,11 +1007,12 @@ async function applySignatureCore(item, mailbox, opts = {}) {
     if (!html) html = getCachedSignature({ skipTtl, skipSessionCheck, email: userEmail });
 
     if (!html && fetchIfMissing && userEmail) {
-        showProgress(item, "Fetching signature...");
+        notifyWithTiming(item, "Fetching signature...", t0);
         const { html: fetched, explicit } = await renderSignatureOnServer(userEmail);
         if (fetched) {
             html = fetched;
             setCachedSignature(html, userEmail);
+            notifyWithTiming(item, "Signature fetched ✓", t0);
         } else if (explicit) {
             explicitlyUnassigned = true;
             clearCachedSignature(userEmail);
@@ -819,18 +1025,23 @@ async function applySignatureCore(item, mailbox, opts = {}) {
         if (stale) {
             log.warn("using stale cached signature (network unavailable)");
             html = stale;
+            notifyWithTiming(item, "Using stale cache ✓", t0);
         }
     }
 
     if (!html) {
         log.error("no signature available — aborting");
         removeNotification(item);
-        showError(item, "Signature not available. Please contact Admin.");
+        showError(item, "Signature not available. Please contact Admin.", t0);
         return false;
     }
 
+    notifyWithTiming(item, "Applying signature...", t0);
     const ok = await applySignatureWithFallback(item, html);
-    if (ok) setTimeout(() => removeNotification(item), 3000);
+    if (ok) {
+        notifyWithTiming(item, "Signature applied ✓", t0);
+        setTimeout(() => removeNotification(item), 3000);
+    }
     return ok;
 }
 
@@ -841,6 +1052,7 @@ async function applySignatureCore(item, mailbox, opts = {}) {
 let _recipientRunToken = 0; // stale-run guard: only the latest change applies
 
 async function onRecipientsChangedCore(item, mailbox) {
+    const t0 = Date.now();
     const token = ++_recipientRunToken;
     const matched = await findMatchingRule(item);
     if (token !== _recipientRunToken) { log.debug("recipient run superseded — dropping"); return; }
@@ -853,7 +1065,12 @@ async function onRecipientsChangedCore(item, mailbox) {
             log.warn("rule signature fetch returned null — keeping current signature");
             return;
         }
-        await applySignatureWithFallback(item, ruleHtml);
+        notifyWithTiming(item, "Applying rule signature...", t0);
+        const ok = await applySignatureWithFallback(item, ruleHtml);
+        if (ok) {
+            notifyWithTiming(item, "Rule signature applied ✓", t0);
+            setTimeout(() => removeNotification(item), 3000);
+        }
         _activeSignatureId = String(matched.signatureId);
     } else {
         log.debug("no rule matched — falling back to default signature");
@@ -935,6 +1152,9 @@ function withTimeout(promise, ms, label = "operation") {
 // =============================================================================
 
 async function _onSendCore(item, mailbox) {
+    const t0 = Date.now();
+    notifyWithTiming(item, "Re-applying correct signature...", t0);
+
     const userEmail = getUserEmail();
     const rulesJson = getCachedRules({ skipTtl: true, email: userEmail });
 
@@ -946,7 +1166,8 @@ async function _onSendCore(item, mailbox) {
         if (!matched && isMac() && _activeSignatureId) {
             const ruleHtml = getSigById(_activeSignatureId, { skipTtl: true });
             if (ruleHtml) {
-                await applySignatureWithFallback(item, ruleHtml);
+                await applySignatureWithFallback(item, ruleHtml, { skipImageCleanup: true });
+                notifyWithTiming(item, "Rule signature applied ✓ (Mac fallback)", t0);
                 return;
             }
         }
@@ -954,7 +1175,8 @@ async function _onSendCore(item, mailbox) {
         if (matched) {
             const ruleHtml = getSigById(String(matched.signatureId), { skipTtl: true }); // cache-only at send time
             if (ruleHtml) {
-                await applySignatureWithFallback(item, ruleHtml);
+                await applySignatureWithFallback(item, ruleHtml, { skipImageCleanup: true });
+                notifyWithTiming(item, "Rule signature applied ✓", t0);
                 return;
             }
             log.warn(`onSend: rule sig id=${matched.signatureId} not in cache — falling back to default`);
@@ -964,9 +1186,11 @@ async function _onSendCore(item, mailbox) {
     const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true, email: userEmail });
     if (!cached) {
         log.warn("onSend: no cached signature — leaving body as-is");
+        showError(item, "No cached signature on send", t0);
         return;
     }
-    await applySignatureWithFallback(item, cached);
+    await applySignatureWithFallback(item, cached, { skipImageCleanup: true });
+    notifyWithTiming(item, "Signature applied ✓", t0);
 }
 
 // =============================================================================
@@ -996,8 +1220,11 @@ const applySignature = async function (event = _noopEvent) {
         if (!item) return;
         await ensureStorageReady();
 
+        notifyWithTiming(item, "Starting signature flow...", t0);
+
         _activeSignatureId = null;
         _composeTypeCache = null;
+        resetInlineImageTracker(); // new compose item — re-seed from its attachments
 
         const budget = isMobile() ? CONFIG.HANDLER_BUDGET_MS_MOBILE : 25000;
 
@@ -1138,10 +1365,15 @@ const onSendHandler = async function (event = _noopEvent) {
         await ensureStorageReady();
         stopRecipientPolling();
 
+        notifyWithTiming(item, "Verifying before send...", t0);
+
         await withTimeout(_onSendCore(item, mailbox), CONFIG.ONSEND_BUDGET_MS, "onSend");
+
+        notifyWithTiming(item, "Send verification complete ✓", t0);
         setTimeout(() => removeNotification(item), 3000);
     } catch (err) {
         log.warn("onSend timeout/error:", err?.message || err);
+        showError(item, "Send timeout/error", t0, /* persistent */ true);
         // Never block the send over a signature problem — fail open.
     } finally {
         done();

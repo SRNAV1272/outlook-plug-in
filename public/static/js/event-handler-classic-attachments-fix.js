@@ -6731,10 +6731,6 @@
 //      second signature onto a body that already contains one.
 //    • sig-by-id map is held in memory after first load (one storage read
 //      per runtime instead of one per lookup); stale entries purged at start.
-//    • Embedded base64 images are converted to CID inline attachments before
-//      injection (data URIs are stripped or turned into paperclip attachments
-//      in transit; CID inline images render in-body at the receiver). Stale
-//      unreferenced inline attachments are cleaned up on signature switches.
 //    • Diagnostic buffer is capped (no unbounded growth in long sessions).
 //    • onFromChangedHandler now resets ALL account-scoped caches (rules and
 //      sig-by-id too, not just the default signature) and re-runs the rules
@@ -6775,10 +6771,6 @@ const CONFIG = {
     SIG_BY_ID_TTL_MS: 5 * 60 * 1000,
 
     HTML_HARD_MAX_BYTES: 100 * 1024, // matches signature-builder ceiling
-
-    // Inline (base64 → CID) image conversion — see "Inline image handling"
-    INLINE_IMG_PREFIX: "cardbyte-inline-",
-    INLINE_IMG_MAX: 10,
 
     SIGNATURE_SENTINEL: "cardbyte-sig",
     NOTIF_KEY: "cardbyte_sig_status",
@@ -7462,187 +7454,6 @@ function utf8ByteLength(str) {
     return bytes;
 }
 
-// ─── Inline image handling (base64 data URIs → CID inline attachments) ──────
-//
-// WHY: `<img src="data:image/...;base64,...">` does not survive sending.
-// Classic Outlook's Word rendering engine cannot display data URIs, and on
-// send Exchange/Outlook strips them or converts them into regular
-// attachments — recipients then see a paperclip instead of the image.
-//
-// FIX (the Microsoft-prescribed pattern): before injecting the signature,
-// every embedded base64 image is uploaded once as an INLINE attachment via
-// item.addFileAttachmentFromBase64Async(..., { isInline: true }) and the
-// <img src> is rewritten to `cid:<attachmentName>`. CID-referenced inline
-// images render in-body at the receiver in Outlook, Gmail, Apple Mail, etc.
-//
-// Details:
-//   • Attachment names are content-hashed, so the same image is attached
-//     exactly once per compose window no matter how many times the signature
-//     is (re)applied — including the send-time re-injection.
-//   • The tracker is seeded from item.getAttachmentsAsync on first use, so a
-//     runtime restart between compose and send cannot cause duplicates.
-//   • When the signature switches (rules engine / From change), attachments
-//     this add-in created that are no longer referenced are removed — stale
-//     unreferenced inline attachments are precisely what shows up as a
-//     "mystery attachment" at the receiver.
-//   • If an attach fails or the API is unavailable (< Mailbox 1.8), that
-//     image keeps its original data URI (previous behavior) — degrade, never
-//     break.
-//   • Limitation: only <img src="data:..."> is converted; data URIs inside
-//     CSS (background-image) are left untouched. The long-term fix remains
-//     serving hosted HTTPS image URLs from the signature backend.
-
-let _inlineAttachedNames = {};   // name → true (attached in this compose window)
-let _inlineTrackerSeeded = false;
-
-function _hashString(s) {
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-    return (h >>> 0).toString(36);
-}
-
-function _extFromMime(mime) {
-    const m = (mime || "").toLowerCase();
-    if (m.indexOf("png") !== -1) return "png";
-    if (m.indexOf("gif") !== -1) return "gif";
-    if (m.indexOf("webp") !== -1) return "webp";
-    if (m.indexOf("bmp") !== -1) return "bmp";
-    return "jpg";
-}
-
-/** Seed the attached-name tracker from the item's real attachment list once
- *  per compose window, so we never re-attach an image that already exists. */
-function _seedInlineTracker(item, cb) {
-    if (_inlineTrackerSeeded || typeof item.getAttachmentsAsync !== "function") {
-        _inlineTrackerSeeded = true;
-        cb();
-        return;
-    }
-    try {
-        item.getAttachmentsAsync(function (r) {
-            if (r.status === Office.AsyncResultStatus.Succeeded && r.value) {
-                r.value.forEach(function (att) {
-                    const nm = att.name || "";
-                    if (nm.indexOf(CONFIG.INLINE_IMG_PREFIX) === 0) _inlineAttachedNames[nm] = true;
-                });
-            }
-            _inlineTrackerSeeded = true;
-            cb();
-        });
-    } catch (e) {
-        _diag.warn("_seedInlineTracker threw: " + e.message);
-        _inlineTrackerSeeded = true;
-        cb();
-    }
-}
-
-/**
- * Converts embedded base64 images in `html` to CID inline attachments.
- * Calls cb(processedHtml, usedNamesMap). Images that fail to attach keep
- * their original data URI. usedNamesMap contains every attachment name the
- * processed HTML references (for stale-attachment cleanup).
- */
-function processInlineImages(item, html, cb) {
-    if (!html || html.indexOf("data:image/") === -1) { cb(html, {}); return; }
-
-    if (typeof item.addFileAttachmentFromBase64Async !== "function") {
-        _diag.warn("inline images: addFileAttachmentFromBase64Async unavailable (< Mailbox 1.8) — leaving data URIs");
-        cb(html, {});
-        return;
-    }
-
-    // src="data:image/<mime>;base64,<data>"  (single- or double-quoted)
-    const re = /src\s*=\s*(['"])data:image\/([a-z0-9.+-]+);base64,([^'"]+)\1/gi;
-    const jobs = [];
-    const byName = {};
-    let m;
-    while ((m = re.exec(html)) !== null && jobs.length < CONFIG.INLINE_IMG_MAX) {
-        const quote = m[1];
-        const mime = m[2];
-        const b64 = m[3].replace(/\s+/g, "");
-        if (!b64) continue;
-        const name = CONFIG.INLINE_IMG_PREFIX + _hashString(b64) + "." + _extFromMime(mime);
-        if (byName[name]) continue; // same image repeated — one attach covers all
-        byName[name] = true;
-        jobs.push({ full: m[0], quote: quote, b64: b64, name: name, ok: false });
-    }
-
-    if (jobs.length === 0) { cb(html, {}); return; }
-    _diag.info("processInlineImages: " + jobs.length + " embedded image(s) found");
-
-    _seedInlineTracker(item, function () {
-        let idx = 0;
-
-        function next() {
-            if (idx >= jobs.length) { finish(); return; }
-            const j = jobs[idx++];
-
-            if (_inlineAttachedNames[j.name]) { // already on the item
-                j.ok = true;
-                next();
-                return;
-            }
-
-            try {
-                item.addFileAttachmentFromBase64Async(j.b64, j.name, { isInline: true }, function (r) {
-                    if (r.status === Office.AsyncResultStatus.Succeeded) {
-                        j.ok = true;
-                        _inlineAttachedNames[j.name] = true;
-                        _diag.info("inline image attached: " + j.name);
-                    } else {
-                        _diag.warn("inline attach failed for " + j.name + ": " + (r.error && r.error.message));
-                    }
-                    next();
-                });
-            } catch (e) {
-                _diag.warn("inline attach threw: " + e.message);
-                next();
-            }
-        }
-
-        function finish() {
-            let out = html;
-            const used = {};
-            for (let i = 0; i < jobs.length; i++) {
-                const j = jobs[i];
-                if (!j.ok) continue; // attach failed → keep original data URI
-                used[j.name] = true;
-                // Same data URI may appear multiple times — replace every occurrence.
-                out = out.split(j.full).join("src=" + j.quote + "cid:" + j.name + j.quote);
-            }
-            cb(out, used);
-        }
-
-        next();
-    });
-}
-
-/** Removes attachments this add-in created that the current signature no
- *  longer references (fire-and-forget). Never touches user attachments —
- *  only names carrying our prefix. */
-function cleanupStaleInlineAttachments(item, keepNames) {
-    if (typeof item.getAttachmentsAsync !== "function" ||
-        typeof item.removeAttachmentAsync !== "function") return;
-    try {
-        item.getAttachmentsAsync(function (r) {
-            if (r.status !== Office.AsyncResultStatus.Succeeded || !r.value) return;
-            r.value.forEach(function (att) {
-                const nm = att.name || "";
-                if (nm.indexOf(CONFIG.INLINE_IMG_PREFIX) === 0 && !keepNames[nm]) {
-                    item.removeAttachmentAsync(att.id, function (rr) {
-                        if (rr.status === Office.AsyncResultStatus.Succeeded) {
-                            delete _inlineAttachedNames[nm];
-                            _diag.info("removed stale inline attachment: " + nm);
-                        } else {
-                            _diag.warn("stale attachment remove failed: " + nm);
-                        }
-                    });
-                }
-            });
-        });
-    } catch (e) { _diag.warn("cleanupStaleInlineAttachments threw: " + e.message); }
-}
-
 // Write queue: poll ticks, compose, from-changed and send-time paths can
 // overlap; interleaved setSignatureAsync calls corrupt the body. Every body
 // write goes through this queue and runs strictly one at a time.
@@ -7670,73 +7481,54 @@ function enqueueWrite(task) {
     _drainWrites();
 }
 
-function writeSignature(item, html, onDone, opts) {
-    // opts.skipImageCleanup — set by the send path: attachments must not be
-    // added/removed while the item is mid-send. At send time the images are
-    // already attached (content-hashed names → tracker hits), so processing
-    // only rewrites data URIs to their existing cid: references.
-    const skipCleanup = !!(opts && opts.skipImageCleanup);
-
+function writeSignature(item, html, onDone) {
     enqueueWrite(function (release) {
         const finish = function (ok) { release(); onDone(ok); };
 
-        // Step 1: base64 data URIs → CID inline attachments (see section above).
-        processInlineImages(item, html, function (processedHtml, usedNames) {
+        const size = utf8ByteLength(html);
+        if (size > CONFIG.HTML_HARD_MAX_BYTES) {
+            _diag.error("writeSignature: size " + size + " exceeds ceiling " + CONFIG.HTML_HARD_MAX_BYTES);
+            showNotification(item, "Signature could not be applied — size exceeds allowed threshold. Please contact Admin.", "errorMessage");
+            finish(false);
+            return;
+        }
 
-            const size = utf8ByteLength(processedHtml);
-            if (size > CONFIG.HTML_HARD_MAX_BYTES) {
-                _diag.error("writeSignature: size " + size + " exceeds ceiling " + CONFIG.HTML_HARD_MAX_BYTES);
-                showNotification(item, "Signature could not be applied — size exceeds allowed threshold. Please contact Admin.", "errorMessage");
+        function fallback() {
+            if (typeof item.body.prependAsync !== "function") {
+                _diag.error("No write path (no setSignatureAsync or prependAsync)");
                 finish(false);
                 return;
             }
-
-            function onWritten(ok) {
-                // Step 3: drop our attachments the new signature no longer
-                // references — stale unreferenced inline attachments are what
-                // surface as a "mystery attachment" at the receiver.
-                if (ok && !skipCleanup) cleanupStaleInlineAttachments(item, usedNames);
-                finish(ok);
-            }
-
-            function fallback() {
-                if (typeof item.body.prependAsync !== "function") {
-                    _diag.error("No write path (no setSignatureAsync or prependAsync)");
-                    finish(false);
+            // prependAsync stacks instead of replacing — never prepend onto a
+            // body that already carries our signature sentinel.
+            bodyAlreadyHasSignature(item, function (present) {
+                if (present) {
+                    _diag.warn("prependAsync skipped — sentinel already in body");
+                    finish(true);
                     return;
                 }
-                // prependAsync stacks instead of replacing — never prepend onto a
-                // body that already carries our signature sentinel.
-                bodyAlreadyHasSignature(item, function (present) {
-                    if (present) {
-                        _diag.warn("prependAsync skipped — sentinel already in body");
-                        onWritten(true);
-                        return;
-                    }
-                    item.body.prependAsync(processedHtml, { coercionType: Office.CoercionType.Html }, function (r) {
-                        const ok = r.status === Office.AsyncResultStatus.Succeeded;
-                        if (!ok) _diag.error("prependAsync failed: " + (r.error && r.error.message));
-                        onWritten(ok);
-                    });
+                item.body.prependAsync(html, { coercionType: Office.CoercionType.Html }, function (r) {
+                    const ok = r.status === Office.AsyncResultStatus.Succeeded;
+                    if (!ok) _diag.error("prependAsync failed: " + (r.error && r.error.message));
+                    finish(ok);
                 });
-            }
-
-            // Step 2: inject.
-            if (typeof item.body.setSignatureAsync !== "function") {
-                _diag.warn("setSignatureAsync unavailable — prependAsync fallback");
-                fallback();
-                return;
-            }
-
-            item.body.setSignatureAsync(processedHtml, { coercionType: Office.CoercionType.Html }, function (r) {
-                if (r.status === Office.AsyncResultStatus.Succeeded) {
-                    _diag.info("setSignatureAsync: success");
-                    onWritten(true);
-                } else {
-                    _diag.warn("setSignatureAsync failed: " + (r.error && r.error.message) + " — trying prependAsync");
-                    fallback();
-                }
             });
+        }
+
+        if (typeof item.body.setSignatureAsync !== "function") {
+            _diag.warn("setSignatureAsync unavailable — prependAsync fallback");
+            fallback();
+            return;
+        }
+
+        item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, function (r) {
+            if (r.status === Office.AsyncResultStatus.Succeeded) {
+                _diag.info("setSignatureAsync: success");
+                finish(true);
+            } else {
+                _diag.warn("setSignatureAsync failed: " + (r.error && r.error.message) + " — trying prependAsync");
+                fallback();
+            }
         });
     });
 }
@@ -7959,8 +7751,6 @@ function applySignature(event) {
     _activeSignatureId = null;      // reset on each new compose window
     _composeTypeMemo = undefined;   // compose type is per-window
     _lastRecipientSnapshot = "";
-    _inlineAttachedNames = {};      // inline-image tracker is per-window
-    _inlineTrackerSeeded = false;   // re-seed from the new item's attachments
 
     // Step 1: inject default signature (cache-first; own noop guard —
     //         the Office event is completed independently below)
@@ -8056,7 +7846,7 @@ function onSendHandler(event) {
                 allow();
                 return;
             }
-            writeSignature(item, cached, function () { allow(); }, { skipImageCleanup: true });
+            writeSignature(item, cached, function () { allow(); });
         }, /* allowStale */ true);
     };
 
@@ -8066,7 +7856,7 @@ function onSendHandler(event) {
         _diag.info("onSendHandler: injecting rule sig id=" + _activeSignatureId);
         getSigById(_activeSignatureId, function (html) { // cache-only — no XHR at send time
             if (html) {
-                writeSignature(item, html, function () { allow(); }, { skipImageCleanup: true });
+                writeSignature(item, html, function () { allow(); });
             } else {
                 _diag.warn("onSendHandler: rule sig not cached — falling back to default");
                 injectDefaultFromCache();
