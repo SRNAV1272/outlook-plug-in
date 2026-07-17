@@ -5,6 +5,9 @@
 //  Base: event-handler (doc 3) — timing, notifications, withTimeout guard
 //  Rules matching engine updated to mirror C# RecipientTypeMatches exactly:
 //    hasInternal / hasExternal computed independently (dual-flag, not single bucket)
+//  NEW: sender-based segregation — a rule only fires when the logged-in
+//    sender is in the rule's resolved Senders list (Senders / isAzureAdGroup /
+//    GroupId contract from the rules-config UI).
 // =============================================================================
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -447,13 +450,25 @@ async function prefetchAllRuleSignatures(userEmail) {
         console.log("[CardByte] prefetchAllRuleSignatures: rules not cached yet — skipping");
         return;
     }
-    const enabledRules = (rulesJson?.rulesList || []).filter(r => r.enabled && r.signatureId != null);
-    if (enabledRules.length === 0) return;
+
+    // ── SENDER FILTER ──
+    // Only prefetch signatures for rules this user can actually trigger.
+    // A rule whose Senders list excludes this user will never match here,
+    // so fetching its signature would be wasted bandwidth + cache space.
+    const enabledRules = (rulesJson?.rulesList || []).filter(r =>
+        r.enabled &&
+        r.signatureId != null &&
+        senderMatches(r, userEmail)
+    );
+    if (enabledRules.length === 0) {
+        console.log("[CardByte] prefetchAllRuleSignatures: no sender-eligible rules for this user");
+        return;
+    }
 
     const xPlatform = getXPlatform();
     const encryptedMail = await encryptEmail(userEmail);
 
-    console.log(`[CardByte] 🔄 Prefetching signatures for ${enabledRules.length} rule(s)...`);
+    console.log(`[CardByte] 🔄 Prefetching signatures for ${enabledRules.length} sender-eligible rule(s)...`);
 
     await Promise.allSettled(
         enabledRules.map(r =>
@@ -507,6 +522,15 @@ async function getAllRecipientEmails(item) {
 //         matching C# behavior where both can be true simultaneously.
 //         An "internal" rule fires whenever ANY recipient is internal,
 //         an "external" rule fires whenever ANY recipient is external.
+//
+//  NEW — SENDER SEGREGATION:
+//    Each rule now also carries a sender contract from the rules-config UI:
+//      Senders        : ['*'] | ['e1@x.com', 'e2@x.com', ...]
+//      isAzureAdGroup : true when Senders was resolved from an Azure AD group
+//      GroupId        : the Azure AD group id ('' when not a group rule)
+//    A rule is only eligible when the logged-in sender's email is in the
+//    resolved Senders list (or the list is ['*'] / absent for legacy rules).
+//    Match condition per rule = contextOk && recipientOk && senderOk.
 // =============================================================================
 
 function getDomain(email) {
@@ -547,6 +571,33 @@ function contextMatches(ruleContext, composeType) {
     return rc === composeType.toLowerCase();
 }
 
+/**
+ * ── NEW: sender-based segregation ──
+ *
+ * Rule contract from the rules-config UI:
+ *   Senders        : ['*'] | ['e1@x.com', 'e2@x.com', 'e3@x.com', 'e4@x.com']
+ *   isAzureAdGroup : true when the Senders list was resolved from an Azure AD group
+ *   GroupId        : the Azure AD group id ('' when not a group rule)
+ *
+ * The add-in only checks membership of the logged-in sender in the resolved
+ * Senders snapshot. isAzureAdGroup / GroupId are informational on the client —
+ * the backend owns re-resolving live group membership into Senders.
+ *
+ * Truth table:
+ *   Senders missing / not an array / empty  → true   (legacy rule, no restriction)
+ *   Senders contains '*'                    → true   (explicit all-users)
+ *   senderEmail unknown                     → false  (restricted rule, can't verify)
+ *   otherwise                               → case-insensitive membership check
+ */
+function senderMatches(rule, senderEmail) {
+    const senders = Array.isArray(rule?.Senders) ? rule.Senders : null;
+    if (!senders || senders.length === 0) return true;   // legacy rule — no sender restriction
+    if (senders.includes("*")) return true;               // explicit all-users wildcard
+    if (!senderEmail) return false;                        // restricted rule but sender unknown
+    const me = senderEmail.trim().toLowerCase();
+    return senders.some(s => (s || "").trim().toLowerCase() === me);
+}
+
 const _composeTypeByItem = new WeakMap();
 
 function getComposeType(item) {
@@ -582,9 +633,15 @@ function getComposeType(item) {
  * A mixed To/Cc list (some internal, some external) sets both to true,
  * so both "internal" and "external" rules are eligible simultaneously.
  *
+ * NEW: each rule is additionally gated by senderMatches — the logged-in
+ * user's email must appear in the rule's Senders list (or the list must
+ * be ['*'] / absent). This is how group-scoped rules (isAzureAdGroup +
+ * GroupId) are segregated per user on the client.
+ *
  * Evaluation order mirrors C# DebugRuleSelection:
  *   foreach rule ordered by priority ascending:
- *     if enabled && contextMatches && recipientTypeMatches → first match wins
+ *     if enabled && contextMatches && recipientTypeMatches && senderMatches
+ *       → first match wins
  */
 async function findMatchingRule(item) {
     let rulesJson = getCachedRules();
@@ -647,13 +704,15 @@ async function findMatchingRule(item) {
     let matched = null;
 
     for (const r of sortedRules) {
+        const senderOk = senderMatches(r, senderEmail);
         const contextOk = contextMatches(r.context, composeType);
         const recipOk = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
-        const allMatch = contextOk && recipOk;
+        const allMatch = senderOk && contextOk && recipOk;
 
         console.log(
             (allMatch ? ">>> MATCH" : "    skip "),
             `| priority=${r.priority}`,
+            `| sender(ok=${senderOk}${r.isAzureAdGroup ? `, group=${r.GroupId}` : ""}, listSize=${Array.isArray(r.Senders) ? r.Senders.length : "n/a"})`,
             `| context=${r.context} (ok=${contextOk})`,
             `| recipientType=${r.recipientType} (ok=${recipOk})`,
             `| sigId=${r.signatureId ?? "NULL"}`,
@@ -669,10 +728,12 @@ async function findMatchingRule(item) {
             `| priority: ${matched.priority}`,
             `| context: ${matched.context}`,
             `| recipientType: ${matched.recipientType}`,
+            `| isAzureAdGroup: ${!!matched.isAzureAdGroup}`,
+            `| GroupId: ${matched.GroupId || "-"}`,
             `| signatureId: ${matched.signatureId}`
         );
     } else {
-        console.warn("[CardByte] ❌ No rules matched", { composeType, hasInternal, hasExternal });
+        console.warn("[CardByte] ❌ No rules matched (sender/context/recipient filters)", { senderEmail, composeType, hasInternal, hasExternal });
     }
 
     return matched;
