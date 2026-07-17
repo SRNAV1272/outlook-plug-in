@@ -960,6 +960,48 @@ Office.onReady(() => {
 //  PUBLIC ENTRY POINTS
 // =============================================================================
 
+// const applySignature = async function (event = { completed: () => { } }) {
+//     const t0 = Date.now();
+//     const mailbox = Office?.context?.mailbox;
+//     const item = mailbox?.item;
+
+//     try {
+//         if (!item) return;
+
+//         notifyWithTiming(item, "Starting signature flow...", t0);
+
+//         // Reset rule tracker — each compose window starts with the default
+//         // signature until the rules engine fires for this session's recipients.
+//         _activeSignatureId = null;
+
+//         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
+
+//         const userEmail = mailbox?.userProfile?.emailAddress;
+
+//         if (userEmail && !isMobile()) {
+//             prefetchAllRuleSignatures(userEmail).catch(err =>
+//                 console.warn("[CardByte] Background prefetch failed:", err)
+//             );
+//         }
+
+//         if (!isMobile()) {
+//             const emails = await getAllRecipientEmails(item);
+//             if (emails.length > 0) {
+//                 _lastRecipientSnapshot = serializeRecipients(emails);
+//                 await onRecipientsChanged(item, mailbox);
+//             }
+//         }
+
+//         startRecipientPolling();
+
+//     } catch (err) {
+//         console.error("[CardByte] applySignature error:", err);
+//     } finally {
+//         logTiming("applySignature total", t0);
+//         event.completed();
+//     }
+// };
+
 const applySignature = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
@@ -969,14 +1011,26 @@ const applySignature = async function (event = { completed: () => { } }) {
         if (!item) return;
 
         notifyWithTiming(item, "Starting signature flow...", t0);
-
-        // Reset rule tracker — each compose window starts with the default
-        // signature until the rules engine fires for this session's recipients.
         _activeSignatureId = null;
 
-        await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
-
         const userEmail = mailbox?.userProfile?.emailAddress;
+
+        // ── Force rules load on ALL platforms (mobile has no other path) ──────
+        // prefetchAllRuleSignatures is skipped on mobile, so rules never reach
+        // the cache, and findMatchingRule bails immediately with "no rules available".
+        // This block ensures the rules manifest is cached before we do anything else.
+        if (userEmail && !getCachedRules()) {
+            try {
+                const enc = await encryptEmail(userEmail);
+                await fetchAndCacheRules(enc, getXPlatform());
+                console.log("[CardByte] ✅ Rules pre-loaded (all platforms)");
+            } catch (err) {
+                console.warn("[CardByte] ⚠️ Early rules fetch failed — rule matching may not work:", err);
+            }
+        }
+
+        // rest of the function continues unchanged from here...
+        await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
 
         if (userEmail && !isMobile()) {
             prefetchAllRuleSignatures(userEmail).catch(err =>
@@ -984,12 +1038,10 @@ const applySignature = async function (event = { completed: () => { } }) {
             );
         }
 
-        if (!isMobile()) {
-            const emails = await getAllRecipientEmails(item);
-            if (emails.length > 0) {
-                _lastRecipientSnapshot = serializeRecipients(emails);
-                await onRecipientsChanged(item, mailbox);
-            }
+        const emails = await getAllRecipientEmails(item);
+        if (emails.length > 0) {
+            _lastRecipientSnapshot = serializeRecipients(emails);
+            await onRecipientsChanged(item, mailbox);
         }
 
         startRecipientPolling();
