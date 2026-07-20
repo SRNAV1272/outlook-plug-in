@@ -12,7 +12,7 @@
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
-const BASE_URL = "https://enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://newqa-enterprise.cardbyte.ai/email-signature";
 
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
