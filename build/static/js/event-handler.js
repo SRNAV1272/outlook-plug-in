@@ -1,14 +1,17 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (FIXED for Android Mobile)
+//  CardByte Outlook Add-in — event-handler.js (FIXED v2 for Android Mobile)
 //  Fixes applied:
 //    1. Added senderMatches() filtering in findMatchingRule()
 //    2. Removed !isMobile() guard blocking onRecipientsChanged at compose time
 //    3. Moved startRecipientPolling() inside !isMobile() check
 //    4. Added onFromChangedHandler() function (was missing but registered in manifest)
 //    5. Added onRecipientsChangedHandler() wrapper for LaunchEvent
-//    6. Fixed Office.actions.associate to include all handlers
+//    6. FIXED: Improved compose type detection for mobile (getComposeTypeAsync often fails)
+//       - Added detectComposeType() with subject-line fallback (Re:/Fwd:)
+//       - Added inReplyToId check fallback
+//       - contextMatches no longer treats null as pass-through
 // =============================================================================
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -35,7 +38,7 @@ const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const HEAVY_THRESHOLD = 100 * 1024;
 const MAX_RETRIES = 2;
-const RECIPIENT_POLL_MS = 900;
+const RECIPIENT_POLL_MS = 1500;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
@@ -496,12 +499,6 @@ async function getAllRecipientEmails(item) {
 
 // =============================================================================
 //  RULES MATCHING ENGINE
-//
-//  Mirrors C# RecipientTypeMatches(recipientType, hasInternal, hasExternal)
-//  and ContextMatches(context, mailContext) exactly.
-//
-//  FIX #1: Added senderMatches() to filter rules by the current sender email.
-//  The rules JSON has a "Senders" array per rule — we must check it.
 // =============================================================================
 
 function getDomain(email) {
@@ -509,9 +506,6 @@ function getDomain(email) {
     return at === -1 ? "" : email.slice(at + 1).toLowerCase();
 }
 
-/**
- * Mirrors C# RecipientTypeMatches(recipientType, hasInternal, hasExternal).
- */
 function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     if (!recipientType || recipientType.trim() === "") return true;
     const rt = recipientType.toLowerCase();
@@ -523,58 +517,117 @@ function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
 
 /**
  * Mirrors C# ContextMatches(context, mailContext).
+ * 
+ * FIXED v2: null composeType now returns FALSE instead of TRUE.
+ * detectComposeType() always returns a non-null string, so this path
+ * should only be hit as a safety net.
  */
 function contextMatches(ruleContext, composeType) {
     if (!ruleContext || ruleContext.trim() === "") return true;
     const rc = ruleContext.toLowerCase();
     if (rc === "all") return true;
-    if (composeType === null) return true;
+    if (composeType === null || composeType === undefined) {
+        console.warn("[CardByte] contextMatches called with null composeType — using conservative fallback");
+        return false;
+    }
     return rc === composeType.toLowerCase();
 }
 
-/**
- * NEW: Filters rules by the current sender email.
- * If a rule has no Senders array, it applies to everyone.
- * If a rule has Senders, only the listed senders can use it.
- */
 function senderMatches(rule, currentSenderEmail) {
     if (!rule.Senders || rule.Senders.length === 0) return true;
     const sender = (currentSenderEmail || "").toLowerCase();
     return rule.Senders.some(s => s.toLowerCase() === sender);
 }
 
+// =============================================================================
+//  FIXED v2: IMPROVED COMPOSE TYPE DETECTION (Mobile-safe)
+// =============================================================================
+
 const _composeTypeByItem = new WeakMap();
+
+/**
+ * Detects whether the current item is a reply, forward, or new compose.
+ * Uses multiple heuristics because getComposeTypeAsync is unreliable on mobile.
+ * 
+ * Detection order:
+ *   1. Official API (getComposeTypeAsync)
+ *   2. Subject line prefix check (Re:, Fw:, Fwd:)
+ *   3. inReplyToId property check
+ *   4. Default to "compose"
+ */
+async function detectComposeType(item) {
+    // 1. Try the official API first
+    if (typeof item?.getComposeTypeAsync === "function") {
+        try {
+            const result = await new Promise((resolve) => {
+                item.getComposeTypeAsync((res) => {
+                    if (res.status === Office.AsyncResultStatus.Succeeded) {
+                        resolve(res.value?.composeType || "");
+                    } else {
+                        console.warn("[CardByte] getComposeTypeAsync failed:", res.error?.message);
+                        resolve("");
+                    }
+                });
+            });
+            const raw = result.toLowerCase();
+            console.log("[CardByte] getComposeTypeAsync raw result:", raw);
+            if (raw === "reply" || raw === "forward") return "reply";
+            if (raw === "newmail") return "compose";
+        } catch (e) {
+            console.warn("[CardByte] getComposeTypeAsync threw:", e);
+        }
+    } else {
+        console.warn("[CardByte] getComposeTypeAsync not available on this platform");
+    }
+
+    // 2. Fallback: check subject line for Re:/Fwd: prefixes
+    try {
+        const subject = await new Promise((resolve) => {
+            if (typeof item?.subject?.getAsync === "function") {
+                item.subject.getAsync((res) => {
+                    resolve(res.status === Office.AsyncResultStatus.Succeeded ? (res.value || "") : "");
+                });
+            } else {
+                resolve("");
+            }
+        });
+        const subjLower = subject.toLowerCase().trim();
+        if (subjLower.startsWith("re:") || subjLower.startsWith("fw:") || subjLower.startsWith("fwd:")) {
+            console.log("[CardByte] Detected reply/forward via subject prefix:", subject);
+            return "reply";
+        }
+    } catch (e) {
+        console.warn("[CardByte] Subject check failed:", e);
+    }
+
+    // 3. Fallback: check if item has inReplyToId (indicates reply)
+    try {
+        if (item?.inReplyToId) {
+            console.log("[CardByte] Detected reply/forward via inReplyToId:", item.inReplyToId);
+            return "reply";
+        }
+    } catch (e) {
+        // inReplyToId may not be available
+    }
+
+    // 4. Default to "compose" for new messages
+    console.log("[CardByte] Defaulting composeType to 'compose' (new mail)");
+    return "compose";
+}
 
 function getComposeType(item) {
     if (_composeTypeByItem.has(item)) return Promise.resolve(_composeTypeByItem.get(item));
-    return new Promise((resolve) => {
-        if (typeof item?.getComposeTypeAsync !== "function") {
-            console.warn("[CardByte] getComposeTypeAsync not available — context filter disabled");
-            resolve(null);
-            return;
-        }
-        item.getComposeTypeAsync((result) => {
-            if (result.status !== Office.AsyncResultStatus.Succeeded) {
-                console.warn("[CardByte] getComposeTypeAsync failed:", result.error?.message);
-                resolve(null);
-                return;
-            }
-            const raw = (result.value?.composeType || "").toLowerCase();
-            const normalized = raw === "newmail" ? "compose"
-                : (raw === "reply" || raw === "forward") ? "reply"
-                    : null;
-            _composeTypeByItem.set(item, normalized);
-            console.log("[CardByte] composeType resolved:", raw, "→", normalized);
-            resolve(normalized);
-        });
+    return detectComposeType(item).then((detected) => {
+        _composeTypeByItem.set(item, detected);
+        console.log("[CardByte] composeType cached:", detected);
+        return detected;
     });
 }
 
-/**
- * Finds the highest-priority matching rule for the current compose item.
- *
- * FIX: Now filters by sender (Senders array), context, and recipientType.
- */
+// =============================================================================
+//  FIND MATCHING RULE
+// =============================================================================
+
 async function findMatchingRule(item) {
     let rulesJson = getCachedRules();
 
@@ -591,7 +644,6 @@ async function findMatchingRule(item) {
     const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
     const senderDomain = getDomain(senderEmail);
 
-    // Retry recipient read on Mac if empty — hydration can lag on reply/forward
     let emails = await getAllRecipientEmails(item);
     if (emails.length === 0 && isMac()) {
         console.warn("[CardByte] Mac: recipients empty on first read — retrying after short delay");
@@ -606,7 +658,6 @@ async function findMatchingRule(item) {
         return null;
     }
 
-    // Compute hasInternal / hasExternal independently
     let hasInternal = false;
     let hasExternal = false;
     const recipientDomains = [];
@@ -947,7 +998,6 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         notifyWithTiming(item, "Starting signature flow...", t0);
 
-        // Reset rule tracker
         _activeSignatureId = null;
 
         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
@@ -960,16 +1010,12 @@ const applySignature = async function (event = { completed: () => { } }) {
             );
         }
 
-        // FIX #2: Run rule matching immediately on ALL platforms (including mobile)
-        // On mobile, recipients may already be present (reply/forward) and
-        // OnMessageRecipientsChanged only fires on ACTIVE changes, not initial state.
         const emails = await getAllRecipientEmails(item);
         if (emails.length > 0) {
             _lastRecipientSnapshot = serializeRecipients(emails);
             await onRecipientsChanged(item, mailbox);
         }
 
-        // FIX #3: Only start polling on desktop — mobile uses LaunchEvents
         if (!isMobile()) {
             startRecipientPolling();
         }
@@ -1012,12 +1058,6 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     }
 };
 
-// =============================================================================
-//  FIX #4: Added missing onFromChangedHandler
-//  The manifest registers OnMessageFromChanged → onFromChangedHandler
-//  but this function was missing, causing runtime errors on account switch.
-// =============================================================================
-
 const onFromChangedHandler = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
@@ -1029,16 +1069,13 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         console.log("[CardByte] onFromChangedHandler: account changed, re-evaluating rules...");
         notifyWithTiming(item, "Account changed — updating signature...", t0);
 
-        // Reset tracker since the sender changed
         _activeSignatureId = null;
 
-        // Re-evaluate rules with the new sender context
         const emails = await getAllRecipientEmails(item);
         if (emails.length > 0) {
             _lastRecipientSnapshot = serializeRecipients(emails);
             await onRecipientsChanged(item, mailbox);
         } else {
-            // No recipients yet — just re-apply default for new sender
             await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
         }
 
@@ -1052,11 +1089,6 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         event.completed();
     }
 };
-
-// =============================================================================
-//  FIX #5: Added onRecipientsChangedHandler wrapper for LaunchEvent
-//  OnMessageRecipientsChanged fires this on both desktop and mobile.
-// =============================================================================
 
 const onRecipientsChangedHandler = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
