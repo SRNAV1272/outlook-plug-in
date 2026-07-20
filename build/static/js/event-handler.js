@@ -12,7 +12,7 @@
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
-const BASE_URL = "https://newqa-enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://enterprise.cardbyte.ai/email-signature";
 
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
@@ -482,11 +482,15 @@ function getRecipientsAsync(field) {
 }
 
 async function getAllRecipientEmails(item) {
-    const [to, cc] = await Promise.all([
+    const [to
+        // , cc
+    ] = await Promise.all([
         getRecipientsAsync(item?.to),
-        getRecipientsAsync(item?.cc),
+        // getRecipientsAsync(item?.cc),
     ]);
-    const emails = [...to, ...cc].map(r => (r.emailAddress || "").toLowerCase()).filter(Boolean);
+    const emails = [...to
+        // , ...cc
+    ].map(r => (r.emailAddress || "").toLowerCase()).filter(Boolean);
     return [...new Set(emails)];
 }
 
@@ -678,16 +682,6 @@ async function findMatchingRule(item) {
 //  SIGNATURE INJECTION
 // =============================================================================
 
-function getBodyText(item) {
-    return new Promise((resolve) => {
-        const t0 = Date.now();
-        item.body.getAsync(Office.CoercionType.Html, (result) => {
-            logTiming("getBodyText", t0);
-            resolve(result.status === "succeeded" ? (result.value || "") : "");
-        });
-    });
-}
-
 function bodySetSignatureAsync(item, html) {
     return new Promise((resolve, reject) => {
         if (typeof item.body.setSignatureAsync !== "function") {
@@ -702,62 +696,24 @@ function bodySetSignatureAsync(item, html) {
     });
 }
 
-function bodySetSelectedDataAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.setSelectedDataAsync !== "function") {
-            reject(new Error("setSelectedDataAsync not available"));
-            return;
-        }
-        item.body.setSelectedDataAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(r.error);
-        });
-    });
-}
-
 async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
 
-    if (isMobile()) {
-        const maxSize = getMaxHtmlSize();
-        if (htmlSize > maxSize) {
-            console.warn(`[CardByte] Signature too large for mobile (${htmlSize} > ${maxSize})`);
-            showNotification(item, "Signature too large for this device. Please contact Admin.", "errorMessage", false);
-            return false;
-        }
-        try {
-            removeNotification(item);
-            await bodySetSelectedDataAsync(item, html);
-            console.log("[CardByte] Mobile signature inserted via setSelectedDataAsync");
-            return true;
-        } catch (err) {
-            console.error("[CardByte] Mobile signature insertion failed:", err);
-            showNotification(item, "Signature could not be inserted. Please contact Admin.", "errorMessage", false);
-            return false;
-        }
+    const maxSize = 100 * 1024; // 100KB — hard ceiling, matches signature builder constraint
+    if (htmlSize > maxSize) {
+        console.warn(`[CardByte] Signature exceeds max size (${htmlSize} > ${maxSize} bytes) — not applying`);
+        showNotification(item, "Signature could not be applied — size exceeds allowed threshold. Please contact Admin.", "errorMessage", false);
+        return false;
     }
 
-    if (htmlSize < HEAVY_THRESHOLD) {
+    try {
         removeNotification(item);
         await bodySetSignatureAsync(item, html);
         return true;
-    }
-
-    console.warn(`[CardByte] Heavy signature (${htmlSize} bytes) — isSendTime=${isSendTime}`);
-    if (isSendTime) {
-        console.log("[CardByte] Heavy signature at send time — skipping (already in body)");
-        removeNotification(item);
-        return false;
-    }
-    try {
-        await bodySetSignatureAsync(item, "");
-        await bodySetSelectedDataAsync(item, html);
-        removeNotification(item);
-        console.log("[CardByte] Heavy signature inserted via cursor trick");
-        return true;
     } catch (err) {
-        console.error("[CardByte] Heavy path insertion failed:", err);
-        showNotification(item, "Your signature is large and could not be inserted. Please contact Admin.", "errorMessage", true);
+        console.error("[CardByte] setSignatureAsync failed:", err);
+        showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage", false);
         return false;
     }
 }
