@@ -5,9 +5,22 @@
 //  Base: event-handler (doc 3) — timing, notifications, withTimeout guard
 //  Rules matching engine updated to mirror C# RecipientTypeMatches exactly:
 //    hasInternal / hasExternal computed independently (dual-flag, not single bucket)
-//  NEW: sender-based segregation — a rule only fires when the logged-in
+//  Sender-based segregation — a rule only fires when the logged-in
 //    sender is in the rule's resolved Senders list (Senders / isAzureAdGroup /
 //    GroupId contract from the rules-config UI).
+//
+//  MOBILE FIX (this revision):
+//    On iOS/Android the event-based runtime is short-lived — it is torn down
+//    right after event.completed(), so recipient polling and background
+//    prefetch never get a chance to run. Previously ALL rule machinery was
+//    gated behind !isMobile(), which meant mobile never switched signatures.
+//    Mobile now works on a different strategy:
+//      1. Compose open  → warm the rules cache + one-shot rule evaluation
+//                         (covers reply/forward where recipients pre-exist).
+//      2. Send time     → rules are (re)fetched if missing and the matched
+//                         rule's signature may be fetched over the NETWORK
+//                         (cache-only remains the desktop policy), inside a
+//                         larger mobile send timeout.
 // =============================================================================
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -35,6 +48,13 @@ const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const HEAVY_THRESHOLD = 100 * 1024;
 const MAX_RETRIES = 2;
 const RECIPIENT_POLL_MS = 1500;
+
+// ── MOBILE FIX: send-time budgets ──
+// Desktop keeps the strict 4s cache-only budget. Mobile gets a larger budget
+// because it may need up to two network round-trips (rules + signature HTML)
+// at send time — there is no polling/prefetch runtime to warm the cache.
+const SEND_TIMEOUT_MS_DESKTOP = 4000;
+const SEND_TIMEOUT_MS_MOBILE = 10000;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
@@ -374,6 +394,17 @@ async function fetchAndCacheRules(encryptedMail, xPlatform) {
     }
 }
 
+// ── MOBILE FIX: explicit rules-cache warmer ──
+// Ensures rulesJson is in localStorage for the current user. Called eagerly
+// on compose open (mobile) so that the short-lived send-time runtime finds
+// the rules already cached and only needs (at most) one signature fetch.
+async function warmRulesCache(userEmail) {
+    if (getCachedRules()) return getCachedRules();
+    if (!userEmail) return null;
+    const enc = await encryptEmail(userEmail);
+    return fetchAndCacheRules(enc, getXPlatform());
+}
+
 async function renderSignatureOnServer(userEmail) {
     const t0 = Date.now();
     const item = Office?.context?.mailbox?.item;
@@ -523,7 +554,7 @@ async function getAllRecipientEmails(item) {
 //         An "internal" rule fires whenever ANY recipient is internal,
 //         an "external" rule fires whenever ANY recipient is external.
 //
-//  NEW — SENDER SEGREGATION:
+//  SENDER SEGREGATION:
 //    Each rule now also carries a sender contract from the rules-config UI:
 //      Senders        : ['*'] | ['e1@x.com', 'e2@x.com', ...]
 //      isAzureAdGroup : true when Senders was resolved from an Azure AD group
@@ -572,7 +603,7 @@ function contextMatches(ruleContext, composeType) {
 }
 
 /**
- * ── NEW: sender-based segregation ──
+ * ── Sender-based segregation ──
  *
  * Rule contract from the rules-config UI:
  *   Senders        : ['*'] | ['e1@x.com', 'e2@x.com', 'e3@x.com', 'e4@x.com']
@@ -633,7 +664,7 @@ function getComposeType(item) {
  * A mixed To/Cc list (some internal, some external) sets both to true,
  * so both "internal" and "external" rules are eligible simultaneously.
  *
- * NEW: each rule is additionally gated by senderMatches — the logged-in
+ * Each rule is additionally gated by senderMatches — the logged-in
  * user's email must appear in the rule's Senders list (or the list must
  * be ['*'] / absent). This is how group-scoped rules (isAzureAdGroup +
  * GroupId) are segregated per user on the client.
@@ -659,10 +690,13 @@ async function findMatchingRule(item) {
     const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
     const senderDomain = getDomain(senderEmail);
 
-    // Retry recipient read on Mac if empty — hydration can lag on reply/forward
+    // Retry recipient read if empty — hydration can lag on reply/forward.
+    // MOBILE FIX: mobile gets the same retry as Mac — the compose surface on
+    // iOS/Android hydrates To/Cc late, and there is no polling loop to catch
+    // up afterwards, so a single early empty read must not be final.
     let emails = await getAllRecipientEmails(item);
-    if (emails.length === 0 && isMac()) {
-        console.warn("[CardByte] Mac: recipients empty on first read — retrying after short delay");
+    if (emails.length === 0 && (isMac() || isMobile())) {
+        console.warn("[CardByte] Recipients empty on first read — retrying after short delay");
         await new Promise(r => setTimeout(r, 400));
         emails = await getAllRecipientEmails(item);
     }
@@ -916,7 +950,11 @@ async function pollRecipients() {
 function startRecipientPolling() {
     if (_recipientPollTimer) return;
     if (isMobile()) {
-        console.log("[CardByte] 📵 Recipient polling disabled on mobile");
+        // MOBILE: the event-based runtime is torn down shortly after
+        // event.completed(), so an interval timer would never fire anyway.
+        // Mobile relies on the one-shot evaluation at compose open plus the
+        // authoritative re-evaluation in _onSendCore at send time.
+        console.log("[CardByte] 📵 Recipient polling disabled on mobile (runtime is short-lived — send-time evaluation covers it)");
         return;
     }
     console.log("[CardByte] 📡 Starting recipient polling...");
@@ -953,9 +991,16 @@ async function _onSendCore(item, mailbox) {
     const t0 = Date.now();
     notifyWithTiming(item, "Re-applying correct signature...", t0);
 
+    // MOBILE FIX: previously, if rules weren't cached we skipped rule matching
+    // entirely and went straight to the default signature. On mobile the cache
+    // is frequently cold (short-lived runtime, no polling, no prefetch), so
+    // rules NEVER fired at send time. findMatchingRule() already knows how to
+    // live-fetch the rules when the cache is empty — so let it run whenever we
+    // have cached rules OR we're on mobile (where the network fallback is the
+    // only reliable path). Desktop with a cold cache keeps the old fast path.
     const rulesJson = getCachedRules({ skipTtl: true });
 
-    if (rulesJson) {
+    if (rulesJson || isMobile()) {
         const matched = await findMatchingRule(item);
 
         // Mac fallback: if live match is inconclusive but we had an active
@@ -975,17 +1020,31 @@ async function _onSendCore(item, mailbox) {
         if (matched) {
             console.log(`[CardByte] onSend: rule matched id=${matched.signatureId}`);
 
-            // Cache-only — no XHR at send time
-            const ruleHtml = getSigById(String(matched.signatureId), { skipTtl: true });
+            // Desktop policy: cache-only — no XHR at send time.
+            let ruleHtml = getSigById(String(matched.signatureId), { skipTtl: true });
+
+            // MOBILE FIX: on mobile the sig-by-id cache is usually empty
+            // (no prefetch runtime), so a cache-only read here silently
+            // reverted every rule match to the default signature. Allow a
+            // network fetch on mobile — the whole of _onSendCore runs inside
+            // the larger mobile send timeout, so this is bounded.
+            if (!ruleHtml && isMobile()) {
+                console.log(`[CardByte] onSend(mobile): sig id=${matched.signatureId} not cached — fetching over network`);
+                const userEmail = mailbox?.userProfile?.emailAddress;
+                if (userEmail) {
+                    const encryptedMail = await encryptEmail(userEmail);
+                    ruleHtml = await getOrFetchSignatureById(matched.signatureId, encryptedMail, getXPlatform(), { skipTtl: true });
+                }
+            }
 
             if (ruleHtml) {
-                console.log(`[CardByte] onSend: injecting rule sig id=${matched.signatureId} from cache`);
+                console.log(`[CardByte] onSend: injecting rule sig id=${matched.signatureId}`);
                 await applySignatureWithFallback(item, ruleHtml, false); // ← false, not isSendTime
                 notifyWithTiming(item, "Rule signature applied ✓", t0);
                 logTiming("_onSendCore (rule)", t0);
                 return;
             }
-            console.warn(`[CardByte] onSend: rule sig id=${matched.signatureId} not in cache — falling back to default`);
+            console.warn(`[CardByte] onSend: rule sig id=${matched.signatureId} unavailable — falling back to default`);
         } else {
             console.log("[CardByte] onSend: no rule matched — applying default");
         }
@@ -1039,21 +1098,32 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         const userEmail = mailbox?.userProfile?.emailAddress;
 
-        if (userEmail && !isMobile()) {
+        // MOBILE FIX: rule evaluation is no longer desktop-only.
+        //  - Warm the rules cache eagerly on mobile so send-time (usually a
+        //    fresh runtime) finds it in localStorage and only needs at most
+        //    one signature fetch.
+        //  - Run the one-shot rule evaluation on mobile too — reply/forward
+        //    composes have recipients pre-filled, so the correct rule
+        //    signature appears immediately instead of only at send.
+        //  - Prefetch stays fire-and-forget; on mobile it's best-effort
+        //    (the runtime may die before it finishes) and send-time has its
+        //    own network fallback either way.
+        if (userEmail) {
+            if (isMobile()) {
+                await warmRulesCache(userEmail); // awaited: cheap, and send-time depends on it
+            }
             prefetchAllRuleSignatures(userEmail).catch(err =>
                 console.warn("[CardByte] Background prefetch failed:", err)
             );
         }
 
-        if (!isMobile()) {
-            const emails = await getAllRecipientEmails(item);
-            if (emails.length > 0) {
-                _lastRecipientSnapshot = serializeRecipients(emails);
-                await onRecipientsChanged(item, mailbox);
-            }
+        const emails = await getAllRecipientEmails(item);
+        if (emails.length > 0) {
+            _lastRecipientSnapshot = serializeRecipients(emails);
+            await onRecipientsChanged(item, mailbox);
         }
 
-        startRecipientPolling();
+        startRecipientPolling(); // no-ops on mobile (see comment inside)
 
     } catch (err) {
         console.error("[CardByte] applySignature error:", err);
@@ -1080,7 +1150,12 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 
         notifyWithTiming(item, "Verifying before send...", t0);
 
-        await withTimeout(_onSendCore(item, mailbox), 4000);
+        // MOBILE FIX: mobile may need rules fetch + signature fetch over the
+        // network here, so it gets a larger budget than the desktop 4s
+        // cache-only path. Outlook allows event-based send handlers far more
+        // time than this, so send UX is unaffected on the happy path.
+        const sendTimeout = isMobile() ? SEND_TIMEOUT_MS_MOBILE : SEND_TIMEOUT_MS_DESKTOP;
+        await withTimeout(_onSendCore(item, mailbox), sendTimeout);
 
         notifyWithTiming(item, "Send verification complete ✓", t0);
         setTimeout(() => removeNotification(item), 3000);
