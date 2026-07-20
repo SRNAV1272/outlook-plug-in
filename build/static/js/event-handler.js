@@ -1,32 +1,17 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js
-//  UNIFIED REVISION — one code path for ALL platforms.
-//
-//  All isMobile() behaviour gates have been removed. Every platform now runs
-//  the identical flow:
-//    compose open → default sig → warm rules cache → one-shot rule evaluation
-//                 → background signature prefetch → recipient polling
-//    send        → live rule match (rules fetched if cache cold)
-//                 → signature from cache, network fetch on miss
-//
-//  Platform notes (behaviour is identical, platform just limits what runs):
-//    • On iOS/Android the event runtime is torn down shortly after
-//      event.completed(), so the polling interval simply stops firing when
-//      the OS kills the runtime. That's fine — it costs nothing, and the
-//      send-time evaluation is the authoritative correction on every platform.
-//    • Send-time may now perform network fetches on ALL platforms (cache-first,
-//      fetch only on miss). The send timeout is sized accordingly.
-//
-//  ADDIN_VERSION is surfaced in the first notification banner so you can see
-//  at a glance which bundle a device is actually running (Outlook mobile
-//  caches JS aggressively — bump the version on every deploy).
+//  CardByte Outlook Add-in — event-handler.js (FIXED for Android Mobile)
+//  Fixes applied:
+//    1. Added senderMatches() filtering in findMatchingRule()
+//    2. Removed !isMobile() guard blocking onRecipientsChanged at compose time
+//    3. Moved startRecipientPolling() inside !isMobile() check
+//    4. Added onFromChangedHandler() function (was missing but registered in manifest)
+//    5. Added onRecipientsChangedHandler() wrapper for LaunchEvent
+//    6. Fixed Office.actions.associate to include all handlers
 // =============================================================================
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-
-const ADDIN_VERSION = "3.0.0-unified";
 
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
@@ -47,15 +32,10 @@ const SIG_BY_ID_CACHE_KEY = "cardbyte_sig_by_id";
 const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;
 
 const MAX_SAFE_HTML_SIZE = 500_000;
+const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const HEAVY_THRESHOLD = 100 * 1024;
 const MAX_RETRIES = 2;
 const RECIPIENT_POLL_MS = 900;
-
-// Single send-time budget for every platform. Larger than the old desktop 4s
-// because send-time is now allowed to fetch rules and/or a signature over the
-// network on a cold cache (cache-first — the fetch only happens on a miss).
-// Outlook grants event-based send handlers far more time than this.
-const SEND_TIMEOUT_MS = 5000;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
@@ -72,8 +52,6 @@ function logTiming(label, startMs) {
 
 // =============================================================================
 //  PLATFORM DETECTION
-//  (kept for logging / X-Platform header / Mac recipient-hydration quirk —
-//   no longer used to switch features on or off)
 // =============================================================================
 
 function detectPlatform() {
@@ -102,8 +80,10 @@ function detectPlatform() {
     return "desktop";
 }
 
+const isMobile = () => { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; };
 const isOWA = () => detectPlatform() === "owa";
 const isMac = () => detectPlatform() === "mac";
+const getMaxHtmlSize = () => isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
 
 function getXPlatform() {
     const p = detectPlatform();
@@ -251,7 +231,7 @@ function getOrCreateSessionId() {
         }
         return sid;
     } catch (_) {
-        return "fallback-session";
+        return "mobile-session";
     }
 }
 
@@ -395,17 +375,6 @@ async function fetchAndCacheRules(encryptedMail, xPlatform) {
     }
 }
 
-// Ensures rulesJson is in localStorage for the current user. Called eagerly on
-// every compose open so the one-shot evaluation, the prefetch, and the
-// send-time runtime all find the rules already cached.
-async function warmRulesCache(userEmail) {
-    const cached = getCachedRules();
-    if (cached) return cached;
-    if (!userEmail) return null;
-    const enc = await encryptEmail(userEmail);
-    return fetchAndCacheRules(enc, getXPlatform());
-}
-
 async function renderSignatureOnServer(userEmail) {
     const t0 = Date.now();
     const item = Office?.context?.mailbox?.item;
@@ -482,23 +451,13 @@ async function prefetchAllRuleSignatures(userEmail) {
         console.log("[CardByte] prefetchAllRuleSignatures: rules not cached yet — skipping");
         return;
     }
-
-    // ── SENDER FILTER ──
-    // Only prefetch signatures for rules this user can actually trigger.
-    const enabledRules = (rulesJson?.rulesList || []).filter(r =>
-        r.enabled &&
-        r.signatureId != null &&
-        senderMatches(r, userEmail)
-    );
-    if (enabledRules.length === 0) {
-        console.log("[CardByte] prefetchAllRuleSignatures: no sender-eligible rules for this user");
-        return;
-    }
+    const enabledRules = (rulesJson?.rulesList || []).filter(r => r.enabled && r.signatureId != null);
+    if (enabledRules.length === 0) return;
 
     const xPlatform = getXPlatform();
     const encryptedMail = await encryptEmail(userEmail);
 
-    console.log(`[CardByte] 🔄 Prefetching signatures for ${enabledRules.length} sender-eligible rule(s)...`);
+    console.log(`[CardByte] 🔄 Prefetching signatures for ${enabledRules.length} rule(s)...`);
 
     await Promise.allSettled(
         enabledRules.map(r =>
@@ -527,15 +486,11 @@ function getRecipientsAsync(field) {
 }
 
 async function getAllRecipientEmails(item) {
-    const [to
-        // , cc
-    ] = await Promise.all([
+    const [to, cc] = await Promise.all([
         getRecipientsAsync(item?.to),
-        // getRecipientsAsync(item?.cc),
+        getRecipientsAsync(item?.cc),
     ]);
-    const emails = [...to
-        // , ...cc
-    ].map(r => (r.emailAddress || "").toLowerCase()).filter(Boolean);
+    const emails = [...to, ...cc].map(r => (r.emailAddress || "").toLowerCase()).filter(Boolean);
     return [...new Set(emails)];
 }
 
@@ -545,16 +500,8 @@ async function getAllRecipientEmails(item) {
 //  Mirrors C# RecipientTypeMatches(recipientType, hasInternal, hasExternal)
 //  and ContextMatches(context, mailContext) exactly.
 //
-//  hasInternal / hasExternal are computed independently (dual-flag) — a mixed
-//  To/Cc list sets both, so "internal" and "external" rules are eligible
-//  simultaneously, matching the C# backend.
-//
-//  SENDER SEGREGATION:
-//    Each rule carries a sender contract from the rules-config UI:
-//      Senders        : ['*'] | ['e1@x.com', 'e2@x.com', ...]
-//      isAzureAdGroup : true when Senders was resolved from an Azure AD group
-//      GroupId        : the Azure AD group id ('' when not a group rule)
-//    Match condition per rule = contextOk && recipientOk && senderOk.
+//  FIX #1: Added senderMatches() to filter rules by the current sender email.
+//  The rules JSON has a "Senders" array per rule — we must check it.
 // =============================================================================
 
 function getDomain(email) {
@@ -581,26 +528,19 @@ function contextMatches(ruleContext, composeType) {
     if (!ruleContext || ruleContext.trim() === "") return true;
     const rc = ruleContext.toLowerCase();
     if (rc === "all") return true;
-    if (composeType === null) return true; // API unavailable — don't silently drop rules
+    if (composeType === null) return true;
     return rc === composeType.toLowerCase();
 }
 
 /**
- * ── Sender-based segregation ──
- *
- * Truth table:
- *   Senders missing / not an array / empty  → true   (legacy rule, no restriction)
- *   Senders contains '*'                    → true   (explicit all-users)
- *   senderEmail unknown                     → false  (restricted rule, can't verify)
- *   otherwise                               → case-insensitive membership check
+ * NEW: Filters rules by the current sender email.
+ * If a rule has no Senders array, it applies to everyone.
+ * If a rule has Senders, only the listed senders can use it.
  */
-function senderMatches(rule, senderEmail) {
-    const senders = Array.isArray(rule?.Senders) ? rule.Senders : null;
-    if (!senders || senders.length === 0) return true;   // legacy rule — no sender restriction
-    if (senders.includes("*")) return true;               // explicit all-users wildcard
-    if (!senderEmail) return false;                        // restricted rule but sender unknown
-    const me = senderEmail.trim().toLowerCase();
-    return senders.some(s => (s || "").trim().toLowerCase() === me);
+function senderMatches(rule, currentSenderEmail) {
+    if (!rule.Senders || rule.Senders.length === 0) return true;
+    const sender = (currentSenderEmail || "").toLowerCase();
+    return rule.Senders.some(s => s.toLowerCase() === sender);
 }
 
 const _composeTypeByItem = new WeakMap();
@@ -632,8 +572,8 @@ function getComposeType(item) {
 
 /**
  * Finds the highest-priority matching rule for the current compose item.
- * Same behaviour on every platform. Rules are live-fetched when the cache
- * is cold. First match wins, evaluated by ascending priority.
+ *
+ * FIX: Now filters by sender (Senders array), context, and recipientType.
  */
 async function findMatchingRule(item) {
     let rulesJson = getCachedRules();
@@ -651,11 +591,10 @@ async function findMatchingRule(item) {
     const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
     const senderDomain = getDomain(senderEmail);
 
-    // Retry recipient read once if empty — To/Cc hydration can lag on
-    // reply/forward on every platform (worst on Mac and mobile).
+    // Retry recipient read on Mac if empty — hydration can lag on reply/forward
     let emails = await getAllRecipientEmails(item);
-    if (emails.length === 0) {
-        console.warn("[CardByte] Recipients empty on first read — retrying after short delay");
+    if (emails.length === 0 && isMac()) {
+        console.warn("[CardByte] Mac: recipients empty on first read — retrying after short delay");
         await new Promise(r => setTimeout(r, 400));
         emails = await getAllRecipientEmails(item);
     }
@@ -667,8 +606,7 @@ async function findMatchingRule(item) {
         return null;
     }
 
-    // Compute hasInternal / hasExternal independently — both can be true
-    // for a mixed To/Cc list, matching C# backend dual-flag behaviour.
+    // Compute hasInternal / hasExternal independently
     let hasInternal = false;
     let hasExternal = false;
     const recipientDomains = [];
@@ -705,7 +643,7 @@ async function findMatchingRule(item) {
         console.log(
             (allMatch ? ">>> MATCH" : "    skip "),
             `| priority=${r.priority}`,
-            `| sender(ok=${senderOk}${r.isAzureAdGroup ? `, group=${r.GroupId}` : ""}, listSize=${Array.isArray(r.Senders) ? r.Senders.length : "n/a"})`,
+            `| sender=${senderOk}`,
             `| context=${r.context} (ok=${contextOk})`,
             `| recipientType=${r.recipientType} (ok=${recipOk})`,
             `| sigId=${r.signatureId ?? "NULL"}`,
@@ -721,12 +659,10 @@ async function findMatchingRule(item) {
             `| priority: ${matched.priority}`,
             `| context: ${matched.context}`,
             `| recipientType: ${matched.recipientType}`,
-            `| isAzureAdGroup: ${!!matched.isAzureAdGroup}`,
-            `| GroupId: ${matched.GroupId || "-"}`,
             `| signatureId: ${matched.signatureId}`
         );
     } else {
-        console.warn("[CardByte] ❌ No rules matched (sender/context/recipient filters)", { senderEmail, composeType, hasInternal, hasExternal });
+        console.warn("[CardByte] ❌ No rules matched", { composeType, hasInternal, hasExternal });
     }
 
     return matched;
@@ -754,7 +690,7 @@ async function applySignatureWithFallback(item, html, isSendTime = false) {
     const htmlSize = new Blob([html]).size;
     console.log("[CardByte] Signature size:", htmlSize, "bytes");
 
-    const maxSize = 100 * 1024; // 100KB — hard ceiling, matches signature builder constraint
+    const maxSize = 100 * 1024;
     if (htmlSize > maxSize) {
         console.warn(`[CardByte] Signature exceeds max size (${htmlSize} > ${maxSize} bytes) — not applying`);
         showNotification(item, "Signature could not be applied — size exceeds allowed threshold. Please contact Admin.", "errorMessage", false);
@@ -861,32 +797,22 @@ async function onRecipientsChanged(item, mailbox) {
         }
         console.log("[CardByte] Injecting rule-matched signature, signatureId:", matched.signatureId);
         await applySignatureWithFallback(item, ruleHtml, false);
-        // Record which rule signature is now live in the compose body.
-        // _onSendCore reads this as a fallback when a live match at send
-        // time is inconclusive.
         _activeSignatureId = String(matched.signatureId);
 
     } else {
         console.warn("[CardByte] No rule matched / empty recipients — falling back to default signature");
-        // Clear the tracker so send-time falls back to the default cache.
         _activeSignatureId = null;
         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
     }
 }
 
 // =============================================================================
-//  RECIPIENT POLLING
-//  Runs on every platform. On mobile the OS tears the event runtime down
-//  shortly after event.completed(), which simply stops the interval — no
-//  harm, no special-casing. While the runtime lives, polling works there too.
+//  RECIPIENT POLLING (Desktop only)
 // =============================================================================
 
 let _lastRecipientSnapshot = "";
 let _recipientPollTimer = null;
 
-// Tracks the signatureId that was last injected by the rules engine.
-// null   = default signature is currently active (no rule matched).
-// string = a rule-matched signatureId is currently active.
 let _activeSignatureId = null;
 
 function serializeRecipients(emails) {
@@ -910,6 +836,10 @@ async function pollRecipients() {
 
 function startRecipientPolling() {
     if (_recipientPollTimer) return;
+    if (isMobile()) {
+        console.log("[CardByte] 📵 Recipient polling disabled on mobile");
+        return;
+    }
     console.log("[CardByte] 📡 Starting recipient polling...");
     _recipientPollTimer = setInterval(pollRecipients, RECIPIENT_POLL_MS);
 }
@@ -936,8 +866,6 @@ function withTimeout(promise, ms) {
 
 // =============================================================================
 //  SEND-TIME CORE
-//  Identical on every platform: live rule match (rules live-fetched on a cold
-//  cache), signature cache-first with a network fetch on miss.
 // =============================================================================
 
 const SIGNATURE_SENTINEL = "cardbyte-sig";
@@ -946,50 +874,42 @@ async function _onSendCore(item, mailbox) {
     const t0 = Date.now();
     notifyWithTiming(item, "Re-applying correct signature...", t0);
 
-    const matched = await findMatchingRule(item);
+    const rulesJson = getCachedRules({ skipTtl: true });
 
-    // Fallback: if the live match is inconclusive (e.g. recipients could not
-    // be read at send time) but a rule signature was active during compose,
-    // trust that instead of silently reverting to default.
-    if (!matched && _activeSignatureId) {
-        console.warn("[CardByte] onSend: findMatchingRule inconclusive — trusting _activeSignatureId:", _activeSignatureId);
-        const ruleHtml = getSigById(_activeSignatureId, { skipTtl: true });
-        if (ruleHtml) {
-            await applySignatureWithFallback(item, ruleHtml, false);
-            notifyWithTiming(item, "Rule signature applied ✓ (compose-state fallback)", t0);
-            logTiming("_onSendCore (compose-state fallback)", t0);
-            return;
-        }
-    }
+    if (rulesJson) {
+        const matched = await findMatchingRule(item);
 
-    if (matched) {
-        console.log(`[CardByte] onSend: rule matched id=${matched.signatureId}`);
-
-        // Cache-first; fetch over the network only on a miss.
-        let ruleHtml = getSigById(String(matched.signatureId), { skipTtl: true });
-
-        if (!ruleHtml) {
-            console.log(`[CardByte] onSend: sig id=${matched.signatureId} not cached — fetching over network`);
-            const userEmail = mailbox?.userProfile?.emailAddress;
-            if (userEmail) {
-                const encryptedMail = await encryptEmail(userEmail);
-                ruleHtml = await getOrFetchSignatureById(matched.signatureId, encryptedMail, getXPlatform(), { skipTtl: true });
+        if (!matched && isMac() && _activeSignatureId) {
+            console.warn("[CardByte] Mac onSend: findMatchingRule inconclusive — trusting _activeSignatureId:", _activeSignatureId);
+            const ruleHtml = getSigById(_activeSignatureId, { skipTtl: true });
+            if (ruleHtml) {
+                await applySignatureWithFallback(item, ruleHtml, false);
+                notifyWithTiming(item, "Rule signature applied ✓ (Mac fallback)", t0);
+                logTiming("_onSendCore (mac fallback)", t0);
+                return;
             }
         }
 
-        if (ruleHtml) {
-            console.log(`[CardByte] onSend: injecting rule sig id=${matched.signatureId}`);
-            await applySignatureWithFallback(item, ruleHtml, false);
-            notifyWithTiming(item, "Rule signature applied ✓", t0);
-            logTiming("_onSendCore (rule)", t0);
-            return;
+        if (matched) {
+            console.log(`[CardByte] onSend: rule matched id=${matched.signatureId}`);
+
+            const ruleHtml = getSigById(String(matched.signatureId), { skipTtl: true });
+
+            if (ruleHtml) {
+                console.log(`[CardByte] onSend: injecting rule sig id=${matched.signatureId} from cache`);
+                await applySignatureWithFallback(item, ruleHtml, false);
+                notifyWithTiming(item, "Rule signature applied ✓", t0);
+                logTiming("_onSendCore (rule)", t0);
+                return;
+            }
+            console.warn(`[CardByte] onSend: rule sig id=${matched.signatureId} not in cache — falling back to default`);
+        } else {
+            console.log("[CardByte] onSend: no rule matched — applying default");
         }
-        console.warn(`[CardByte] onSend: rule sig id=${matched.signatureId} unavailable — falling back to default`);
     } else {
-        console.log("[CardByte] onSend: no rule matched — applying default");
+        console.warn("[CardByte] onSend: no rules in cache — applying default");
     }
 
-    // Default path
     const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
     if (!cached) {
         showNotification(item, "No cached signature on send", "errorMessage", false, t0);
@@ -1008,7 +928,7 @@ async function _onSendCore(item, mailbox) {
 // =============================================================================
 
 Office.onReady(() => {
-    console.log(`✅ Office.onReady Started — CardByte v${ADDIN_VERSION}`);
+    console.log("✅ Office.onReady Started");
     console.log(`[CardByte] Platform: ${detectPlatform()}`);
     purgeStaleSigById();
 });
@@ -1025,40 +945,34 @@ const applySignature = async function (event = { completed: () => { } }) {
     try {
         if (!item) return;
 
-        // Version surfaced in the banner so any device instantly shows which
-        // bundle it's running (mobile caches JS aggressively).
-        notifyWithTiming(item, `Starting signature flow... v${ADDIN_VERSION}`, t0);
+        notifyWithTiming(item, "Starting signature flow...", t0);
 
-        // Reset rule tracker — each compose window starts with the default
-        // signature until the rules engine fires for this session's recipients.
+        // Reset rule tracker
         _activeSignatureId = null;
 
         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
 
         const userEmail = mailbox?.userProfile?.emailAddress;
 
-        // Same flow on every platform:
-        //  1. Warm the rules cache (awaited — cheap, everything downstream
-        //     depends on it, including a possible fresh send-time runtime).
-        //  2. Kick off the signature prefetch in the background.
-        //  3. One-shot rule evaluation if recipients already exist
-        //     (reply/forward — signature swaps immediately in the compose).
-        //  4. Start polling for recipient changes (stops by itself if the
-        //     platform tears the runtime down).
-        if (userEmail) {
-            await warmRulesCache(userEmail);
+        if (userEmail && !isMobile()) {
             prefetchAllRuleSignatures(userEmail).catch(err =>
                 console.warn("[CardByte] Background prefetch failed:", err)
             );
         }
 
+        // FIX #2: Run rule matching immediately on ALL platforms (including mobile)
+        // On mobile, recipients may already be present (reply/forward) and
+        // OnMessageRecipientsChanged only fires on ACTIVE changes, not initial state.
         const emails = await getAllRecipientEmails(item);
         if (emails.length > 0) {
             _lastRecipientSnapshot = serializeRecipients(emails);
             await onRecipientsChanged(item, mailbox);
         }
 
-        startRecipientPolling();
+        // FIX #3: Only start polling on desktop — mobile uses LaunchEvents
+        if (!isMobile()) {
+            startRecipientPolling();
+        }
 
     } catch (err) {
         console.error("[CardByte] applySignature error:", err);
@@ -1085,7 +999,7 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 
         notifyWithTiming(item, "Verifying before send...", t0);
 
-        await withTimeout(_onSendCore(item, mailbox), SEND_TIMEOUT_MS);
+        await withTimeout(_onSendCore(item, mailbox), 4000);
 
         notifyWithTiming(item, "Send verification complete ✓", t0);
         setTimeout(() => removeNotification(item), 3000);
@@ -1099,13 +1013,91 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 };
 
 // =============================================================================
+//  FIX #4: Added missing onFromChangedHandler
+//  The manifest registers OnMessageFromChanged → onFromChangedHandler
+//  but this function was missing, causing runtime errors on account switch.
+// =============================================================================
+
+const onFromChangedHandler = async function (event = { completed: () => { } }) {
+    const t0 = Date.now();
+    const mailbox = Office?.context?.mailbox;
+    const item = mailbox?.item;
+
+    try {
+        if (!item) { event.completed(); return; }
+
+        console.log("[CardByte] onFromChangedHandler: account changed, re-evaluating rules...");
+        notifyWithTiming(item, "Account changed — updating signature...", t0);
+
+        // Reset tracker since the sender changed
+        _activeSignatureId = null;
+
+        // Re-evaluate rules with the new sender context
+        const emails = await getAllRecipientEmails(item);
+        if (emails.length > 0) {
+            _lastRecipientSnapshot = serializeRecipients(emails);
+            await onRecipientsChanged(item, mailbox);
+        } else {
+            // No recipients yet — just re-apply default for new sender
+            await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
+        }
+
+        notifyWithTiming(item, "Signature updated ✓", t0);
+        setTimeout(() => removeNotification(item), 3000);
+
+    } catch (err) {
+        console.error("[CardByte] onFromChangedHandler error:", err);
+    } finally {
+        logTiming("onFromChangedHandler total", t0);
+        event.completed();
+    }
+};
+
+// =============================================================================
+//  FIX #5: Added onRecipientsChangedHandler wrapper for LaunchEvent
+//  OnMessageRecipientsChanged fires this on both desktop and mobile.
+// =============================================================================
+
+const onRecipientsChangedHandler = async function (event = { completed: () => { } }) {
+    const t0 = Date.now();
+    const mailbox = Office?.context?.mailbox;
+    const item = mailbox?.item;
+
+    try {
+        if (!item) { event.completed(); return; }
+
+        console.log("[CardByte] onRecipientsChangedHandler: recipients changed, re-evaluating rules...");
+
+        const emails = await getAllRecipientEmails(item);
+        const snapshot = serializeRecipients(emails);
+
+        if (snapshot === _lastRecipientSnapshot) {
+            console.log("[CardByte] Recipients unchanged — skipping");
+            event.completed();
+            return;
+        }
+        _lastRecipientSnapshot = snapshot;
+
+        await onRecipientsChanged(item, mailbox);
+
+    } catch (err) {
+        console.error("[CardByte] onRecipientsChangedHandler error:", err);
+    } finally {
+        logTiming("onRecipientsChangedHandler total", t0);
+        event.completed();
+    }
+};
+
+// =============================================================================
 //  REGISTER OFFICE ACTIONS
 // =============================================================================
 
 if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
     Office.actions.associate("applySignature", applySignature);
     Office.actions.associate("onSendHandler", onSendHandler);
-    console.log(`[CardByte] Registered: applySignature, onSendHandler (v${ADDIN_VERSION})`);
+    Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+    Office.actions.associate("onRecipientsChangedHandler", onRecipientsChangedHandler);
+    console.log("[CardByte] Registered: applySignature, onSendHandler, onFromChangedHandler, onRecipientsChangedHandler");
 } else {
     console.log("[CardByte] Office.actions unavailable — LaunchEvent path inactive (Outlook 2016/2019)");
 }
