@@ -1,17 +1,10 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (FIXED v2 for Android Mobile)
-//  Fixes applied:
-//    1. Added senderMatches() filtering in findMatchingRule()
-//    2. Removed !isMobile() guard blocking onRecipientsChanged at compose time
-//    3. Moved startRecipientPolling() inside !isMobile() check
-//    4. Added onFromChangedHandler() function (was missing but registered in manifest)
-//    5. Added onRecipientsChangedHandler() wrapper for LaunchEvent
-//    6. FIXED: Improved compose type detection for mobile (getComposeTypeAsync often fails)
-//       - Added detectComposeType() with subject-line fallback (Re:/Fwd:)
-//       - Added inReplyToId check fallback
-//       - contextMatches no longer treats null as pass-through
+//  CardByte Outlook Add-in — event-handler.js (FIXED v3)
+//  Cache fix: Rules now refresh using the same TTL pattern as default signature.
+//  Both default signature and rules are checked for TTL expiry at compose time
+//  and re-fetched if stale. Send-time continues to use cache-only (no network).
 // =============================================================================
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -253,7 +246,7 @@ function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) 
 
     const currentSid = getOrCreateSessionId();
     if (store.get(CACHE_SESSION_KEY) !== currentSid) {
-        console.log("[CardByte] New session detected — clearing cache");
+        console.log("[CardByte] New session detected — clearing signature cache");
         store.remove(CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY);
         logTiming("getCachedSignature (session mismatch)", t0);
         return null;
@@ -262,7 +255,7 @@ function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) 
     if (!skipTtl) {
         const ts = parseInt(store.get(CACHE_TIMESTAMP_KEY) || "0", 10);
         if (Date.now() - ts > CACHE_TTL_MS) {
-            console.log("[CardByte] Cache TTL expired — clearing");
+            console.log("[CardByte] Signature cache TTL expired — clearing");
             store.remove(CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY);
             logTiming("getCachedSignature (ttl expired)", t0);
             return null;
@@ -288,24 +281,60 @@ function setCachedSignature(html) {
 }
 
 // =============================================================================
-//  RULES CACHE
+//  RULES CACHE (same TTL pattern as signature)
 // =============================================================================
 
-function getCachedRules({ skipTtl = false } = {}) {
+/**
+ * Gets cached rules. Same TTL pattern as getCachedSignature:
+ * - Respects session boundaries (clears on new session)
+ * - Respects TTL expiry (5 minutes)
+ * - skipTtl: true bypasses TTL check (used at send-time)
+ */
+function getCachedRules({ skipTtl = false, skipSessionCheck = false } = {}) {
+    const t0 = Date.now();
+
+    if (skipSessionCheck) {
+        const val = store.getJson(RULES_CACHE_KEY);
+        logTiming("getCachedRules (skipSessionCheck)", t0);
+        return val;
+    }
+
+    const currentSid = getOrCreateSessionId();
+    // Rules are tied to the same session as signatures
+    if (store.get(CACHE_SESSION_KEY) !== currentSid) {
+        console.log("[CardByte] New session detected — clearing rules cache");
+        store.remove(RULES_CACHE_KEY, RULES_CACHE_TIMESTAMP_KEY);
+        logTiming("getCachedRules (session mismatch)", t0);
+        return null;
+    }
+
     if (!skipTtl) {
         const ts = parseInt(store.get(RULES_CACHE_TIMESTAMP_KEY) || "0", 10);
         if (Date.now() - ts > RULES_CACHE_TTL_MS) {
-            console.log("[CardByte] Rules cache TTL expired");
+            console.log("[CardByte] Rules cache TTL expired — clearing");
             store.remove(RULES_CACHE_KEY, RULES_CACHE_TIMESTAMP_KEY);
+            logTiming("getCachedRules (ttl expired)", t0);
             return null;
         }
     }
-    return store.getJson(RULES_CACHE_KEY);
+
+    const val = store.getJson(RULES_CACHE_KEY);
+    logTiming("getCachedRules (hit)", t0);
+    return val;
 }
 
 function setCachedRules(rulesJson) {
-    store.setJson(RULES_CACHE_KEY, rulesJson);
-    store.set(RULES_CACHE_TIMESTAMP_KEY, Date.now().toString());
+    const t0 = Date.now();
+    const sid = getOrCreateSessionId();
+    try {
+        store.setJson(RULES_CACHE_KEY, rulesJson);
+        store.set(RULES_CACHE_TIMESTAMP_KEY, Date.now().toString());
+        // Also update the session key so rules and signature share session lifecycle
+        store.set(CACHE_SESSION_KEY, sid);
+        logTiming("setCachedRules", t0);
+    } catch (_) {
+        logTiming("setCachedRules (failed)", t0);
+    }
 }
 
 // =============================================================================
@@ -515,13 +544,6 @@ function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     return true;
 }
 
-/**
- * Mirrors C# ContextMatches(context, mailContext).
- * 
- * FIXED v2: null composeType now returns FALSE instead of TRUE.
- * detectComposeType() always returns a non-null string, so this path
- * should only be hit as a safety net.
- */
 function contextMatches(ruleContext, composeType) {
     if (!ruleContext || ruleContext.trim() === "") return true;
     const rc = ruleContext.toLowerCase();
@@ -540,23 +562,12 @@ function senderMatches(rule, currentSenderEmail) {
 }
 
 // =============================================================================
-//  FIXED v2: IMPROVED COMPOSE TYPE DETECTION (Mobile-safe)
+//  COMPOSE TYPE DETECTION (Mobile-safe)
 // =============================================================================
 
 const _composeTypeByItem = new WeakMap();
 
-/**
- * Detects whether the current item is a reply, forward, or new compose.
- * Uses multiple heuristics because getComposeTypeAsync is unreliable on mobile.
- * 
- * Detection order:
- *   1. Official API (getComposeTypeAsync)
- *   2. Subject line prefix check (Re:, Fw:, Fwd:)
- *   3. inReplyToId property check
- *   4. Default to "compose"
- */
 async function detectComposeType(item) {
-    // 1. Try the official API first
     if (typeof item?.getComposeTypeAsync === "function") {
         try {
             const result = await new Promise((resolve) => {
@@ -580,7 +591,6 @@ async function detectComposeType(item) {
         console.warn("[CardByte] getComposeTypeAsync not available on this platform");
     }
 
-    // 2. Fallback: check subject line for Re:/Fwd: prefixes
     try {
         const subject = await new Promise((resolve) => {
             if (typeof item?.subject?.getAsync === "function") {
@@ -600,17 +610,13 @@ async function detectComposeType(item) {
         console.warn("[CardByte] Subject check failed:", e);
     }
 
-    // 3. Fallback: check if item has inReplyToId (indicates reply)
     try {
         if (item?.inReplyToId) {
             console.log("[CardByte] Detected reply/forward via inReplyToId:", item.inReplyToId);
             return "reply";
         }
-    } catch (e) {
-        // inReplyToId may not be available
-    }
+    } catch (e) { }
 
-    // 4. Default to "compose" for new messages
     console.log("[CardByte] Defaulting composeType to 'compose' (new mail)");
     return "compose";
 }
@@ -806,7 +812,7 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
     if (!html && !explicitlyUnassigned) {
         const stale = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
         if (stale) {
-            console.warn("[CardByte] Using stale cache as last resort");
+            console.warn("[CardByte] Using stale signature cache as last resort");
             html = stale;
             notifyWithTiming(item, "Using stale cache ✓", t0);
         }
@@ -925,6 +931,7 @@ async function _onSendCore(item, mailbox) {
     const t0 = Date.now();
     notifyWithTiming(item, "Re-applying correct signature...", t0);
 
+    // Send-time: use cache-only (skipTtl=true) for speed, no network calls
     const rulesJson = getCachedRules({ skipTtl: true });
 
     if (rulesJson) {
@@ -1000,9 +1007,23 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         _activeSignatureId = null;
 
-        await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
-
+        // ─── Refresh rules cache (same pattern as signature) ─────────────────
+        // Rules and signatures share the same 5-min TTL and session lifecycle.
+        // If rules cache is expired or from a different session, fetch fresh.
         const userEmail = mailbox?.userProfile?.emailAddress;
+        if (userEmail) {
+            const enc = await encryptEmail(userEmail);
+            const rulesFresh = getCachedRules(); // checks TTL + session
+            if (!rulesFresh) {
+                console.log("[CardByte] Rules cache missing/expired — fetching fresh rules...");
+                await fetchAndCacheRules(enc, getXPlatform());
+            } else {
+                console.log("[CardByte] Rules cache still valid — skipping fetch");
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
 
         if (userEmail && !isMobile()) {
             prefetchAllRuleSignatures(userEmail).catch(err =>
@@ -1070,6 +1091,13 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         notifyWithTiming(item, "Account changed — updating signature...", t0);
 
         _activeSignatureId = null;
+
+        // Also refresh rules when account changes — sender context changed
+        const userEmail = mailbox?.userProfile?.emailAddress;
+        if (userEmail) {
+            const enc = await encryptEmail(userEmail);
+            await fetchAndCacheRules(enc, getXPlatform());
+        }
 
         const emails = await getAllRecipientEmails(item);
         if (emails.length > 0) {
