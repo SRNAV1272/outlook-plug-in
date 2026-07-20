@@ -7193,6 +7193,36 @@ function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     return true; // unknown value — mirror C# fallthrough
 }
 
+// [SENDERS] — new: gates a rule on the current sender (mirrors v2 senderMatches)
+/**
+ * Gates a rule on the currently active sender.
+ * Mirrors the v2 (event-handler.js) senderMatches contract:
+ *
+ * Rule contract (from rules-config UI):
+ *   Senders        : ['*'] | ['e1@x.com', 'e2@x.com', ...]
+ *   isAzureAdGroup : true when Senders was resolved from an Azure AD group
+ *   GroupId        : the Azure AD group id ('' when not a group rule)
+ *
+ * Truth table:
+ *   Senders missing / not an array / empty → true  (legacy rule, no restriction)
+ *   Senders contains '*'                   → true  (explicit all-users wildcard)
+ *   sender email unknown                   → false (restricted rule, can't verify)
+ *   otherwise                              → case-insensitive membership check
+ *
+ * Classic getUserEmail() is not lowercased, so normalize locally here.
+ */
+function senderMatches(rule) {
+    const senders = (rule && Array.isArray(rule.Senders)) ? rule.Senders : null;
+    if (!senders || senders.length === 0) return true;
+    if (senders.indexOf("*") !== -1) return true;
+    const me = getUserEmail().toLowerCase();
+    if (!me) return false;
+    for (let i = 0; i < senders.length; i++) {
+        if ((senders[i] || "").trim().toLowerCase() === me) return true;
+    }
+    return false;
+}
+
 /**
  * Mirrors C# ContextMatches(context, mailContext).
  *
@@ -7238,7 +7268,8 @@ function getComposeType(item, cb) {
  *
  * Mirrors the C# evaluation loop:
  *   foreach rule ordered by Priority:
- *     if Enabled && ContextMatches && RecipientTypeMatches → first match wins
+ *     if Enabled && SenderMatches && ContextMatches && RecipientTypeMatches
+ *       → first match wins
  *
  * Calls cb(rule) on match, cb(null) if no recipients or no rule matched.
  */
@@ -7272,6 +7303,7 @@ function findMatchingRule(item, rules, cb) {
                 .sort(function (a, b) { return a.priority - b.priority; });
 
             _diag.info("findMatchingRule:"
+                + " senderEmail=" + senderEmail
                 + " senderDomain=" + senderDomain
                 + " composeType=" + composeType
                 + " hasInternal=" + hasInternal
@@ -7282,18 +7314,23 @@ function findMatchingRule(item, rules, cb) {
             let matched = null;
             for (let i = 0; i < ruleList.length; i++) {
                 const r = ruleList[i];
+                // [SENDERS] — new: sender gate evaluated alongside context/recipient
+                const senderOk = senderMatches(r);
                 const contextOk = contextMatches(r.context, composeType);
                 const recipOk = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
 
                 _diag.info(
-                    (contextOk && recipOk ? ">>> MATCH" : "    skip ") +
+                    (senderOk && contextOk && recipOk ? ">>> MATCH" : "    skip ") +
                     " | priority=" + r.priority +
+                    " | sender(ok=" + senderOk +
+                        (r.isAzureAdGroup ? ", group=" + r.GroupId : "") +
+                        ", listSize=" + (Array.isArray(r.Senders) ? r.Senders.length : "n/a") + ")" +
                     " | context=" + r.context + "(ok=" + contextOk + ")" +
                     " | recipientType=" + r.recipientType + "(ok=" + recipOk + ")" +
                     " | sigId=" + (r.signatureId || "NULL")
                 );
 
-                if (contextOk && recipOk) {
+                if (senderOk && contextOk && recipOk) {
                     matched = r;
                     break; // first match wins (lowest priority number)
                 }
@@ -7488,14 +7525,21 @@ function stopRecipientPolling() {
 /**
  * Fire-and-forget: fetches and caches the HTML for each enabled rule in series.
  * Classic doesn't have Promise.allSettled, so we iterate with a simple index loop.
+ *
+ * [SENDERS] Filtered by senderMatches: only signatures this sender can
+ * actually trigger are prefetched, so cache work is never wasted on rules
+ * that can never match the active user.
  */
 function prefetchAllRuleSignatures(rules) {
     const list = ((rules && rules.rulesList) || []).filter(function (r) {
-        return r.enabled && r.signatureId != null;
+        return r.enabled && r.signatureId != null && senderMatches(r);
     });
-    if (list.length === 0) return;
+    if (list.length === 0) {
+        _diag.info("prefetchAllRuleSignatures: no sender-eligible rules");
+        return;
+    }
 
-    _diag.info("prefetchAllRuleSignatures: " + list.length + " rule(s)");
+    _diag.info("prefetchAllRuleSignatures: " + list.length + " sender-eligible rule(s)");
 
     let i = 0;
     function next() {
