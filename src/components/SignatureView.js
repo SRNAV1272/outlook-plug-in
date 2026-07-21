@@ -3,7 +3,6 @@ import {
     Box,
     Button,
     CircularProgress,
-    Grid,
     Paper,
     Stack,
     Typography,
@@ -36,6 +35,16 @@ import { toast } from "react-toastify";
 import DefaultTemplate from "./SignatureComponents/Assets/Images/DefaultTemplate.svg";
 import usernotfound from "../components/SignatureComponents/Assets/Images/usernotfound.gif";
 import signnotassigned from "../components/SignatureComponents/Assets/Images/signnotassigned.webp";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Brand logo
+// Replace this with your CardByte logo. You can either:
+//   1) import an asset:  import cardbyteLogo from "./assets/cardbyte-logo.png";
+//      and set  const CARDBYTE_LOGO = cardbyteLogo;
+//   2) or paste a base64 data URI here:  const CARDBYTE_LOGO = "data:image/png;base64,...";
+// Leave it empty ("") to fall back to the clean text wordmark shown in the header.
+// ─────────────────────────────────────────────────────────────────────────────
+const CARDBYTE_LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANwAAAA0CAYAAADhTVZuAAAACXBIWXMAAAsTAAALEwEAmpwYAAAGWGlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNi4wLWMwMDIgNzkuMTY0NDg4LCAyMDIwLzA3LzEwLTIyOjA2OjUzICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIiB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgMjIuMCAoV2luZG93cykiIHhtcDpDcmVhdGVEYXRlPSIyMDIyLTAyLTI4VDE1OjEwOjUyKzA1OjMwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDIyLTAyLTI4VDE1OjEwOjUyKzA1OjMwIiB4bXA6TW9kaWZ5RGF0ZT0iMjAyMi0wMi0yOFQxNToxMDo1MiswNTozMCIgeG1wTU06SW5zdGFuY2VJRD0ieG1wLmlpZDo2M2NkMTQ1My1jNTA0LTQ5NDEtYWE2My1kNWYzOTRmZWUwODQiIHhtcE1NOkRvY3VtZW50SUQ9ImFkb2JlOmRvY2lkOnBob3Rvc2hvcDo0YTQ2NDE0NS1lYjJkLWZlNGQtOTg0MS02NGUwOGU0M2FiYTkiIHhtcE1NOk9yaWdpbmFsRG9jdW1lbnRJRD0ieG1wLmRpZDpmNTEyYmI2Ni05YjJjLThkNDQtYjQyZS1kNDdlMjA5ZDNlMzYiIHBob3Rvc2hvcDpDb2xvck1vZGU9IjMiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIj4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo2M2NkMTQ1My1jNTA0LTQ5NDEtYWE2My1kNWYzOTRmZWUwODQiIHN0RXZ0OndoZW49IjIwMjItMDItMjhUMTU6MTA6NTIrMDU6MzAiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCAyMi4wIChXaW5kb3dzKSIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6NjNjZDE0NTMtYzUwNC00OTQxLWFhNjMtZDVmMzk0ZmVlMDg0IiBzdEV2dDp3aGVuPSIyMDIyLTAyLTI4VDE1OjEwOjUyKzA1OjMwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjIuMCAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDxwaG90b3Nob3A6RG9jdW1lbnRBbmNlc3RvcnM+IDxyZGY6QmFnPiA8cmRmOmxpPnhtcC5kaWQ6MmJiNmVlZmUtYjkyNS1jZDRmLWIyYzctODc1M2I0ZDBjMTljPC9yZGY6bGk+IDwvcmRmOkJhZz4gPC9waG90b3Nob3A6RG9jdW1lbnRBbmNlc3RvcnM+IDwvcmRmOkRlc2NyaXB0aW9uPiA8L3JkZjpSREY+IDwveDp4bXBtZXRhPiA8P3hwYWNrZXQgZW5kPSJyIj8+TzjcNwAAE8hJREFUeNrtnQd8TVccx9OFlqLVodXSoXtXl+6B2qOlQ4cdJIQkhCRCpogROyFWErWJGKktS7ZMsWsVkYlGkCB+vb8jN17irby8IHn3//kcT+676713vuc/z7lmAE5LLV9pSjOxxn5vdrsb/1FEEVOVOwJcvvK9K2KCkq8Ap0iNkZiUTASuOwj/tQcQvOMYzv5XqACnAKdIVciSjYfQx2EnLN0iYOURCfOxYXCYGocdsacU4BTgFDGm7Eo6I2BznhUPN98EuPokwH3OboyaEg0L13B4zU9G0r4cBThFFKmsXL8OTF6UAusJu0phkxv/ZhvuuUvSfJFYFHQAp7MuKsApooihUlh0TdJmibCfGlMGtrLg7Ybz7HgMkcxN24nRWLXlqDhOAU4RRSooBZeuwEMyH+2nxmoETm7uEnhjpsdikHO4gDQy8YwCnCKKqMq1S8dw8fg0FBzxQGH2+lve/+9CkQTTbjjoAVwpeBKgIydFC/C8/VNx+MR/CnCmLHl5ecjMzEROTg6uXbtmst/DpZM+yNpWG2c2momWuckMZ+NaojBrbek+5/67ApfZcXCcpj9wqv4dI5rWE6Lw1/pDyD57SQHO1OTKlSv48ccf8corr+Drr79GRkaGSX4PRTmbkLHeDFnbayEnsumNFtEEmZtvgHc+9Wfg6kmcl8YjZ590CbioCgGnqu3GzozDYJdw2E2Jxdbok7jOSIwCnHYpLi5GZGQk/Pz84OrqCgcHB4wdOxYzZszAhg0bcPTo0WoDXJs2bfDEE0/g/fffx6lTp0wSuHPJnXDmbzMJtGYSaM/cbAQv/EkBXVF8Q5xIcYLznENw8jkCV99kCaJ4g8Gz944RaQRPvyQk7MlWgFPrNBcUwNfXFx06dMCLL76IJk2aoFmzZnj++efx3HPP4ZlnnhGvLVq0QL9+/bBjx467Hrhu3bqhefPm+PLLL9VquNGjR6N169Ziv86dO4vWsWNHoRmtrKzEoFNdBhi1cv0q8qLfRNaOWmVhKwNeMxRGmWHfmjpwdPHAGO8tcJu7X2oHSyCqOHiymWkjmZjUePNX78PJzAIFOFm2bNmCTz75BI0bN8brr7+Or776SrSPP/4Y7733noDs008/Fds+//xz6cpmcHd3r/bA/fDDD3jkkUfEZ37jjTdKX1944QXcd9994nPyeH9//+rJW/Fl5EW9LgH3oGbgpHYlvgH2hrwHOyd72DtZw81rArx8N8Nr4X54+KXDdbZh2o7QuUjHDnWPEP7dys1HcLnwmmkDx85EbUZfh6M9Oye1GrUcIWvXrp3YTui4vW7duujSpctdH4TQB7jevXuLQYba+syZM2IftiNHjmDjxo0YNmwYHn/8cTRs2BDr16+vhsAVShrubQm4OtqBS2iAtA0tMNrZDW7j7eEw1hbWDuNgN34pPHxjMHnRXslUTBLwGGRmijRCHAY5h0n/T0R0SqZpArdu3To8/PDD+PDDD/H999/j5ZdfFqDRnNq8eTNOnDghTM2zZ89i//79WLt2rdAKYWFh1cKH0wVcr1698Nhjj+HYsWMazzNmzBjUrl0b3377LS5fvlzNgCuSgHtHJ3BXE+ojfeP7sJeA6zdyNrpYLEN78yXo0M8XPYbMw3CPrfBasEcCbw/cfBIMB68kjdBvTCj8Vu0zLeD27NkjNBYDCgwu0F+jDxMeHl5jopT6AMegSkpKitbz0Nymmblv3z6j3R8HLQaksrKyqg64awXIjXpNAu4hrcAVJ9aTgGuBHkMD8U3fYHQctAxdLRZL4C1Bu/4BaNPHD79ar8SoyRESdOnwmp8CF5/KmJkJ6Ou4E0HbjpgOcL///rswJdu2bSvA42thYSFqihgLOMqgQYNQv359xMXFGe3+CBt9RF3XrhxwFyTgXtUJHJJrI2zFd/is1yYJtqUCtvLt+77zRevnuEEkyKf4p2P8XMPMTELnNCMOw8bvQkZ2Qc0HLjExUUDGIMi7776Lli1b4vz58zUqHG5M4AYPHiyAi4+PN9r9eXt7i4ANTfWqAy6/BLi62oFLfQDrAzuj5R+b0GXwX2qB62b5FzoPCpS03TzxauGyBZ5+yQI8+mgVBY91mYxgcoZCjQeOo+vTTz+N7777TgQNli1bVuPyT8YE7ptvvhED1D///FO9gLtyFrm7miN7Zz2dwAX7d9UKnCp4HcwXoXXvefhp2AqMnBgu+XepmLQwrcJazkICbnd6ds0GrqioSEQeqdk++ugjEYmsCu2WnZ2NQ4cOieifMeTff//VWLlAP+jw4cM4ffp0me2dOnXSC7i0tDSN1126dKkw/XguFgUYS1hIQK2pLWBTeeDykBtpXOBUW7v+CySNNx89bVfDcVo0vP33YsI83WYmgye2XlHSMXGiaLpGA3fw4EGRWyNoL730EoYOHWrUH3nNmjUwNzcX+boPPvgAn332Gfr27Vsa2XRycsKvv/4KDw+PMsfRP/rtt9/Evnv37i3dHhQUJM5hbW19y7UCAgJEaJ/XYqSVpvHPP/8sjpHD/tRMmoD7888/0ahRI41VKIzU0gJgJHfXrl03f+38fBw/flz/3iHtz+urDhhTp04VGu7AgQM6j2cKJjY2Fn///Te2b98uosf6SHFRpgTccxJw9asEOBFYGRwo+Xbz0L7/Qgwcu0kCKhGTF6UKqBgcUQcb59xxJnnKgdyaHzRhx2HOjZ2wadOmmDBhglFAY6dgcIFhdlakMMXAzs7G4Mxrr70moCGETCrTf1SVVatWCU3Ctnv3brHNxsYGjz76qNg2b9680n0vXLiAHj16iPwYBw2eW66IefbZZ0VVjJ2dnQCOiWxNwBFuRh+Zb3NxcRElbHylyU1w5aBSeSioSZk+GThwoM7vhZFN5i5ZtULgOCgwMvzFF1+IVAMHEw4Yr776qrA8aIGoyooVK8Qx/M7Y7rnnHpEbZLpCV61icWGGBFzTKgXupn8XgFa95uKHIWtg4xUjZodPWpgiIHMpAY2F0ebjwuA8ezdSD+aZRlqAmoYwyMB5enoaBTh2XnYEdiZ2RpaIsQSsZ8+eePvttwUQb731lrgu/6aWUxWO3jyOJmBoaCjmz5+PevXqCZgIlqwhCTZLr6h52FkJGTsur0UTkWYytxE0dmRWy2gCrn///uKeCFaDBg3EdWjmPfTQQ6hTp47QfoSRecjywu0cCGgxaBNaENyPsxYohJTfFf1L3mufPn1gYWEhosYjR44UvqcsHDR47JtvvokpU6Zg9erVCAwMFJYAtzOdc+mS5sr84sv/Iie8CbJDG1QpcDdbADqaB6DToGD8MWobRk+JEbPIaWYyQDJK+ntj2AljTFqtPsAlJCSIEiaOsMYyKdkJqIkIG2Hi39RCquYiNQaBYqCGHUgdcISNkDC5znvj/u3btxeaij4hZfHixQIMwsZ9pk2bVvqebDITBkJHLUpTU1ulCYNHNEHpx7ExgBIdHY3ly5cLAJ566ilhUnIAUBWalA888AAsLS01fi/0YQkGgSovc+bMEZpP9d5VhZYHj6V5zmlG6szpe++9V7yvGbjjEnBP30bgpDY4AN2tgtHFciM6D16HP+y2wG5SNDaEHUfeeaMVDlQf4BjEYCKXjaM/zZVz584Z/Ml5LM9BjUJtFBUVpd6Bl8wfmkzcj1pFE3AEUk7Ic5tqbpDajZqT52CivjwE5TULodOm4WQfrnywpbzPS03Ezr9y5coy78kaSJOWGzJkiMb36cNx4FD3HkvLaD7SbNYmDOTw/Bzg1Jr5Fw8jO+wJCbhHbjtwXYeGoL35Wsnc3CDmyiXty4URpXqlBdjZ6TMw3M0RvDJpgW3btonOT79Q22hL2bp1qzBjqWE1AcdgDsFVF6pPT08vLTKmSaZNCBiDQ++8806l0wL0w2RzWVXbMHhx//33w9bW9pZjaELSJKbJWNG0AM1HVV9WVVJTU8UsB94Ly/FGjRqlMT94+4G7YVJ2HLQWPUdsho1npPDlxvslCpNyWmAq0g7lmR5ws2bNEh2N2oSdkiM4I2mGyJIlSwREDFawo+iCgBqHYGkCjkEMdR2Ywggd9+G1xo0bp/PeaMbyfJUFjkLTkRAEBweX2U5/ilqy/PfHsD/337lzZ4WB6969u0jblI/+8vfitWgm+/j44OJF7StnXbt4SALu8SoHjkGTTqVBk1UY5hktqlDovzFYIufduOqXhWuEWPUrv+CK6QDH0ZcjP0HjTAB2Ss4D0+aA6wJOnwAMc04EnEEbTcAxwujl5aX2eAZT6LdRo3KU1yWc1WCMxDeF0UsCtGDBglvuidtnz55dJg1Ac5ZBDUMS3/wtaH5zLh6vy++Mn4O+YEREhN6/zdWCvQK27NBGVQocS77alaQF3HyTRFrAY+6taQFCx1W/BjiFYezMeJzPLzIN4CjUEPzBW7VqJRq1BgMU6syY8sICZxlOgkLYaOr98ssvOuEkUNqCJjyXprl29Hfo/zEwQ3NYm9D8JNg0vYwBHM1lBin4GcoLweJAIH8nhJIQ0oQ2BDgGfXg+eT7ipEmTDPKzKwLc2goC181ysci9tWZhs81KOEyNhncAE9/JOhPfXB2sv1OoWE7dZIDjtBt2FHZwGTr+yISBPziXU2CUjQEFjrQcyfnD09x58MEHRYiawgV6aOLQBCIw5TWAaqUIOz/zcLqAc3Nz0xh4YUqA/ie1MoMW6oShdQYU6AtqC5roCxwjuxyQeE11QQ6CRcA4h47C6Cg/qzbRBhzNR56vsjnSqwXpegO3rgKlXR0H+qN1bz/8OGQpbCaESn7azdIufWcRcJk9h2mxOJdfaBrAyU4/TUt2cvoHhI5BC0YJ2bnkkDqjkNQWcsCD76lqMy7NQN+C+/FYmoTsmAwwsKOzIzJXxsAKr2EocBSCzo7KhYEIAYMGDCTwWgyxcz0W+m40O3ktbWkBOUop58jUCVMa1KYEgNdSG34vLhbfDwcqms2MMNLHMhQ4DoYcVHjv6nKAVaHhQhZ3wqd/bEZnjcXLN6pKWLzcwdxfMh9DxJqUonhZeq1o8fK4WfFibtwpw1Zwrr4zvqnBqA0YoiYI7MiEg6M0AaKfxxQCOy07HrdTc9C8Ul3XhIlbJo+5L8FhZ2GH5/4EjR2S5iD/1pYW0AWcHKjg/fJc1MrUrhwweH/8DMzf8R6Z05PvXR1wjCDSxKVW5mdhUIaNJV0LFy4UPhOhJmw0twmCJmFejAl0XpPaTddUJ13Fy9SqjIAywU+NpxogIdScJMzBkimESgdNkusgfGUrfN0nBO3MV6CbReAtwLXtt0DA1mtUMMbNjBOgcbaAodNzRkyMEtN8iq4UmxZwskyfPl2EmeXSKALCzks4ZK3GDkUounbtKjqMav6K/svw4cMFMPKSDRylCQRTD1yige8TBGoAJt5VhTkuubSLnUnrt52fL6pEnnzySaHJeH+8Fu+N23jfDDYQtFq1aol7oklbXhiY4Gxuhu+5n9zY0XkfLKMiPCyj0ieKy7wZj2MZly5xdHTUOR+OCXh+/9yPfivPT/BZPsdtHBzpq2oGTr+0wPXEeogL+gK9bOahVf8gtB2wAl3kCagDAoT52MNqOWy9JLdi4R5MXJBq0ORTGTZqN05ANXBqTs0AjsJROSQkRHTWAQMGCLPxp59+EtqL5tLMmTN1RslYgsWaSUbaqHHYqakpkpOTxfvUXgSPqQlVYcfjcUxYcykHfYTrjPDc7IS8Fl/5t5yXYjUH4eVyf+qCDgRjxIgR4n1+ZjZnZ2fRmOKgZqnIepacN0cTVR8zkBqd37G2pLvsj7KOlL4zLQ5Cxuvwd9IlxZePISf8KQm4hjqAq4vQ5a0w0mk8rMdMQo+hi8USC+37+aC7pR8sXTdL2ixVaDU3A+a+qRYuU7P1dQzFspDDppMWqIgYupgnOwr9qtuxDggHCl7rTs5YZ3SXWsfe3r7KrlHR6UHFhaeQKwGlq3iZwO2QgBtqPxkennZwdrGCreNYsYiQu0+0WETIY25lFxGKFYsIecxNRFxapZeVUFZeNnWhiUvzVJ3peqekuCgbuZHP6wXczuWtMcTOFWPGDYPrhInw8t2CifIyeQavX1LytB33CMkcjcaabUcN9dkU4BQpW0jA2QXaCpnvhIglFiKaScBpWmLhWbEQ7PUYM2xf1BxWY3zhMj3EaAvBct4bK0sWBh1ARrZRnyenAGfKwhQAzcmYmJi77t740A4+R+DGMwXKrricHdZILIOOtMaI3OYN68lH4Or3D1x9kyq11Dmn5RA0r/lJVfXEVAU4UxUWBRA2BonuRrl02h8ZwWY3llng8wXEMwUai2cKZEkg5u9lwfl5JB0BrMbHiifoGAoaV+Lio6tGe8dgR0yVPstBAc5UhRU4nBWubV2UOy0FR92RtfWem4+rkkA7t7sNivJCbwZ90rNh5RGhdlkEfR9XxXVKlm48jNzzVR68UoBT5O6WqxfScfHoeBQcdkJR7pZb3k/Zn4vh43dVKBIph/mp1aYFpuHoSeWBjIooopfsOZQHa0/9gGOYn+uTEDSmC6KSMm/37SrAKVLNgTuch2GekVqBc+f0mlnxsHSLkDRbNIK2Gi3MrwCniGnJiYwLYoIogVLrp/ncmEA6RILNf63Rw/wKcIqYlrCgaMbiPWIpBI+SWdqynzZqSrQI809ckCJ8vbtAFOAUqf6Sc+6yWMqOj5OynRgFm5IFWx2nxyE0/vTddKsKcIrUEOjOXhaFxdMXp2HWkjQEbTuKc4YvhaAAp4giNUDuGHCKKGKqckeAO11Cu9KUZkrt9J0A7n84V+ZhARPMzgAAAABJRU5ErkJggg=="; // ← placeholder (was a large inline base64 string)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Color Schema (from EmailSignatureRules component)
@@ -414,11 +423,11 @@ export default function SignatureView({
 
     /**
      * Checks if the current user is allowed to see this rule's signature.
-     * 
+     *
      * VISIBLE if:
      *   • Senders is empty / undefined / ["*"]  → all users
      *   • Senders array includes user.emailAddress (case-insensitive)
-     * 
+     *
      * HIDDEN if:
      *   • Senders is a specific list and does NOT include user.emailAddress
      */
@@ -586,27 +595,29 @@ export default function SignatureView({
         setExpandedCards(prev => ({ ...prev, [id]: !prev[id] }));
     };
 
-    /* ── CardByte logo placeholder ───────────────────────────── */
-    const cardbyte_logo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAANwAAAA0CAYAAADhTVZuAAAACXBIWXMAAAsTAAALEwEAmpwYAAAGWGlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNi4wLWMwMDIgNzkuMTY0NDg4LCAyMDIwLzA3LzEwLTIyOjA2OjUzICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtbG5zOnhtcE1NPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvbW0vIiB4bWxuczpzdEV2dD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL3NUeXBlL1Jlc291cmNlRXZlbnQjIiB4bWxuczpwaG90b3Nob3A9Imh0dHA6Ly9ucy5hZG9iZS5jb20vcGhvdG9zaG9wLzEuMC8iIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgMjIuMCAoV2luZG93cykiIHhtcDpDcmVhdGVEYXRlPSIyMDIyLTAyLTI4VDE1OjEwOjUyKzA1OjMwIiB4bXA6TWV0YWRhdGFEYXRlPSIyMDIyLTAyLTI4VDE1OjEwOjUyKzA1OjMwIiB4bXA6TW9kaWZ5RGF0ZT0iMjAyMi0wMi0yOFQxNToxMDo1MiswNTozMCIgeG1wTU06SW5zdGFuY2VJRD0ieG1wLmlpZDo2M2NkMTQ1My1jNTA0LTQ5NDEtYWE2My1kNWYzOTRmZWUwODQiIHhtcE1NOkRvY3VtZW50SUQ9ImFkb2JlOmRvY2lkOnBob3Rvc2hvcDo0YTQ2NDE0NS1lYjJkLWZlNGQtOTg0MS02NGUwOGU0M2FiYTkiIHhtcE1NOk9yaWdpbmFsRG9jdW1lbnRJRD0ieG1wLmRpZDpmNTEyYmI2Ni05YjJjLThkNDQtYjQyZS1kNDdlMjA5ZDNlMzYiIHBob3Rvc2hvcDpDb2xvck1vZGU9IjMiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIj4gPHhtcE1NOkhpc3Rvcnk+IDxyZGY6U2VxPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0iY3JlYXRlZCIgc3RFdnQ6aW5zdGFuY2VJRD0ieG1wLmlpZDo2M2NkMTQ1My1jNTA0LTQ5NDEtYWE2My1kNWYzOTRmZWUwODQiIHN0RXZ0OndoZW49IjIwMjItMDItMjhUMTU6MTA6NTIrMDU6MzAiIHN0RXZ0OnNvZnR3YXJlQWdlbnQ9IkFkb2JlIFBob3Rvc2hvcCAyMi4wIChXaW5kb3dzKSIvPiA8cmRmOmxpIHN0RXZ0OmFjdGlvbj0ic2F2ZWQiIHN0RXZ0Omluc3RhbmNlSUQ9InhtcC5paWQ6NjNjZDE0NTMtYzUwNC00OTQxLWFhNjMtZDVmMzk0ZmVlMDg0IiBzdEV2dDp3aGVuPSIyMDIyLTAyLTI4VDE1OjEwOjUyKzA1OjMwIiBzdEV2dDpzb2Z0d2FyZUFnZW50PSJBZG9iZSBQaG90b3Nob3AgMjIuMCAoV2luZG93cykiIHN0RXZ0OmNoYW5nZWQ9Ii8iLz4gPC9yZGY6U2VxPiA8L3htcE1NOkhpc3Rvcnk+IDxwaG90b3Nob3A6RG9jdW1lbnRBbmNlc3RvcnM+IDxyZGY6QmFnPiA8cmRmOmxpPnhtcC5kaWQ6MmJiNmVlZmUtYjkyNS1jZDRmLWIyYzctODc1M2I0ZDBjMTljPC9yZGY6bGk+IDwvcmRmOkJhZz4gPC9waG90b3Nob3A6RG9jdW1lbnRBbmNlc3RvcnM+IDwvcmRmOkRlc2NyaXB0aW9uPiA8L3JkZjpSREY+IDwveDp4bXBtZXRhPiA8P3hwYWNrZXQgZW5kPSJyIj8+TzjcNwAAE8hJREFUeNrtnQd8TVccx9OFlqLVodXSoXtXl+6B2qOlQ4cdJIQkhCRCpogROyFWErWJGKktS7ZMsWsVkYlGkCB+vb8jN17irby8IHn3//kcT+676713vuc/z7lmAE5LLV9pSjOxxn5vdrsb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";
+    /* ── Brand logo (placeholder — see CARDBYTE_LOGO at top of file) ── */
+    const cardbyte_logo = CARDBYTE_LOGO;
 
+    /* ── Compact rule chips ──────────────────────────────────── */
+    const chipSx = (color, bg) => ({
+        background: bg || COLORS.grayBg,
+        color,
+        fontSize: "10px",
+        fontWeight: 600,
+        height: 20,
+        borderRadius: "6px",
+        "& .MuiChip-label": { px: 0.75 },
+        "& .MuiChip-icon": { color, fontSize: 11, ml: "4px", mr: "-2px" },
+    });
 
-    /* ── Rule chip renderer ─────────────────────────────────── */
     const renderRuleChips = (sig) => {
         if (sig.isDefault) {
             return (
                 <Chip
                     size="small"
-                    icon={<Star size={12} />}
+                    icon={<Star size={11} />}
                     label="Default"
-                    sx={{
-                        background: COLORS.successBg,
-                        color: COLORS.success,
-                        fontSize: "11px",
-                        fontWeight: 600,
-                        border: `1px solid ${COLORS.successBorder}`,
-                        height: 24,
-                        "& .MuiChip-icon": { color: COLORS.success },
-                    }}
+                    sx={{ ...chipSx(COLORS.success, COLORS.successBg), border: `1px solid ${COLORS.successBorder}` }}
                 />
             );
         }
@@ -615,25 +626,24 @@ export default function SignatureView({
         if (!rule) return null;
 
         const senderTypeConfig = {
-            all: { icon: <Globe size={12} />, color: COLORS.success, bg: COLORS.successBg, label: "All users" },
-            azure_group: { icon: <Users size={12} />, color: COLORS.info, bg: COLORS.infoBg, label: `Azure AD: ${rule.groupName || rule.GroupId || "Group"}` },
-            specific_users: { icon: <UserPlus size={12} />, color: COLORS.purple, bg: COLORS.purpleBg, label: rule.groupName || "Selected users" },
+            all: { icon: <Globe size={11} />, color: COLORS.success, bg: COLORS.successBg, label: "All users" },
+            azure_group: { icon: <Users size={11} />, color: COLORS.info, bg: COLORS.infoBg, label: `Azure: ${rule.groupName || rule.GroupId || "Group"}` },
+            specific_users: { icon: <UserPlus size={11} />, color: COLORS.purple, bg: COLORS.purpleBg, label: rule.groupName || "Selected users" },
         };
 
         const emailTypeConfig = {
-            all: { icon: <Globe size={12} />, label: "All emails" },
-            compose: { icon: <Mail size={12} />, label: "New emails" },
-            reply: { icon: <MailOpen size={12} />, label: "Replies & forwards" },
+            all: { icon: <Globe size={11} />, label: "All emails" },
+            compose: { icon: <Mail size={11} />, label: "New emails" },
+            reply: { icon: <MailOpen size={11} />, label: "Replies" },
         };
 
         const recipientConfig = {
-            all: { icon: <Globe size={12} />, color: COLORS.success, label: "All recipients" },
-            internal: { icon: <Building size={12} />, color: COLORS.info, label: "Internal only" },
-            external: { icon: <UserPlus size={12} />, color: COLORS.purple, label: "External only" },
-            specific: { icon: <Shield size={12} />, color: COLORS.accent, label: "Specific recipients" },
+            all: { icon: <Globe size={11} />, color: COLORS.success, label: "All recipients" },
+            internal: { icon: <Building size={11} />, color: COLORS.info, label: "Internal" },
+            external: { icon: <UserPlus size={11} />, color: COLORS.purple, label: "External" },
+            specific: { icon: <Shield size={11} />, color: COLORS.accent, label: "Specific" },
         };
 
-        // Determine sender type from rule data
         const isAzure = rule.isAzureAdGroup || rule.azureAdGroup || false;
         const hasSpecificSenders = rule.Senders && rule.Senders.length > 0 && rule.Senders[0] !== "*";
         const sender = isAzure
@@ -646,61 +656,17 @@ export default function SignatureView({
         const recipient = recipientConfig[rule.recipientType] || recipientConfig.all;
 
         return (
-            <Stack direction="row" flexWrap="wrap" gap={0.75}>
-                <Chip
-                    size="small"
-                    icon={sender.icon}
-                    label={sender.label}
-                    sx={{
-                        background: sender.bg || COLORS.grayBg,
-                        color: sender.color,
-                        fontSize: "10px",
-                        fontWeight: 600,
-                        height: 22,
-                        "& .MuiChip-icon": { color: sender.color, fontSize: 12 },
-                    }}
-                />
-                <Chip
-                    size="small"
-                    icon={emailType.icon}
-                    label={emailType.label}
-                    sx={{
-                        background: COLORS.grayBg,
-                        color: COLORS.gray,
-                        fontSize: "10px",
-                        fontWeight: 600,
-                        height: 22,
-                        "& .MuiChip-icon": { color: COLORS.gray, fontSize: 12 },
-                    }}
-                />
-                <Chip
-                    size="small"
-                    icon={recipient.icon}
-                    label={recipient.label}
-                    sx={{
-                        background: recipient.bg || COLORS.grayBg,
-                        color: recipient.color,
-                        fontSize: "10px",
-                        fontWeight: 600,
-                        height: 22,
-                        "& .MuiChip-icon": { color: recipient.color, fontSize: 12 },
-                    }}
-                />
+            <Stack direction="row" flexWrap="wrap" gap={0.5}>
+                <Chip size="small" icon={sender.icon} label={sender.label} sx={chipSx(sender.color, sender.bg)} />
+                <Chip size="small" icon={emailType.icon} label={emailType.label} sx={chipSx(COLORS.gray, COLORS.grayBg)} />
+                <Chip size="small" icon={recipient.icon} label={recipient.label} sx={chipSx(recipient.color, recipient.bg)} />
                 {sig.signatureId && (
                     <Tooltip title="Signature ID">
                         <Chip
                             size="small"
-                            icon={<Sparkles size={12} />}
+                            icon={<Sparkles size={11} />}
                             label={sig.signatureId.slice(0, 8)}
-                            sx={{
-                                background: `${COLORS.primary}10`,
-                                color: COLORS.primary,
-                                fontSize: "10px",
-                                fontWeight: 600,
-                                height: 22,
-                                fontFamily: "monospace",
-                                "& .MuiChip-icon": { color: COLORS.primary, fontSize: 12 },
-                            }}
+                            sx={{ ...chipSx(COLORS.primary, `${COLORS.primary}10`), fontFamily: "monospace" }}
                         />
                     </Tooltip>
                 )}
@@ -716,324 +682,331 @@ export default function SignatureView({
                 flexDirection="column"
                 alignItems="center"
                 justifyContent="center"
-                sx={{ minHeight: isMobile ? "100vh" : "80vh", p: 3, gap: 2, background: COLORS.background }}
+                sx={{ minHeight: isMobile ? "100vh" : "80vh", p: 2, gap: 1.5, background: COLORS.background }}
             >
-                <CircularProgress size={isMobile ? 36 : 28} sx={{ color: COLORS.primary }} />
-                <Typography fontFamily="Plus Jakarta Sans" fontSize={isMobile ? "14px" : "12px"} color={COLORS.gray}>
-                    Loading your CardByte signatures…
+                <CircularProgress size={isMobile ? 32 : 26} sx={{ color: COLORS.primary }} />
+                <Typography fontFamily="Plus Jakarta Sans" fontSize={isMobile ? "13px" : "12px"} color={COLORS.gray}>
+                    Loading your signatures…
                 </Typography>
             </Box>
         );
     }
 
-    /* ── RENDER: full pane ───────────────────────────────────── */
+    /* ── RENDER: full pane (optimized for the narrow taskpane) ─────────────── */
     return (
-        <Grid container justifyContent="center" rowGap={2} sx={{ background: COLORS.background, minHeight: "100vh", p: { xs: 1.5, sm: 2 } }}>
-            <Grid size={{ xs: 12, md: 10, lg: 8 }}>
-                {/* Header Card */}
+        <Box sx={{ background: COLORS.background, minHeight: "100vh", p: 1.25 }}>
+            {/* ── Compact Header ─────────────────────────────────────────────── */}
+            <Paper
+                elevation={0}
+                sx={{
+                    p: 1.5,
+                    borderRadius: "10px",
+                    background: `linear-gradient(135deg, ${COLORS.primary} 0%, ${COLORS.primaryLight} 55%, ${COLORS.accent} 100%)`,
+                    color: "#fff",
+                    mb: 1.25,
+                    position: "relative",
+                    overflow: "hidden",
+                }}
+            >
+                <Box sx={{ position: "absolute", top: "-45%", right: "-15%", width: 130, height: 130, background: "radial-gradient(circle, rgba(139,92,246,0.35), transparent 70%)", borderRadius: "50%", pointerEvents: "none" }} />
+
+                <Box display="flex" alignItems="center" gap={1} position="relative" zIndex={1}>
+                    <Box sx={{ background: "rgba(255,255,255,0.15)", backdropFilter: "blur(8px)", p: 0.75, borderRadius: "8px", border: "1px solid rgba(255,255,255,0.2)", display: "flex" }}>
+                        <Sparkles size={16} />
+                    </Box>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                        {cardbyte_logo ? (
+                            <img src={cardbyte_logo} width={112} alt="CardByte" style={{ borderRadius: 4, display: "block" }} />
+                        ) : (
+                            <Typography fontFamily="Raleway" fontSize="17px" fontWeight={800} sx={{ letterSpacing: "-0.4px", lineHeight: 1.05 }}>
+                                CardByte
+                            </Typography>
+                        )}
+                        <Typography fontFamily="Plus Jakarta Sans" fontSize="11px" sx={{ opacity: 0.85, lineHeight: 1.2 }}>
+                            Signature Manager
+                        </Typography>
+                    </Box>
+                    {signatures.length > 0 && (
+                        <Chip
+                            size="small"
+                            icon={<FileText size={11} />}
+                            label={signatures.length}
+                            sx={{
+                                background: "rgba(255,255,255,0.15)",
+                                color: "#fff",
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                height: 22,
+                                borderRadius: "7px",
+                                "& .MuiChip-label": { px: 0.75 },
+                                "& .MuiChip-icon": { color: "#fff", fontSize: 12 },
+                            }}
+                        />
+                    )}
+                </Box>
+
+                <Typography fontFamily="Plus Jakarta Sans" fontSize="11px" sx={{ mt: 1, opacity: 0.85, position: "relative", zIndex: 1, lineHeight: 1.35 }}>
+                    {isMobile
+                        ? "Tap a signature to apply it to this email."
+                        : "Select a signature to apply it. Only signatures assigned to you are shown."}
+                </Typography>
+
+                {process.env.NODE_ENV === "development" && (
+                    <Typography fontSize="9px" color="rgba(255,255,255,0.5)" mt={0.75} position="relative" zIndex={1} sx={{ wordBreak: "break-all" }}>
+                        {platform} · mac:{String(isMac)} · {user?.emailAddress}
+                    </Typography>
+                )}
+            </Paper>
+
+            {/* ── Info Banner (compact) ──────────────────────────────────────── */}
+            {signatures.length > 1 && (
+                <Box
+                    sx={{
+                        background: COLORS.infoBg,
+                        border: `1px solid ${COLORS.infoBorder}`,
+                        borderRadius: "8px",
+                        p: "8px 10px",
+                        mb: 1.25,
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: 0.75,
+                    }}
+                >
+                    <Info size={13} color={COLORS.info} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <Typography fontSize="11px" color={COLORS.info} sx={{ lineHeight: 1.35 }}>
+                        Default applies when no rule matches. Rules run top-to-bottom by priority.
+                    </Typography>
+                </Box>
+            )}
+
+            {/* ── Signature List ─────────────────────────────────────────────── */}
+            {signatures.length === 0 ? (
                 <Paper
                     elevation={0}
                     sx={{
-                        p: { xs: 2, sm: 2.5 },
-                        borderRadius: "12px",
-                        background: `linear-gradient(135deg, ${COLORS.primary} 0%, ${COLORS.primaryLight} 50%, ${COLORS.accent} 100%)`,
-                        color: "#fff",
-                        mb: 2.5,
-                        position: "relative",
-                        overflow: "hidden",
+                        p: 3,
+                        borderRadius: "10px",
+                        background: COLORS.surface,
+                        border: `1px solid ${COLORS.border}`,
+                        textAlign: "center",
                     }}
                 >
-                    <Box sx={{ position: "absolute", top: "-30%", right: "-10%", width: 200, height: 200, background: "radial-gradient(circle, rgba(139,92,246,0.3), transparent 70%)", borderRadius: "50%", pointerEvents: "none" }} />
-                    <Box sx={{ position: "absolute", bottom: "-40%", left: "-5%", width: 160, height: 160, background: "radial-gradient(circle, rgba(79,70,229,0.25), transparent 70%)", borderRadius: "50%", pointerEvents: "none" }} />
-
-                    <Box display="flex" alignItems="center" gap={1.5} position="relative" zIndex={1}>
-                        <Box sx={{ background: "rgba(255,255,255,0.15)", backdropFilter: "blur(8px)", p: 1, borderRadius: "10px", border: "1px solid rgba(255,255,255,0.2)" }}>
-                            <Sparkles size={20} />
-                        </Box>
-                        <Box>
-                            <Typography fontFamily="Raleway" fontSize="12px" fontWeight="bold" sx={{ opacity: 0.9 }}>
-                                Welcome to
-                            </Typography>
-                            <img src={cardbyte_logo} width={140} alt="cardbyte" style={{ borderRadius: 5 }} />
-                        </Box>
+                    <Box sx={{ width: 52, height: 52, background: COLORS.grayBg, borderRadius: "14px", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
+                        <AlertCircle size={24} color={COLORS.gray} />
                     </Box>
-
-                    <Typography fontFamily="Plus Jakarta Sans" fontSize="12px" sx={{ mt: 1.5, opacity: 0.85, position: "relative", zIndex: 1 }}>
-                        {isMobile
-                            ? "Tap a signature below to apply it to this email."
-                            : "Select a signature below to apply it to your email. Only signatures assigned to you are shown."}
+                    <Typography fontFamily="Plus Jakarta Sans" fontSize="15px" color={COLORS.primary} fontWeight={700} gutterBottom>
+                        {error || "No Signatures Available"}
                     </Typography>
-
-                    {signatures.length > 0 && (
-                        <Box sx={{ mt: 1.5, display: "flex", alignItems: "center", gap: 1, position: "relative", zIndex: 1, flexWrap: "wrap" }}>
-                            <Chip
-                                size="small"
-                                icon={<FileText size={12} />}
-                                label={`${signatures.length} signature${signatures.length === 1 ? "" : "s"} available`}
-                                sx={{
-                                    background: "rgba(255,255,255,0.12)",
-                                    color: "#fff",
-                                    fontSize: "11px",
-                                    fontWeight: 600,
-                                    height: 24,
-                                    "& .MuiChip-icon": { color: "#fff" },
-                                }}
-                            />
-                        </Box>
-                    )}
-
-                    {process.env.NODE_ENV === "development" && (
-                        <Typography fontSize="10px" color="rgba(255,255,255,0.5)" mt={1} position="relative" zIndex={1}>
-                            platform: {platform} | isMac: {String(isMac)} | user: {user?.emailAddress}
-                        </Typography>
-                    )}
+                    <Typography fontFamily="Plus Jakarta Sans" fontSize="12px" color={COLORS.gray}>
+                        Please contact your Admin.
+                    </Typography>
                 </Paper>
+            ) : (
+                <Stack spacing={1.25}>
+                    {signatures.map((sig) => {
+                        const isExpanded = expandedCards[sig.id] !== false;
+                        const isDefault = sig.isDefault;
+                        const isApplying = applyingId === sig.id;
 
-                {/* Info Banner */}
-                {signatures.length > 1 && (
-                    <Box
-                        sx={{
-                            background: COLORS.infoBg,
-                            border: `1px solid ${COLORS.infoBorder}`,
-                            borderRadius: "10px",
-                            p: "10px 14px",
-                            mb: 2,
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 1,
-                        }}
-                    >
-                        <Info size={15} color={COLORS.info} style={{ flexShrink: 0 }} />
-                        <Typography fontSize="13px" color={COLORS.info}>
-                            The default signature is applied automatically when no rules match. Rule signatures are evaluated top-to-bottom by priority.
-                        </Typography>
-                    </Box>
-                )}
-
-                {/* Signature List */}
-                {signatures.length === 0 ? (
-                    <Paper
-                        elevation={0}
-                        sx={{
-                            p: 4,
-                            borderRadius: "12px",
-                            background: COLORS.surface,
-                            border: `1px solid ${COLORS.border}`,
-                            textAlign: "center",
-                        }}
-                    >
-                        <Box sx={{ width: 64, height: 64, background: COLORS.grayBg, borderRadius: "16px", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
-                            <AlertCircle size={28} color={COLORS.gray} />
-                        </Box>
-                        <Typography fontFamily="Plus Jakarta Sans" variant="h6" color={COLORS.primary} fontWeight={700} gutterBottom>
-                            {error || "No Signatures Available"}
-                        </Typography>
-                        <Typography fontFamily="Plus Jakarta Sans" fontSize="13px" color={COLORS.gray}>
-                            Please Contact Admin !
-                        </Typography>
-                    </Paper>
-                ) : (
-                    <Stack spacing={2}>
-                        {signatures.map((sig, index) => {
-                            const isExpanded = expandedCards[sig.id] !== false;
-                            const isDefault = sig.isDefault;
-                            const isApplying = applyingId === sig.id;
-
-                            return (
-                                <Paper
-                                    key={sig.id}
-                                    elevation={0}
+                        return (
+                            <Paper
+                                key={sig.id}
+                                elevation={0}
+                                sx={{
+                                    borderRadius: "10px",
+                                    overflow: "hidden",
+                                    background: COLORS.surface,
+                                    border: `1.5px solid ${isDefault ? COLORS.success : COLORS.border}`,
+                                    boxShadow: isDefault ? "0 0 0 2px rgba(16,185,129,0.08)" : "0 1px 2px rgba(0,0,0,0.04)",
+                                    transition: "all 0.15s",
+                                    "&:hover": {
+                                        boxShadow: "0 3px 12px rgba(0,0,0,0.09)",
+                                        borderColor: isDefault ? COLORS.success : COLORS.primary,
+                                    },
+                                }}
+                            >
+                                {/* Card Header */}
+                                <Box
                                     sx={{
-                                        borderRadius: "12px",
-                                        overflow: "hidden",
-                                        background: COLORS.surface,
-                                        border: `2px solid ${isDefault ? COLORS.success : COLORS.border}`,
-                                        boxShadow: isDefault ? "0 0 0 3px rgba(16,185,129,0.08)" : "0 1px 3px rgba(0,0,0,0.04)",
-                                        transition: "all 0.15s",
-                                        "&:hover": {
-                                            boxShadow: "0 4px 16px rgba(0,0,0,0.1)",
-                                            borderColor: isDefault ? COLORS.success : COLORS.primary,
-                                        },
+                                        p: 1.25,
+                                        display: "flex",
+                                        alignItems: "flex-start",
+                                        gap: 1,
+                                        cursor: "pointer",
+                                        background: isDefault ? "rgba(16,185,129,0.04)" : "transparent",
                                     }}
+                                    onClick={() => toggleExpand(sig.id)}
                                 >
-                                    {/* Card Header */}
+                                    {/* Priority / Default badge */}
                                     <Box
                                         sx={{
-                                            p: 2,
+                                            width: 28,
+                                            height: 28,
+                                            borderRadius: "8px",
+                                            background: isDefault ? COLORS.success : COLORS.primary,
+                                            color: "#fff",
                                             display: "flex",
                                             alignItems: "center",
-                                            gap: 1.5,
-                                            cursor: "pointer",
-                                            background: isDefault ? "rgba(16,185,129,0.04)" : "transparent",
+                                            justifyContent: "center",
+                                            fontSize: "12px",
+                                            fontWeight: 700,
+                                            flexShrink: 0,
+                                            mt: 0.25,
                                         }}
-                                        onClick={() => toggleExpand(sig.id)}
                                     >
-                                        {/* Priority / Default badge */}
-                                        <Box
-                                            sx={{
-                                                width: 36,
-                                                height: 36,
-                                                borderRadius: "10px",
-                                                background: isDefault ? COLORS.success : COLORS.primary,
-                                                color: "#fff",
-                                                display: "flex",
-                                                alignItems: "center",
-                                                justifyContent: "center",
-                                                fontSize: "12px",
-                                                fontWeight: 700,
-                                                flexShrink: 0,
-                                            }}
-                                        >
-                                            {isDefault ? <Star size={16} /> : sig.priority}
-                                        </Box>
+                                        {isDefault ? <Star size={14} /> : sig.priority}
+                                    </Box>
 
-                                        {/* Title + Chips */}
-                                        <Box sx={{ flex: 1, minWidth: 0 }}>
-                                            <Typography fontWeight={600} fontSize="15px" color={COLORS.primary} noWrap>
-                                                {sig.name}
+                                    {/* Title + Chips */}
+                                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                                        <Typography fontWeight={600} fontSize="13px" color={COLORS.primary} noWrap>
+                                            {sig.name}
+                                        </Typography>
+                                        {sig.description && (
+                                            <Typography fontSize="10px" color={COLORS.gray} noWrap sx={{ mt: 0.2 }}>
+                                                {sig.description}
                                             </Typography>
-                                            {sig.description && (
-                                                <Typography fontSize="11px" color={COLORS.gray} noWrap sx={{ mt: 0.3 }}>
-                                                    {sig.description}
-                                                </Typography>
-                                            )}
-                                            <Box sx={{ mt: 0.75 }}>
-                                                {renderRuleChips(sig)}
-                                            </Box>
-                                        </Box>
-
-                                        {/* Expand toggle */}
-                                        <Box sx={{ color: COLORS.gray, display: "flex", ml: 1 }}>
-                                            {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                                        )}
+                                        <Box sx={{ mt: 0.6 }}>
+                                            {renderRuleChips(sig)}
                                         </Box>
                                     </Box>
 
-                                    {/* Expanded Content */}
-                                    {isExpanded && (
-                                        <Fade in>
-                                            <Box>
-                                                <Divider sx={{ borderColor: COLORS.border }} />
+                                    {/* Expand toggle */}
+                                    <Box sx={{ color: COLORS.gray, display: "flex", mt: 0.25 }}>
+                                        {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                    </Box>
+                                </Box>
 
-                                                {/* Signature Preview */}
-                                                <Box sx={{ p: 2, background: "#fff" }}>
-                                                    <style>{`
-                            .sig-scroll-box-${sig.id}::-webkit-scrollbar { height: 6px; }
-                            .sig-scroll-box-${sig.id}::-webkit-scrollbar-track { background: ${COLORS.grayBg}; border-radius: 99px; }
-                            .sig-scroll-box-${sig.id}::-webkit-scrollbar-thumb { background: ${COLORS.primary}; border-radius: 99px; }
-                            .sig-scroll-box-${sig.id}::-webkit-scrollbar-thumb:hover { background: ${COLORS.primaryLight}; }
-                          `}</style>
+                                {/* Expanded Content */}
+                                {isExpanded && (
+                                    <Fade in>
+                                        <Box>
+                                            <Divider sx={{ borderColor: COLORS.border }} />
 
-                                                    <Box
-                                                        className={`sig-scroll-box-${sig.id}`}
-                                                        sx={{
-                                                            display: "block",
-                                                            overflowX: "auto",
-                                                            overflowY: "hidden",
-                                                            WebkitOverflowScrolling: "touch",
-                                                            background: "#fff",
-                                                            borderRadius: "8px",
-                                                            border: `1px solid ${COLORS.border}`,
-                                                            p: 1,
-                                                        }}
-                                                    >
-                                                        <Box
-                                                            sx={{
-                                                                display: "inline-block",
-                                                                whiteSpace: "nowrap",
-                                                                p: 1.5,
-                                                            }}
-                                                            dangerouslySetInnerHTML={{ __html: sig.html }}
-                                                        />
-                                                    </Box>
-                                                </Box>
+                                            {/* Signature Preview */}
+                                            <Box sx={{ p: 1.25, background: "#fff" }}>
+                                                <style>{`
+                          .sig-scroll-box-${sig.id}::-webkit-scrollbar { height: 5px; }
+                          .sig-scroll-box-${sig.id}::-webkit-scrollbar-track { background: ${COLORS.grayBg}; border-radius: 99px; }
+                          .sig-scroll-box-${sig.id}::-webkit-scrollbar-thumb { background: ${COLORS.primary}; border-radius: 99px; }
+                          .sig-scroll-box-${sig.id}::-webkit-scrollbar-thumb:hover { background: ${COLORS.primaryLight}; }
+                        `}</style>
 
-                                                {/* Action Footer */}
                                                 <Box
+                                                    className={`sig-scroll-box-${sig.id}`}
                                                     sx={{
-                                                        p: 2,
-                                                        pt: 1.5,
-                                                        display: "flex",
-                                                        justifyContent: "space-between",
-                                                        alignItems: "center",
-                                                        background: COLORS.background,
-                                                        borderTop: `1px solid ${COLORS.border}`,
+                                                        display: "block",
+                                                        overflowX: "auto",
+                                                        overflowY: "hidden",
+                                                        WebkitOverflowScrolling: "touch",
+                                                        background: "#fff",
+                                                        borderRadius: "6px",
+                                                        border: `1px solid ${COLORS.border}`,
+                                                        p: 0.75,
                                                     }}
                                                 >
-                                                    <Box>
-                                                        {isDefault ? (
-                                                            <Typography fontSize="11px" color={COLORS.success} fontWeight={600}>
-                                                                <CheckCircle size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />
-                                                                Applied automatically when no rules match
-                                                            </Typography>
-                                                        ) : (
-                                                            <Typography fontSize="11px" color={COLORS.gray}>
-                                                                Priority {sig.priority} · Rule-based signature
-                                                            </Typography>
-                                                        )}
-                                                    </Box>
-
-                                                    <Button
-                                                        onClick={() => applyHTML(sig.html, sig.name, sig.id, sig.signatureId)}
-                                                        variant="contained"
-                                                        size="small"
-                                                        disabled={isApplying}
-                                                        startIcon={isApplying ? <CircularProgress size={12} sx={{ color: "#fff" }} /> : <Zap size={14} />}
+                                                    <Box
                                                         sx={{
-                                                            backgroundColor: isDefault ? COLORS.success : COLORS.primary,
-                                                            borderRadius: "8px",
-                                                            fontSize: "12px",
-                                                            fontFamily: "Plus Jakarta Sans",
-                                                            textTransform: "capitalize",
-                                                            color: "#fff",
-                                                            px: 2.5,
-                                                            py: 0.8,
-                                                            boxShadow: "none",
-                                                            "&:hover": {
-                                                                backgroundColor: isDefault ? "#059669" : COLORS.primaryLight,
-                                                                boxShadow: `0 4px 12px ${isDefault ? "rgba(16,185,129,0.3)" : "rgba(30,41,59,0.2)"}`,
-                                                            },
-                                                            "&:disabled": {
-                                                                backgroundColor: isDefault ? "#6ee7b7" : "#94a3b8",
-                                                            },
+                                                            display: "inline-block",
+                                                            whiteSpace: "nowrap",
+                                                            p: 1,
                                                         }}
-                                                    >
-                                                        {isApplying ? "Applying…" : (isDefault ? "Apply Default" : "Apply Signature")}
-                                                    </Button>
+                                                        dangerouslySetInnerHTML={{ __html: sig.html }}
+                                                    />
                                                 </Box>
                                             </Box>
-                                        </Fade>
-                                    )}
-                                </Paper>
-                            );
-                        })}
-                    </Stack>
-                )}
 
-                {/* Refresh Button */}
-                <Box sx={{ display: "flex", justifyContent: "center", mt: 3, mb: 4 }}>
-                    <Button
-                        onClick={fetchAllSignatures}
-                        variant="outlined"
-                        size="small"
-                        startIcon={<RefreshCw size={14} />}
-                        sx={{
-                            borderColor: COLORS.border,
-                            color: COLORS.gray,
-                            borderRadius: "8px",
-                            fontSize: "12px",
-                            fontFamily: "Plus Jakarta Sans",
-                            textTransform: "capitalize",
-                            "&:hover": {
-                                borderColor: COLORS.primary,
-                                color: COLORS.primary,
-                                background: `${COLORS.primary}05`,
-                            },
-                        }}
-                    >
-                        Refresh Signatures
-                    </Button>
-                </Box>
-            </Grid>
-        </Grid>
+                                            {/* Action Footer */}
+                                            <Box
+                                                sx={{
+                                                    px: 1.25,
+                                                    py: 1,
+                                                    display: "flex",
+                                                    justifyContent: "space-between",
+                                                    alignItems: "center",
+                                                    gap: 1,
+                                                    background: COLORS.background,
+                                                    borderTop: `1px solid ${COLORS.border}`,
+                                                }}
+                                            >
+                                                <Box sx={{ minWidth: 0 }}>
+                                                    {isDefault ? (
+                                                        <Typography fontSize="10px" color={COLORS.success} fontWeight={600} sx={{ display: "flex", alignItems: "center", gap: 0.4, lineHeight: 1.2 }}>
+                                                            <CheckCircle size={11} />
+                                                            Auto-applied fallback
+                                                        </Typography>
+                                                    ) : (
+                                                        <Typography fontSize="10px" color={COLORS.gray} sx={{ lineHeight: 1.2 }}>
+                                                            Priority {sig.priority} · Rule-based
+                                                        </Typography>
+                                                    )}
+                                                </Box>
+
+                                                <Button
+                                                    onClick={() => applyHTML(sig.html, sig.name, sig.id, sig.signatureId)}
+                                                    variant="contained"
+                                                    size="small"
+                                                    disabled={isApplying}
+                                                    startIcon={isApplying ? <CircularProgress size={11} sx={{ color: "#fff" }} /> : <Zap size={13} />}
+                                                    sx={{
+                                                        flexShrink: 0,
+                                                        backgroundColor: isDefault ? COLORS.success : COLORS.primary,
+                                                        borderRadius: "7px",
+                                                        fontSize: "11px",
+                                                        fontFamily: "Plus Jakarta Sans",
+                                                        textTransform: "capitalize",
+                                                        color: "#fff",
+                                                        px: 1.5,
+                                                        py: 0.6,
+                                                        boxShadow: "none",
+                                                        "& .MuiButton-startIcon": { mr: 0.5 },
+                                                        "&:hover": {
+                                                            backgroundColor: isDefault ? "#059669" : COLORS.primaryLight,
+                                                            boxShadow: `0 3px 10px ${isDefault ? "rgba(16,185,129,0.3)" : "rgba(30,41,59,0.2)"}`,
+                                                        },
+                                                        "&:disabled": {
+                                                            backgroundColor: isDefault ? "#6ee7b7" : "#94a3b8",
+                                                        },
+                                                    }}
+                                                >
+                                                    {isApplying ? "Applying…" : "Apply"}
+                                                </Button>
+                                            </Box>
+                                        </Box>
+                                    </Fade>
+                                )}
+                            </Paper>
+                        );
+                    })}
+                </Stack>
+            )}
+
+            {/* ── Refresh Button ─────────────────────────────────────────────── */}
+            <Box sx={{ display: "flex", justifyContent: "center", mt: 2, mb: 2 }}>
+                <Button
+                    onClick={fetchAllSignatures}
+                    variant="outlined"
+                    size="small"
+                    startIcon={<RefreshCw size={13} />}
+                    sx={{
+                        borderColor: COLORS.border,
+                        color: COLORS.gray,
+                        borderRadius: "7px",
+                        fontSize: "11px",
+                        fontFamily: "Plus Jakarta Sans",
+                        textTransform: "capitalize",
+                        py: 0.5,
+                        "&:hover": {
+                            borderColor: COLORS.primary,
+                            color: COLORS.primary,
+                            background: `${COLORS.primary}05`,
+                        },
+                    }}
+                >
+                    Refresh
+                </Button>
+            </Box>
+        </Box>
     );
 }
