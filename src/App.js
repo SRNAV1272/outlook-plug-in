@@ -113,147 +113,41 @@ export default function App({ user }) {
     });
   }
 
-  /* ── Image processing — mobile-aware ────────────────────── */
-
-  function compressBase64Image(dataUrl, maxWidth, quality) {
-    if (maxWidth === undefined) maxWidth = mobile ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    if (quality === undefined) quality = mobile ? MOBILE_IMAGE_QUALITY : 0.7;
-
-    return new Promise((resolve) => {
-      // Desktop: preserve GIF animation in first pass
-      if (dataUrl.startsWith("data:image/gif") && !mobile) { resolve(dataUrl); return; }
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const canvas = document.createElement("canvas");
-          let w = img.width, h = img.height;
-          if (w > maxWidth) { h = Math.round(h * maxWidth / w); w = maxWidth; }
-          canvas.width = w; canvas.height = h;
-          const ctx = canvas.getContext("2d");
-          if (dataUrl.startsWith("data:image/png")) {
-            ctx.clearRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
-            const r = canvas.toDataURL("image/png");
-            resolve(r.length < dataUrl.length ? r : dataUrl); return;
-          }
-          ctx.drawImage(img, 0, 0, w, h);
-          let r = canvas.toDataURL("image/jpeg", quality);
-          if (r.length >= dataUrl.length) r = canvas.toDataURL("image/png");
-          resolve(r.length < dataUrl.length ? r : dataUrl);
-        } catch { resolve(dataUrl); }
-      };
-      img.onerror = () => resolve(dataUrl);
-      img.src = dataUrl;
-    });
-  }
-
-  function convertGifToStaticPng(dataUrl, maxWidth) {
-    if (maxWidth === undefined) maxWidth = mobile ? MOBILE_MAX_IMAGE_WIDTH : 300;
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const canvas = document.createElement("canvas");
-          let w = img.width, h = img.height;
-          if (w > maxWidth) { h = Math.round(h * maxWidth / w); w = maxWidth; }
-          canvas.width = w; canvas.height = h;
-          const ctx = canvas.getContext("2d");
-          ctx.clearRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
-          resolve(canvas.toDataURL("image/png"));
-        } catch { resolve(dataUrl); }
-      };
-      img.onerror = () => resolve(dataUrl);
-      img.src = dataUrl;
-    });
-  }
-
-  async function compressImagesInHtml(html) {
-    const regex = /src\s*=\s*"(data:image\/[^;]+;base64,[^"]+)"/gi;
-    const matches = []; let m;
-    while ((m = regex.exec(html)) !== null) matches.push({ dataUrl: m[1] });
-    if (!matches.length) return html;
-
-    console.log(`[CardByte] Compressing ${matches.length} image(s) — mobile: ${mobile}`);
-    let result = html;
-
-    for (const item of matches) {
-      const isGif = item.dataUrl.startsWith("data:image/gif");
-      if (isGif && mobile) {
-        // Mobile: convert GIFs to static PNG immediately
-        const png = await convertGifToStaticPng(item.dataUrl);
-        if (png !== item.dataUrl) result = result.replace(item.dataUrl, png);
-        continue;
-      }
-      if (isGif) continue; // desktop: skip in first pass to preserve animation
-      const compressed = await compressBase64Image(item.dataUrl);
-      if (compressed !== item.dataUrl) result = result.replace(item.dataUrl, compressed);
-    }
-
-    // Second pass: if still over limit, convert remaining desktop GIFs too
-    if (result.length > getMaxHtmlSize()) {
-      for (const item of matches) {
-        if (item.dataUrl.startsWith("data:image/gif") && result.includes(item.dataUrl)) {
-          const png = await convertGifToStaticPng(item.dataUrl);
-          if (png !== item.dataUrl) result = result.replace(item.dataUrl, png);
-        }
-      }
-    }
-    return result;
-  }
-
-  /**
-   * Full-body replacement (last resort / mobile default).
-   *
-   * MOBILE:  setAsync most reliable; setSignatureAsync is NOT available.
-   * DESKTOP: setSignatureAsync → setAsync → prependAsync → setSelectedDataAsync.
-   */
-  function moveCursorToTop(item) {
-    return new Promise((resolve) => {
-      try {
-        if (typeof item.body?.prependAsync !== "function") { resolve(); return; }
-        // prependAsync with empty text moves the insertion point to before all content
-        item.body.prependAsync("", { coercionType: Office.CoercionType.Text }, () => {
-          if (typeof item.body?.setSelectedDataAsync !== "function") { resolve(); return; }
-          item.body.setSelectedDataAsync("", { coercionType: Office.CoercionType.Text }, () => resolve());
-        });
-      } catch { resolve(); }
-    });
-  }
-
   /* ── Main applySignature — all platforms ─────────────────── */
 
-  async function applySignature(signature) {
+  const MANUAL_OVERRIDE_PROP = "cardbyte_manual_sig_id";
+
+  function loadCustomProps(item) {
+    return new Promise((resolve) => {
+      if (typeof item?.loadCustomPropertiesAsync !== "function") return resolve(null);
+      try {
+        item.loadCustomPropertiesAsync((res) =>
+          resolve(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null));
+      } catch { resolve(null); }
+    });
+  }
+
+  async function markManualOverride(item, sigId) {
+    if (!sigId) return;
+    const props = await loadCustomProps(item);
+    if (!props) return;
+    props.set(MANUAL_OVERRIDE_PROP, String(sigId));
+    await new Promise((resolve) =>
+      props.saveAsync((res) => resolve(res.status === Office.AsyncResultStatus.Succeeded)));
+  }
+
+  async function applySignature(signature, sigId) {
     if (!signature) return;
     if (typeof Office === "undefined") { console.error("Office.js not available"); return; }
-    const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
+    const item = Office?.context?.mailbox?.item;
+    if (!item) { console.warn("[CardByte] No mail item found"); return; }
 
     try {
-      if (!item) {
-        console.warn("[CardByte] No mail item found");
-        return;
-      }
-
-      const platform = detectPlatform();
-      const mobile = isMobile();
-      const mac = isMac();
-      let compressedSignature = await compressImagesInHtml(signature);
-      compressedSignature = "<div style='margin-top:40px'></div>" + compressedSignature;
-      console.log("[CardByte] ════════════════════════════════════",
-        signature ? "Using provided signature" : "No signature provided",
-        compressedSignature, item?.body
-      );
-
-      await bodySetSignatureAsync(item, compressedSignature)
-
-      console.log("[CardByte] User:", user?.emailAddress);
-      console.log("[CardByte] Platform:", platform);
-      console.log("[CardByte] isMobile:", mobile, "| isMac:", mac, "| isOWA:", isOWA());
-
-
+      await bodySetSignatureAsync(item, signature);   // apply as-is, no compression
+      await markManualOverride(item, sigId);          // pin this choice for send-time
+      console.log("[CardByte] Manual signature applied & pinned:", sigId);
     } catch (err) {
       console.error("[CardByte] Error in applySignature:", err);
-    } finally {
-      // event.completed();
     }
   }
 

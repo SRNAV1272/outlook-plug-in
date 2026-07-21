@@ -838,6 +838,11 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
 // =============================================================================
 
 async function onRecipientsChanged(item, mailbox) {
+    if (await getManualOverride(item)) {
+        console.log("[CardByte] Manual override active — skipping rule re-eval on recipient change");
+        return;
+    }
+    
     const matched = await findMatchingRule(item);
 
     if (matched) {
@@ -926,10 +931,54 @@ function withTimeout(promise, ms) {
 // =============================================================================
 
 const SIGNATURE_SENTINEL = "cardbyte-sig";
+const MANUAL_OVERRIDE_PROP = "cardbyte_manual_sig_id";
+
+function loadCustomProps(item) {
+    return new Promise((resolve) => {
+        if (typeof item?.loadCustomPropertiesAsync !== "function") return resolve(null);
+        try {
+            item.loadCustomPropertiesAsync((res) =>
+                resolve(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null)
+            );
+        } catch { resolve(null); }
+    });
+}
+
+async function getManualOverride(item) {
+    const props = await loadCustomProps(item);
+    const id = props?.get(MANUAL_OVERRIDE_PROP);
+    return id ? String(id) : null;
+}
+
+// Resolves the override id to HTML (cache-first, network fallback for rule sigs)
+async function resolveOverrideHtml(overrideId, mailbox) {
+    if (overrideId === "default") {
+        return getCachedSignature({ skipTtl: true, skipSessionCheck: true });
+    }
+    let html = getSigById(overrideId, { skipTtl: true });
+    if (!html) {
+        const enc = await encryptEmail(mailbox?.userProfile?.emailAddress);
+        html = await getOrFetchSignatureById(overrideId, enc, getXPlatform(), { skipTtl: true });
+    }
+    return html;
+}
 
 async function _onSendCore(item, mailbox) {
     const t0 = Date.now();
     notifyWithTiming(item, "Re-applying correct signature...", t0);
+
+    // ─── Manual taskpane selection wins at send time ───
+    const overrideId = await getManualOverride(item);
+    if (overrideId) {
+        const html = await resolveOverrideHtml(overrideId, mailbox);
+        if (html) {
+            await applySignatureWithFallback(item, html, false);
+            notifyWithTiming(item, "Manual signature kept ✓", t0);
+            logTiming("_onSendCore (manual override)", t0);
+            return;
+        }
+        console.warn("[CardByte] Override id set but html unavailable — falling back to rules");
+    }
 
     // Send-time: use cache-only (skipTtl=true) for speed, no network calls
     const rulesJson = getCachedRules({ skipTtl: true });
