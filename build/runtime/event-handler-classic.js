@@ -6740,6 +6740,7 @@ const CONFIG = {
 
     SIGNATURE_SENTINEL: "cardbyte-sig",
     NOTIF_KEY: "cardbyte_sig_status",
+    MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",   // ← add this
 
     DIAG_ENABLED: false,
 };
@@ -7004,6 +7005,36 @@ function showNotification(item, message, type) {
 function removeNotification(item) {
     try { item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { }); }
     catch (_) { }
+}
+
+// ─── Manual override (taskpane selection) ─────────────────────────────────────
+
+function loadCustomProps(item, cb) {
+    if (!item || typeof item.loadCustomPropertiesAsync !== "function") { cb(null); return; }
+    try {
+        item.loadCustomPropertiesAsync(function (res) {
+            cb(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null);
+        });
+    } catch (e) { _diag.warn("loadCustomProps threw: " + e.message); cb(null); }
+}
+
+function getManualOverride(item, cb) {
+    loadCustomProps(item, function (props) {
+        let id = null;
+        try { id = props ? props.get(CONFIG.MANUAL_OVERRIDE_PROP) : null; }
+        catch (_) { id = null; }
+        cb(id ? String(id) : null);
+    });
+}
+
+// Resolves an override id to HTML: "default" → cached default sig,
+// otherwise cache-first then network fallback for a rule signature.
+function resolveOverrideHtml(overrideId, cb) {
+    if (overrideId === "default") {
+        getCachedSignature(cb);
+        return;
+    }
+    getOrFetchSignatureById(overrideId, cb);
 }
 
 // ─── Guarded event.completed ──────────────────────────────────────────────────
@@ -7494,23 +7525,28 @@ function onRecipientsChangedHandler(event) {
         return;
     }
 
-    // Always evaluate rules when this event fires — the event itself guarantees
-    // recipients actually changed, so no snapshot comparison needed.
-    getCachedRules(function (rules) {
-        if (!rules) {
-            _diag.warn("onRecipientsChangedHandler: no rules cached — fetching");
-            fetchRulesConfig(function (freshRules) {
-                if (freshRules) {
-                    _evaluateAndInject(item, freshRules, guarded);
-                } else {
-                    _diag.error("onRecipientsChangedHandler: rules unavailable");
-                    guarded.completed();
-                }
-            });
+    getManualOverride(item, function (overrideId) {
+        if (overrideId) {
+            _diag.info("onRecipientsChangedHandler: manual override active (id=" + overrideId + ") — skipping rule re-eval");
+            guarded.completed();
             return;
         }
 
-        _evaluateAndInject(item, rules, guarded);
+        getCachedRules(function (rules) {
+            if (!rules) {
+                _diag.warn("onRecipientsChangedHandler: no rules cached — fetching");
+                fetchRulesConfig(function (freshRules) {
+                    if (freshRules) {
+                        _evaluateAndInject(item, freshRules, guarded);
+                    } else {
+                        _diag.error("onRecipientsChangedHandler: rules unavailable");
+                        guarded.completed();
+                    }
+                });
+                return;
+            }
+            _evaluateAndInject(item, rules, guarded);
+        });
     });
 }
 
@@ -7533,6 +7569,29 @@ function onSendHandler(event) {
         return;
     }
 
+    // Manual taskpane selection wins at send time.
+    getManualOverride(item, function (overrideId) {
+        if (overrideId) {
+            _diag.info("onSendHandler: manual override active id=" + overrideId);
+            resolveOverrideHtml(overrideId, function (html) {
+                if (html) {
+                    _diag.info("onSendHandler: injecting manual override sig");
+                    writeSignature(item, html, function () {
+                        guarded.completed({ allowEvent: true });
+                    });
+                } else {
+                    _diag.warn("onSendHandler: override id set but html unavailable — falling back to rules");
+                    _onSendRuleFlow(item, guarded);
+                }
+            });
+            return;
+        }
+        _onSendRuleFlow(item, guarded);
+    });
+}
+
+// Extracted rule/default flow (unchanged from the previous onSendHandler body).
+function _onSendRuleFlow(item, guarded) {
     getCachedRules(function (rules) {
         if (!rules) {
             _diag.warn("onSendHandler: no rules in cache — injecting default");
