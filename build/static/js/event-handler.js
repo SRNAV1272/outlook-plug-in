@@ -599,7 +599,13 @@ function contextMatches(ruleContext, composeType) {
 function senderMatches(rule, currentSenderEmail) {
     if (!rule.Senders || rule.Senders.length === 0) return true;
     const sender = (currentSenderEmail || "").toLowerCase();
-    return rule.Senders.some(s => s.toLowerCase() === sender);
+
+    return rule.Senders.some(raw => {
+        const s = (raw || "").toLowerCase().trim();
+        if (s === "*" || s === "all") return true;          // wildcard: any sender
+        if (s.startsWith("*@")) return sender.endsWith(s.slice(1)); // *@domain.com
+        return s === sender;                                 // exact email
+    });
 }
 
 // =============================================================================
