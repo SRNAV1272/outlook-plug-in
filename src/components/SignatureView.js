@@ -35,6 +35,7 @@ import { toast } from "react-toastify";
 import DefaultTemplate from "./SignatureComponents/Assets/Images/DefaultTemplate.svg";
 import usernotfound from "../components/SignatureComponents/Assets/Images/usernotfound.gif";
 import signnotassigned from "../components/SignatureComponents/Assets/Images/signnotassigned.webp";
+import SignaturePreview from "./Signaturepreview";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Brand logo
@@ -127,9 +128,9 @@ export default function SignatureView({
 
     // ─── Platform helpers ────────────────────────────────────────────────────
     const getXPlatform = useCallback(() => {
-        const p = (Office?.context?.platform || "").toLowerCase();
-        if (p === "mac") return "MAC";
-        if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
+        // const p = (Office?.context?.platform || "").toLowerCase();
+        // if (p === "mac") return "MAC";
+        // if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
         return "WINDOWS";
     }, [Office]);
 
@@ -903,14 +904,23 @@ export default function SignatureView({
                                                         p: 0.75,
                                                     }}
                                                 >
-                                                    <Box
+                                                    {/* <Box
                                                         sx={{
                                                             display: "inline-block",
                                                             whiteSpace: "nowrap",
                                                             p: 1,
                                                         }}
                                                         dangerouslySetInnerHTML={{ __html: sig.html }}
-                                                    />
+                                                    /> */}
+                                                    <Box sx={{ p: 1.25, background: "#fff" }}>
+                                                        <SignaturePreview
+                                                            html={sig.html}
+                                                            borderColor={COLORS.border}
+                                                            trackColor={COLORS.grayBg}
+                                                            thumbColor={COLORS.primary}
+                                                            minScale={isMobile ? 0.35 : 0.3}
+                                                        />
+                                                    </Box>
                                                 </Box>
                                             </Box>
 
