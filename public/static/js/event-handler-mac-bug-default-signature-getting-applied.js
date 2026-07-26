@@ -1,20 +1,10 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (FIXED v4)
-//  Send-time reliability fix:
-//  1. Cache reads NEVER destructively delete data. TTL/session expiry returns
-//     null (caller refetches) but keeps the stale copy for send-time reads.
-//  2. Send-time reads bypass BOTH TTL and session checks everywhere. Fresh
-//     JS runtimes (always on Mac OnMessageSend, sometimes on Windows) get a
-//     new sessionStorage session id — previously this nuked the rules cache
-//     at send time while the default-signature read survived, so the default
-//     signature overwrote the rule signature.
-//  3. findMatchingRule supports cacheOnly mode — no network at send time.
-//  4. purgeStaleSigById horizon raised to 24h so Office.onReady in the
-//     send-time runtime doesn't delete rule signature HTML mid-compose.
-//  5. Active signature id persisted to localStorage (not just a variable)
-//     so a fresh send-time runtime can recover it on any platform.
+//  CardByte Outlook Add-in — event-handler.js (FIXED v3)
+//  Cache fix: Rules now refresh using the same TTL pattern as default signature.
+//  Both default signature and rules are checked for TTL expiry at compose time
+//  and re-fetched if stale. Send-time continues to use cache-only (no network).
 // =============================================================================
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -36,21 +26,12 @@ const RULES_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const SIG_BY_ID_CACHE_KEY = "cardbyte_sig_by_id";
 const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;
-// Hard purge horizon — entries older than this are physically removed.
-// Must be much longer than a compose session; TTL above only governs
-// freshness (re-fetch), not existence.
-const SIG_BY_ID_PURGE_MS = 24 * 60 * 60 * 1000;
-
-// Persisted (cross-runtime) record of the signature currently in the body.
-const ACTIVE_SIG_KEY = "cardbyte_active_sig_id";
-const ACTIVE_SIG_TS_KEY = "cardbyte_active_sig_ts";
-const ACTIVE_SIG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 const MAX_SAFE_HTML_SIZE = 500_000;
 const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
 const HEAVY_THRESHOLD = 100 * 1024;
 const MAX_RETRIES = 2;
-const RECIPIENT_POLL_MS = 900;
+const RECIPIENT_POLL_MS = 1500;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
@@ -235,9 +216,6 @@ const store = {
 
 // =============================================================================
 //  SESSION ID
-//  NOTE: sessionStorage is per-JS-runtime. Mac (and sometimes Windows)
-//  runs OnMessageSend in a FRESH runtime → new session id. Session checks
-//  must therefore never run on send-time reads, and must never delete data.
 // =============================================================================
 
 function getOrCreateSessionId() {
@@ -254,30 +232,7 @@ function getOrCreateSessionId() {
 }
 
 // =============================================================================
-//  ACTIVE SIGNATURE ID (persisted — survives runtime teardown)
-// =============================================================================
-
-function setActiveSignatureId(id) {
-    if (id == null) {
-        store.remove(ACTIVE_SIG_KEY, ACTIVE_SIG_TS_KEY);
-        return;
-    }
-    store.set(ACTIVE_SIG_KEY, String(id));
-    store.set(ACTIVE_SIG_TS_KEY, Date.now().toString());
-}
-
-function getActiveSignatureId() {
-    const id = store.get(ACTIVE_SIG_KEY);
-    if (!id) return null;
-    const ts = parseInt(store.get(ACTIVE_SIG_TS_KEY) || "0", 10);
-    if (Date.now() - ts > ACTIVE_SIG_MAX_AGE_MS) return null;
-    return id;
-}
-
-// =============================================================================
 //  DEFAULT SIGNATURE CACHE
-//  FIX: expiry/mismatch returns null but NEVER deletes — the stale copy is
-//  the send-time safety net (skipTtl/skipSessionCheck reads).
 // =============================================================================
 
 function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
@@ -291,7 +246,8 @@ function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) 
 
     const currentSid = getOrCreateSessionId();
     if (store.get(CACHE_SESSION_KEY) !== currentSid) {
-        console.log("[CardByte] New session detected — signature cache treated as stale (kept on disk)");
+        console.log("[CardByte] New session detected — clearing signature cache");
+        store.remove(CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY);
         logTiming("getCachedSignature (session mismatch)", t0);
         return null;
     }
@@ -299,7 +255,8 @@ function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) 
     if (!skipTtl) {
         const ts = parseInt(store.get(CACHE_TIMESTAMP_KEY) || "0", 10);
         if (Date.now() - ts > CACHE_TTL_MS) {
-            console.log("[CardByte] Signature cache TTL expired — treated as stale (kept on disk)");
+            console.log("[CardByte] Signature cache TTL expired — clearing");
+            store.remove(CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY);
             logTiming("getCachedSignature (ttl expired)", t0);
             return null;
         }
@@ -325,10 +282,14 @@ function setCachedSignature(html) {
 
 // =============================================================================
 //  RULES CACHE (same TTL pattern as signature)
-//  FIX: expiry/mismatch returns null but NEVER deletes, and send-time reads
-//  pass skipSessionCheck (fresh runtimes have a different session id).
 // =============================================================================
 
+/**
+ * Gets cached rules. Same TTL pattern as getCachedSignature:
+ * - Respects session boundaries (clears on new session)
+ * - Respects TTL expiry (5 minutes)
+ * - skipTtl: true bypasses TTL check (used at send-time)
+ */
 function getCachedRules({ skipTtl = false, skipSessionCheck = false } = {}) {
     const t0 = Date.now();
 
@@ -341,7 +302,8 @@ function getCachedRules({ skipTtl = false, skipSessionCheck = false } = {}) {
     const currentSid = getOrCreateSessionId();
     // Rules are tied to the same session as signatures
     if (store.get(CACHE_SESSION_KEY) !== currentSid) {
-        console.log("[CardByte] New session detected — rules cache treated as stale (kept on disk)");
+        console.log("[CardByte] New session detected — clearing rules cache");
+        store.remove(RULES_CACHE_KEY, RULES_CACHE_TIMESTAMP_KEY);
         logTiming("getCachedRules (session mismatch)", t0);
         return null;
     }
@@ -349,7 +311,8 @@ function getCachedRules({ skipTtl = false, skipSessionCheck = false } = {}) {
     if (!skipTtl) {
         const ts = parseInt(store.get(RULES_CACHE_TIMESTAMP_KEY) || "0", 10);
         if (Date.now() - ts > RULES_CACHE_TTL_MS) {
-            console.log("[CardByte] Rules cache TTL expired — treated as stale (kept on disk)");
+            console.log("[CardByte] Rules cache TTL expired — clearing");
+            store.remove(RULES_CACHE_KEY, RULES_CACHE_TIMESTAMP_KEY);
             logTiming("getCachedRules (ttl expired)", t0);
             return null;
         }
@@ -401,16 +364,12 @@ function setSigById(signatureId, html) {
     console.log(`[CardByte] sigById cached: id=${id}`);
 }
 
-// FIX: purge horizon is 24h, not the 5-min TTL. Office.onReady fires in the
-// FRESH send-time runtime BEFORE _onSendCore — with the old 5-min horizon it
-// deleted rule signature HTML for any compose session longer than 5 minutes,
-// guaranteeing the default-signature fallback at send.
 function purgeStaleSigById() {
     const map = _readSigByIdMap();
     const now = Date.now();
     let purged = 0;
     for (const id of Object.keys(map)) {
-        if (now - map[id].ts > SIG_BY_ID_PURGE_MS) { delete map[id]; purged++; }
+        if (now - map[id].ts > SIG_BY_ID_TTL_MS) { delete map[id]; purged++; }
     }
     if (purged > 0) {
         _writeSigByIdMap(map);
@@ -673,27 +632,20 @@ function getComposeType(item) {
 
 // =============================================================================
 //  FIND MATCHING RULE
-//  FIX: cacheOnly mode for send time — reads rules with skipTtl +
-//  skipSessionCheck and NEVER goes to the network. Previously this function
-//  re-ran the TTL/session checks (deleting the cache) and then attempted a
-//  live fetch inside the 4s send window — the "clumsy internet" failure.
 // =============================================================================
 
-async function findMatchingRule(item, { cacheOnly = false } = {}) {
-    let rulesJson = cacheOnly
-        ? getCachedRules({ skipTtl: true, skipSessionCheck: true })
-        : getCachedRules();
+async function findMatchingRule(item) {
+    let rulesJson = getCachedRules();
 
-    if (!rulesJson && !cacheOnly) {
+    if (!rulesJson) {
         console.warn("[CardByte] Rules not in cache — live fetch...");
         const userEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
         if (userEmail) {
             const enc = await encryptEmail(userEmail);
             rulesJson = await fetchAndCacheRules(enc, getXPlatform());
         }
+        if (!rulesJson) { console.warn("[CardByte] findMatchingRule: no rules available"); return null; }
     }
-
-    if (!rulesJson) { console.warn("[CardByte] findMatchingRule: no rules available"); return null; }
 
     const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
     const senderDomain = getDomain(senderEmail);
@@ -846,8 +798,6 @@ async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) 
                     break;
                 }
                 if (explicit) {
-                    // Server explicitly says "no signature assigned" — this is
-                    // the ONE case where we hard-delete the cached copy.
                     explicitlyUnassigned = true;
                     store.remove(CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY);
                     break;
@@ -908,18 +858,12 @@ async function onRecipientsChanged(item, mailbox) {
             return;
         }
         console.log("[CardByte] Injecting rule-matched signature, signatureId:", matched.signatureId);
-        const applied = await applySignatureWithFallback(item, ruleHtml, false);
-        if (applied) {
-            _activeSignatureId = String(matched.signatureId);
-            // Persist so the (possibly fresh) send-time runtime knows what's
-            // actually in the body even if recipients can't be read there.
-            setActiveSignatureId(matched.signatureId);
-        }
+        await applySignatureWithFallback(item, ruleHtml, false);
+        _activeSignatureId = String(matched.signatureId);
 
     } else {
         console.warn("[CardByte] No rule matched / empty recipients — falling back to default signature");
         _activeSignatureId = null;
-        setActiveSignatureId(null);
         await applySignatureCore(item, mailbox, { fetchIfMissing: true }, false);
     }
 }
@@ -984,8 +928,6 @@ function withTimeout(promise, ms) {
 
 // =============================================================================
 //  SEND-TIME CORE
-//  Send time is 100% cache-only. All reads bypass TTL AND session checks
-//  because OnMessageSend may run in a fresh runtime with a new session id.
 // =============================================================================
 
 const SIGNATURE_SENTINEL = "cardbyte-sig";
@@ -1038,11 +980,22 @@ async function _onSendCore(item, mailbox) {
         console.warn("[CardByte] Override id set but html unavailable — falling back to rules");
     }
 
-    // Send-time: cache-only, bypass TTL AND session checks (fresh runtime safe)
-    const rulesJson = getCachedRules({ skipTtl: true, skipSessionCheck: true });
+    // Send-time: use cache-only (skipTtl=true) for speed, no network calls
+    const rulesJson = getCachedRules({ skipTtl: true });
 
     if (rulesJson) {
-        const matched = await findMatchingRule(item, { cacheOnly: true });
+        const matched = await findMatchingRule(item);
+
+        if (!matched && isMac() && _activeSignatureId) {
+            console.warn("[CardByte] Mac onSend: findMatchingRule inconclusive — trusting _activeSignatureId:", _activeSignatureId);
+            const ruleHtml = getSigById(_activeSignatureId, { skipTtl: true });
+            if (ruleHtml) {
+                await applySignatureWithFallback(item, ruleHtml, false);
+                notifyWithTiming(item, "Rule signature applied ✓ (Mac fallback)", t0);
+                logTiming("_onSendCore (mac fallback)", t0);
+                return;
+            }
+        }
 
         if (matched) {
             console.log(`[CardByte] onSend: rule matched id=${matched.signatureId}`);
@@ -1056,38 +1009,14 @@ async function _onSendCore(item, mailbox) {
                 logTiming("_onSendCore (rule)", t0);
                 return;
             }
-            console.warn(`[CardByte] onSend: rule sig id=${matched.signatureId} not in cache — trying last-applied signature`);
+            console.warn(`[CardByte] onSend: rule sig id=${matched.signatureId} not in cache — falling back to default`);
         } else {
-            console.log("[CardByte] onSend: no rule matched (or recipients unreadable) — trying last-applied signature");
+            console.log("[CardByte] onSend: no rule matched — applying default");
         }
     } else {
-        console.warn("[CardByte] onSend: no rules in cache — trying last-applied signature");
+        console.warn("[CardByte] onSend: no rules in cache — applying default");
     }
 
-    // ─── Cross-runtime fallback (all platforms, not just Mac) ───
-    // If rule evaluation was inconclusive at send time (recipients unreadable,
-    // rules missing, or the matched sig HTML absent), trust the persisted
-    // record of the signature that was actually applied during compose.
-    // The body already contains it; re-applying is a no-op safety measure.
-    const persistedActiveId = getActiveSignatureId();
-    if (persistedActiveId) {
-        console.warn("[CardByte] onSend: falling back to persisted active signature id:", persistedActiveId);
-        const activeHtml = getSigById(persistedActiveId, { skipTtl: true });
-        if (activeHtml) {
-            await applySignatureWithFallback(item, activeHtml, false);
-            notifyWithTiming(item, "Rule signature applied ✓ (persisted fallback)", t0);
-            logTiming("_onSendCore (persisted fallback)", t0);
-            return;
-        }
-        // HTML not cached but a rule signature IS in the body — do NOT
-        // overwrite it with the default. Leave the body untouched.
-        console.warn("[CardByte] onSend: active sig HTML not cached — leaving body as-is (rule sig already applied at compose)");
-        removeNotification(item);
-        logTiming("_onSendCore (leave as-is)", t0);
-        return;
-    }
-
-    // No rule signature was ever active → default is genuinely correct.
     const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
     if (!cached) {
         showNotification(item, "No cached signature on send", "errorMessage", false, t0);
@@ -1126,9 +1055,10 @@ const applySignature = async function (event = { completed: () => { } }) {
         notifyWithTiming(item, "Starting signature flow...", t0);
 
         _activeSignatureId = null;
-        setActiveSignatureId(null);
 
         // ─── Refresh rules cache (same pattern as signature) ─────────────────
+        // Rules and signatures share the same 5-min TTL and session lifecycle.
+        // If rules cache is expired or from a different session, fetch fresh.
         const userEmail = mailbox?.userProfile?.emailAddress;
         if (userEmail) {
             const enc = await encryptEmail(userEmail);
@@ -1210,7 +1140,6 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         notifyWithTiming(item, "Account changed — updating signature...", t0);
 
         _activeSignatureId = null;
-        setActiveSignatureId(null);
 
         // Also refresh rules when account changes — sender context changed
         const userEmail = mailbox?.userProfile?.emailAddress;

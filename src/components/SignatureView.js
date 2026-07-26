@@ -722,9 +722,6 @@ export default function SignatureView({
                                 CardByte
                             </Typography>
                         )}
-                        <Typography fontFamily="Plus Jakarta Sans" fontSize="11px" sx={{ opacity: 0.85, lineHeight: 1.2 }}>
-                            Signature Manager
-                        </Typography>
                     </Box>
                     {signatures.length > 0 && (
                         <Chip

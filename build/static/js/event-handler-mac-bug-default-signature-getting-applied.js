@@ -83,8 +83,8 @@ const getMaxHtmlSize = () => isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_H
 
 function getXPlatform() {
     const p = detectPlatform();
-    if (p === "mac") return "MAC";
-    if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
+    // if (p === "mac") return "MAC";
+    // if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
     return "WINDOWS";
 }
 
@@ -842,7 +842,7 @@ async function onRecipientsChanged(item, mailbox) {
         console.log("[CardByte] Manual override active — skipping rule re-eval on recipient change");
         return;
     }
-    
+
     const matched = await findMatchingRule(item);
 
     if (matched) {
