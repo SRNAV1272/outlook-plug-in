@@ -123,8 +123,8 @@ export default function SignaturePreview({
                         }}
                     >
                         {actualSize
-                            ? "Fit to width"
-                            : `Actual size · ${Math.round(scale * 100)}%`}
+                            ? "Fit"
+                            : "Expand"}
                     </Button>
                 </Box>
             )}
