@@ -80,7 +80,7 @@ const COLORS = {
 // ─────────────────────────────────────────────────────────────────────────────
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-const BASE_URL = "https://newqa-enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://ns-enterprise.cardbyte.ai/email-signature";
 
 const CACHE_KEY = "cardbyte_cached_signature";
 const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";

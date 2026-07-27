@@ -33,7 +33,7 @@
 //     if the backend rejects "MAC".
 //
 //  DEPLOYMENT PREREQS FOR MAC (not fixable in this file — verify these):
-//  a) https://newqa-enterprise.cardbyte.ai/.well-known/microsoft-officeaddins-allowed.json
+//  a) https://ns-enterprise.cardbyte.ai/.well-known/microsoft-officeaddins-allowed.json
 //     must exist and list this add-in's ID and the full URL of this JS file,
 //     and the API must return proper CORS headers. Without it, ALL fetches
 //     from the Mac event runtime reject with "TypeError: Load failed".
@@ -50,7 +50,7 @@
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 
-const BASE_URL = "https://newqa-enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://ns-enterprise.cardbyte.ai/email-signature";
 
 const SESSION_KEY = "cardbyte_session_id";
 const CACHE_KEY = "cardbyte_cached_signature";
