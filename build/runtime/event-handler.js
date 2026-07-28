@@ -824,6 +824,42 @@ function getComposeType(item) {
 //  event runtime's localStorage is empty).
 // =============================================================================
 
+// v6: "internal" is resolved PER RULE, not once globally.
+//
+// For AAD group rules the backend flattens group membership into Senders, so
+// that array IS the internal set — members are matched by EXACT ADDRESS.
+// Matching their domain instead would make every outlook.com user "internal"
+// for consumer-domain accounts (the false positive in v5).
+//
+// Non-group rules keep v5 behavior byte for byte: internal == sender's domain.
+function buildInternalMatcher(rule, senderDomain) {
+    const addrs = new Set();
+    const domains = new Set();
+
+    // Explicit domain list, when the admin supplied one (ruleType: DOMAIN).
+    (rule.ruleValue || []).forEach(v => {
+        const d = (v || "").toLowerCase().trim().replace(/^\*?@?/, "");
+        if (d && d !== "*") domains.add(d);
+    });
+
+    const senders = rule.Senders || [];
+    if (rule.isAzureAdGroup && senders.length > 0) {
+        senders.forEach(raw => {
+            const s = (raw || "").toLowerCase().trim();
+            if (!s || s === "*" || s === "all") return;
+            if (s.startsWith("*@")) domains.add(s.slice(2));  // wildcard domain
+            else addrs.add(s);                                 // exact member
+        });
+    } else if (senderDomain) {
+        domains.add(senderDomain);                             // v5 fallback
+    }
+
+    return (email) => {
+        const e = (email || "").toLowerCase();
+        return addrs.has(e) || domains.has(getDomain(e));
+    };
+}
+
 async function findMatchingRule(item, { cacheOnly = false, allowQuickFetchMs = 0 } = {}) {
     let rulesJson = cacheOnly
         ? getCachedRules({ skipTtl: true, skipSessionCheck: true })
@@ -862,27 +898,31 @@ async function findMatchingRule(item, { cacheOnly = false, allowQuickFetchMs = 0
 
     let hasInternal = false;
     let hasExternal = false;
-    const recipientDomains = [];
+    const recipientDomains = [...new Set(emails.map(getDomain).filter(Boolean))];
 
-    emails.forEach(e => {
-        const d = getDomain(e);
-        if (d && !recipientDomains.includes(d)) recipientDomains.push(d);
-        if (senderDomain && d === senderDomain) hasInternal = true;
-        else hasExternal = true;
-    });
-
-    console.log("[CardByte] Rule evaluation context:", {
-        senderEmail, senderDomain, composeType, hasInternal, hasExternal,
-        recipientDomains, totalRules: rulesJson?.rulesList?.length ?? 0,
-    });
+    // v6: stringify so the console doesn't collapse this to "Object"
+    console.log("[CardByte] Rule evaluation context:", JSON.stringify({
+        senderEmail, senderDomain, composeType,
+        recipients: emails,
+        recipientDomains,
+        totalRules: rulesJson?.rulesList?.length ?? 0,
+    }));
 
     const sortedRules = (rulesJson?.rulesList || [])
         .filter(r => r.enabled)
         .sort((a, b) => a.priority - b.priority);
 
     let matched = null;
+    let lastClass = null;
 
     for (const r of sortedRules) {
+        // v6: internal/external is now rule-scoped
+        const isInternal = buildInternalMatcher(r, senderDomain);
+        let hasInternal = false;
+        let hasExternal = false;
+        emails.forEach(e => { isInternal(e) ? hasInternal = true : hasExternal = true; });
+        lastClass = { hasInternal, hasExternal };
+
         const senderOk = senderMatches(r, senderEmail);
         const contextOk = contextMatches(r.context, composeType);
         const recipOk = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
@@ -893,14 +933,16 @@ async function findMatchingRule(item, { cacheOnly = false, allowQuickFetchMs = 0
             `| priority=${r.priority}`,
             `| sender=${senderOk}`,
             `| context=${r.context} (ok=${contextOk})`,
-            `| recipientType=${r.recipientType} (ok=${recipOk})`,
+            `| recipientType=${r.recipientType} (ok=${recipOk}, internal=${hasInternal}, external=${hasExternal})`,
             `| sigId=${r.signatureId ?? "NULL"}`
         );
 
         if (allMatch) { matched = r; break; }
     }
 
-    if (!matched) console.warn("[CardByte] ❌ No rules matched", { composeType, hasInternal, hasExternal });
+    if (!matched) {
+        console.warn("[CardByte] ❌ No rules matched", { composeType, ...(lastClass || {}) });
+    }
     return matched;
 }
 
