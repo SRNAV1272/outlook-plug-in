@@ -149,23 +149,23 @@ function detectPlatform() {
     })();
 
     const uaMobile = () => {
-        if (ua.includes("android")) return "mobile-android";
-        if (ua.includes("iphone") || ua.includes("ipad")) return "mobile-ios";
+        if (ua.includes("android")) return "windows";
+        if (ua.includes("iphone") || ua.includes("ipad")) return "mac";
         return null;
     };
 
     if (d && PT) {
-        if (d === PT.iOS) return (_platform = "mobile-ios");
-        if (d === PT.Android) return (_platform = "mobile-android");
+        if (d === PT.iOS) return (_platform = "mac");
+        if (d === PT.Android) return (_platform = "windows");
         if (d === PT.Mac) return (_platform = "mac");
         if (d === PT.PC) return (_platform = "windows");
-        if (d === PT.OfficeOnline) return (_platform = uaMobile() || "owa");
-        if (d === PT.Universal) return (_platform = uaMobile() || "owa");
+        if (d === PT.OfficeOnline) return (_platform = uaMobile() || "windows");
+        if (d === PT.Universal) return (_platform = uaMobile() || "windows");
     }
 
     // diagnostics unavailable (requirement set < 1.5, or a stripped runtime).
-    if (ua.includes("outlook-android")) return (_platform = "mobile-android");
-    if (ua.includes("outlook-ios") || ua.includes("outlookmobile")) return (_platform = uaMobile() || "mobile-ios");
+    if (ua.includes("outlook-android")) return (_platform = "windows");
+    if (ua.includes("outlook-ios") || ua.includes("outlookmobile")) return (_platform = uaMobile() || "mac");
     const m = uaMobile();
     if (m) return (_platform = m);
     if (ua.includes("macintosh") || ua.includes("mac os x")) return (_platform = "mac");
@@ -180,8 +180,8 @@ function getXPlatform() {
     const p = detectPlatform();
     const base =
         p === "mac" ? "MAC" :
-            p === "owa" ? "OWA" :
-                isMobile() ? "MOBILE" :
+            p === "owa" ? "WINDOWS" :
+                isMobile() ? "WINDOWS" :
                     "WINDOWS";
     return X_PLATFORM_MAP[base] || base;
 }
@@ -602,47 +602,60 @@ async function fetchDefaultSignature(encryptedMail) {
     }
 }
 
+// Same { html, explicit } shape as fetchDefaultSignature so resolveSigHtml can
+// treat both uniformly.
 async function fetchSignatureById(id, encryptedMail) {
     try {
         const res = await fetch(`${BASE_URL}/rules-config/get/${id}`, {
             method: "GET",
             headers: apiHeaders(encryptedMail),
         });
-        if (!res.ok) { err(`signature fetch failed id=${id}:`, res.status); return null; }
+        if (!res.ok) {
+            err(`signature fetch failed id=${id}:`, res.status);
+            return { html: null, explicit: res.status === 404 };
+        }
         const html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
         if (!html) warn("signature HTML empty for id:", id);
-        return html;
+        return { html, explicit: true };
     } catch (e) {
         err(`fetchSignatureById crashed id=${id}:`, e);
-        return null;
+        return { html: null, explicit: false };
     }
 }
 
 /**
  * THE CORE OF THE ID-AS-STATE DESIGN: id -> HTML, cache then network.
- * @returns {Promise<{ html: string|null, source: "cache"|"network"|"none" }>}
+ *
+ * `unassigned` distinguishes "the server answered definitively and there is no
+ * signature for this user" (an admin problem) from "we could not reach or parse
+ * the server" (a transient problem). The two need different messages — without
+ * the distinction a misconfiguration is indistinguishable from flaky network.
+ *
+ * @returns {Promise<{ html: string|null, source: "cache"|"network"|"none", unassigned: boolean }>}
  */
 async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = FETCH_BUDGET_MS } = {}) {
     const key = String(id);
 
     const cached = sigCache.get(key, { skipTtl: true });
-    if (cached) return { html: cached, source: "cache" };
+    if (cached) return { html: cached, source: "cache", unassigned: false };
 
-    if (!allowNetwork || !userEmail) return { html: null, source: "none" };
+    if (!allowNetwork || !userEmail) return { html: null, source: "none", unassigned: false };
 
     try {
         const enc = await encryptEmail(userEmail);
-        const html = key === DEFAULT_ID
-            ? (await withTimeout(fetchDefaultSignature(enc), budgetMs, "default fetch")).html
+        const { html, explicit } = key === DEFAULT_ID
+            ? await withTimeout(fetchDefaultSignature(enc), budgetMs, "default fetch")
             : await withTimeout(fetchSignatureById(key, enc), budgetMs, `sig fetch ${key}`);
         if (html) {
             sigCache.set(key, html);
-            return { html, source: "network" };
+            return { html, source: "network", unassigned: false };
         }
+        // Definitive empty answer = nothing is assigned server-side.
+        return { html: null, source: "none", unassigned: !!explicit };
     } catch (e) {
         warn(`resolveSigHtml failed id=${key}:`, e.message);
+        return { html: null, source: "none", unassigned: false };
     }
-    return { html: null, source: "none" };
 }
 
 // Revalidate in the background and refresh the cache. Returns fresh HTML only
@@ -651,8 +664,8 @@ async function revalidateSigHtml(id, userEmail, appliedHtml) {
     const key = String(id);
     try {
         const enc = await encryptEmail(userEmail);
-        const html = key === DEFAULT_ID
-            ? (await fetchDefaultSignature(enc)).html
+        const { html } = key === DEFAULT_ID
+            ? await fetchDefaultSignature(enc)
             : await fetchSignatureById(key, enc);
         if (!html) return null;
         sigCache.set(key, html);
@@ -926,21 +939,27 @@ async function writeSignature(item, html, { isSendTime = false } = {}) {
 async function applyById(item, id, userEmail, seq, { revalidate = false, isSendTime = false } = {}) {
     const key = String(id);
 
-    const { html, source } = await resolveSigHtml(key, userEmail, {
+    const { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
         budgetMs: isSendTime ? FETCH_BUDGET_MS : 10_000,
     });
 
     if (!html) {
         // Never blank the body or substitute a guess: whatever is there already
         // is better than nothing.
-        warn(`could not resolve id=${key} — leaving body as-is`);
-        if (!isSendTime) notifyError(item, "Signature not available. Please contact Admin.");
+        warn(`could not resolve id=${key} (unassigned=${unassigned}) — leaving body as-is`);
+        if (!isSendTime) {
+            notifyError(item, unassigned
+                ? "No signature is assigned to your account. Please contact Admin."
+                : "Couldn't load your signature. Check your connection, or contact Admin.");
+        }
         return false;
     }
     if (!isCurrent(seq)) { log(`stale write dropped (seq=${seq}, current=${_writeSeq})`); return false; }
 
     const ok = await writeSignature(item, html, { isSendTime });
     if (!ok) return false;
+    // Clear any earlier failure banner now that a write has succeeded.
+    removeNotification(item);
     log(`applied id=${key} from ${source}`);
 
     if (revalidate && source === "cache" && userEmail && !isSendTime) {
