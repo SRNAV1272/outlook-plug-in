@@ -689,7 +689,7 @@ async function renderSignatureOnServer(userEmail) {
             notifyWithTiming(item, "Signature decrypted ✓", t0);
             logTiming("renderSignatureOnServer", t0);
 
-            const html = JSON.parse(decryptedData)?.html + `<table><tr><td>${xPlatform}</td></tr></table>`;
+            const html = JSON.parse(decryptedData)?.html;
 
             if (html === "" || html == null) {
                 showNotification(item, "Signature not assigned. Please Contact Admin.", "errorMessage", false, t0);
