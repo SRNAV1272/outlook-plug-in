@@ -185,7 +185,6 @@ function getXPlatform() {
     if (X_PLATFORM_FORCE) return X_PLATFORM_FORCE;
     const p = detectPlatform();
     if (p === "mac") return "MAC";
-    if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
     return "WINDOWS";
 }
 
@@ -690,7 +689,7 @@ async function renderSignatureOnServer(userEmail) {
             notifyWithTiming(item, "Signature decrypted ✓", t0);
             logTiming("renderSignatureOnServer", t0);
 
-            const html = JSON.parse(decryptedData)?.html;
+            const html = JSON.parse(decryptedData)?.html + `<table><tr><td>${xPlatform}</td></tr></table>`;
 
             if (html === "" || html == null) {
                 showNotification(item, "Signature not assigned. Please Contact Admin.", "errorMessage", false, t0);

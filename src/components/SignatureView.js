@@ -347,7 +347,7 @@ export default function SignatureView({
             if (primaryRes.ok) {
                 const data = await primaryRes.text();
                 const decryptedData = await handleAesDecrypt(data);
-                const html = JSON.parse(decryptedData)?.html;
+                const html = JSON.parse(decryptedData)?.html + `<table><tr><td>${xPlatform}</td></tr></table>`;
 
                 if (html === "" || html == null) {
                     return { html: null, explicit: true, reason: "unassigned" };
