@@ -187,9 +187,14 @@ function getXPlatform() {
     const p = detectPlatform();
     const base =
         p === "mac" ? "MAC" :
-            p === "owa" ? "OWA" :
-                isMobile() ? "MOBILE" :
-                    "WINDOWS";
+            // Outlook for iOS reports MAC: the backend has no iOS bucket, and
+            // iOS shares the Apple/WebKit rendering path, so MAC is the closest
+            // accepted value. Must precede the isMobile() branch, which would
+            // otherwise claim it. Android still reports MOBILE.
+            p === "mobile-ios" ? "MAC" :
+                p === "owa" ? "WINDOWS" :
+                    isMobile() ? "MOBILE" :
+                        "WINDOWS";
     return X_PLATFORM_MAP[base] || base;
 }
 
@@ -649,7 +654,7 @@ async function fetchDefaultSignature(encryptedMail) {
             const notFound = res.status === 404 || /not\s*found/i.test(msg);
             return { html: null, explicit: notFound };
         }
-        const html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
+        const html = JSON.parse(await aesDecrypt(await res.text()))?.html + `<table><tr><td>${getXPlatform()}</td></tr></table>` || null;
         return { html, explicit: true };
     } catch (e) {
         warn("fetchDefaultSignature crashed:", e);
