@@ -117,6 +117,13 @@ const INTERNAL_REQUIRES_NO_EXTERNAL = false;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
+// How chatty the in-mail notification bar is.
+//   "errors"  — failures only (quietest; recommended for production)
+//   "status"  — start / applied / failures
+//   "verbose" — status plus per-phase timings (QA builds)
+const NOTIFY_LEVEL = "verbose";
+const NOTIFY_CLEAR_MS = 3000;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  LOGGING
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,23 +156,23 @@ function detectPlatform() {
     })();
 
     const uaMobile = () => {
-        if (ua.includes("android")) return "windows";
-        if (ua.includes("iphone") || ua.includes("ipad")) return "mac";
+        if (ua.includes("android")) return "mobile-android";
+        if (ua.includes("iphone") || ua.includes("ipad")) return "mobile-ios";
         return null;
     };
 
     if (d && PT) {
-        if (d === PT.iOS) return (_platform = "mac");
-        if (d === PT.Android) return (_platform = "windows");
+        if (d === PT.iOS) return (_platform = "mobile-ios");
+        if (d === PT.Android) return (_platform = "mobile-android");
         if (d === PT.Mac) return (_platform = "mac");
         if (d === PT.PC) return (_platform = "windows");
-        if (d === PT.OfficeOnline) return (_platform = uaMobile() || "windows");
-        if (d === PT.Universal) return (_platform = uaMobile() || "windows");
+        if (d === PT.OfficeOnline) return (_platform = uaMobile() || "owa");
+        if (d === PT.Universal) return (_platform = uaMobile() || "owa");
     }
 
     // diagnostics unavailable (requirement set < 1.5, or a stripped runtime).
-    if (ua.includes("outlook-android")) return (_platform = "windows");
-    if (ua.includes("outlook-ios") || ua.includes("outlookmobile")) return (_platform = uaMobile() || "mac");
+    if (ua.includes("outlook-android")) return (_platform = "mobile-android");
+    if (ua.includes("outlook-ios") || ua.includes("outlookmobile")) return (_platform = uaMobile() || "mobile-ios");
     const m = uaMobile();
     if (m) return (_platform = m);
     if (ua.includes("macintosh") || ua.includes("mac os x")) return (_platform = "mac");
@@ -180,8 +187,8 @@ function getXPlatform() {
     const p = detectPlatform();
     const base =
         p === "mac" ? "MAC" :
-            p === "owa" ? "WINDOWS" :
-                isMobile() ? "WINDOWS" :
+            p === "owa" ? "OWA" :
+                isMobile() ? "MOBILE" :
                     "WINDOWS";
     return X_PLATFORM_MAP[base] || base;
 }
@@ -238,15 +245,47 @@ const isCurrent = (seq) => seq === _writeSeq;
 //  NOTIFICATIONS
 // ─────────────────────────────────────────────────────────────────────────────
 
+// `icon` is documented as required for type "informationalMessage" and is meant
+// to be an image resource id from the manifest's <Resources><bt:Images>. OWA
+// tolerates an unknown id and renders the message without an icon; Windows
+// desktop is stricter. "none" is what shipped and works — to be robust across
+// hosts, declare an image resource and put its id here.
+const NOTIF_ICON = "none";
+
+// Guards the auto-clear timer: it only clears the message it was scheduled for,
+// so a later error can never be wiped by an earlier success's timeout.
+let _notifSeq = 0;
+
 function showNotification(item, message, type = "informationalMessage", startMs = null) {
     try {
-        if (typeof item?.notificationMessages?.replaceAsync !== "function") return;
+        const nm = item?.notificationMessages;
+        if (typeof nm?.replaceAsync !== "function") {
+            warn("notificationMessages unavailable on this item — skipping:", message);
+            return;
+        }
+
         let msg = startMs ? `${message} (${since(startMs)})` : message;
-        if (msg.length > 140) msg = `${msg.slice(0, 137)}...`;
-        const details = { type, message: msg, icon: "none", persistent: false };
-        item.notificationMessages.replaceAsync(NOTIF_KEY, details, (r) => {
+        if (msg.length > 150) msg = `${msg.slice(0, 147)}...`; // host hard limit
+
+        const details = { type, message: msg };
+        if (type === "informationalMessage") {
+            details.icon = NOTIF_ICON;
+            details.persistent = false;
+        }
+
+        _notifSeq++;
+        nm.replaceAsync(NOTIF_KEY, details, (r) => {
             if (r?.status === Office.AsyncResultStatus.Succeeded) return;
-            try { item.notificationMessages.addAsync(NOTIF_KEY, details, () => { }); } catch (_) { }
+            // replaceAsync fails when the key is not present yet — add instead.
+            try {
+                nm.addAsync(NOTIF_KEY, details, (r2) => {
+                    if (r2?.status !== Office.AsyncResultStatus.Succeeded) {
+                        warn("notification failed:", r2?.error?.code, r2?.error?.message, details);
+                    }
+                });
+            } catch (e) {
+                warn("notification addAsync threw:", e);
+            }
         });
     } catch (e) {
         warn("showNotification threw, ignoring:", e);
@@ -255,6 +294,22 @@ function showNotification(item, message, type = "informationalMessage", startMs 
 
 function removeNotification(item) {
     try { item?.notificationMessages?.removeAsync?.(NOTIF_KEY, () => { }); } catch (_) { }
+}
+
+// Clear after a delay, but only if nothing newer has been shown since.
+function clearNotificationSoon(item, ms = NOTIFY_CLEAR_MS) {
+    const mine = _notifSeq;
+    setTimeout(() => {
+        if (mine === _notifSeq) removeNotification(item);
+    }, ms);
+}
+
+// Progress/status messages, suppressed unless NOTIFY_LEVEL allows them.
+// Timings are attached only at "verbose" — they are QA instrumentation, not
+// something an end user should read.
+function notifyStatus(item, message, startMs = null) {
+    if (NOTIFY_LEVEL === "errors") return;
+    showNotification(item, message, "informationalMessage", NOTIFY_LEVEL === "verbose" ? startMs : null);
 }
 
 const notifyError = (item, msg) => showNotification(item, msg, "errorMessage");
@@ -938,6 +993,12 @@ async function writeSignature(item, html, { isSendTime = false } = {}) {
  */
 async function applyById(item, id, userEmail, seq, { revalidate = false, isSendTime = false } = {}) {
     const key = String(id);
+    const t0 = Date.now();
+
+    // Only announce a wait if there is one: a cache hit writes in ~300ms.
+    if (!isSendTime && !sigCache.get(key, { skipTtl: true })) {
+        notifyStatus(item, "Loading your signature...", t0);
+    }
 
     const { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
         budgetMs: isSendTime ? FETCH_BUDGET_MS : 10_000,
@@ -958,9 +1019,14 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
 
     const ok = await writeSignature(item, html, { isSendTime });
     if (!ok) return false;
-    // Clear any earlier failure banner now that a write has succeeded.
-    removeNotification(item);
     log(`applied id=${key} from ${source}`);
+
+    if (!isSendTime) {
+        notifyStatus(item, "Signature applied", t0);
+        clearNotificationSoon(item);
+    } else {
+        removeNotification(item);
+    }
 
     if (revalidate && source === "cache" && userEmail && !isSendTime) {
         // Background only — never blocks the user, never races the token.
@@ -1095,6 +1161,7 @@ const applySignature = async function (event = { completed: () => { } }) {
     try {
         if (!item) return complete();
         log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()})`);
+        notifyStatus(item, "Preparing your signature...", t0);
 
         const seq = beginWrite();
         const userEmail = mailbox?.userProfile?.emailAddress;
