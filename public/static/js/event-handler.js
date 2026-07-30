@@ -1,238 +1,267 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v6 — Mac send-time rule fix)
+//  CardByte Outlook Add-in — event-handler.js (v7)
 //
-//  WHAT v6 FIXES (on top of v5)
+//  ARCHITECTURE: THE SIGNATURE ID IS THE STATE. THE HTML IS A DISPOSABLE CACHE.
 //
-//  Symptom: on Mac desktop, compose/reply applied the CORRECT signature, but
-//  pressing Send replaced it with rule 2/3's signature (a "compose"+"internal"
-//  rule) whenever To contained both internal and external recipients.
+//  Every decision point produces an id (a rule's signatureId, or DEFAULT_ID).
+//  The id is persisted on the item; HTML is always re-derivable from the id via
+//  cache-then-network. Consequences:
 //
-//  Root cause: the Mac send handler runs in a FRESH WKWebView. The module-level
-//  `_composeTypeByItem` WeakMap is empty there, so getComposeType() re-detected
-//  from scratch — and v5's detectComposeType() ended with an unconditional
-//  `return "compose"`. Any failure/timeout of getComposeTypeAsync (or a bare
-//  subject) silently produced composeType === "compose" on a REPLY. With both
-//  hasInternal and hasExternal true, the compose+internal rule then won on
-//  priority and overwrote the correct reply signature. Windows/OWA/Safari share
-//  a single runtime, never re-detect, and so were never affected.
+//   • Send time is uniform: decide id -> resolve html -> ONE body write.
+//     No "trust whatever is in the body", so a deleted or race-clobbered
+//     signature block is corrected at send.
+//   • The Mac send runtime (fresh WKWebView, empty localStorage) is no longer a
+//     special case — a cache miss is just a bounded fetch.
+//   • Compose does ONE body write per event instead of four (v6 ran
+//     applySignatureCore's cached-apply + its post-network re-apply, twice
+//     over, concurrently with the rule apply — see WRITE TOKEN below).
 //
-//  v6 changes:
-//  1. COMPOSE TYPE IS PERSISTED ON THE ITEM (cardbyte_compose_type custom
-//     property). The send runtime reads the compose runtime's decision instead
-//     of re-deriving it. This also covers Mac returning "newMail" for a reply.
-//  2. NO SILENT "compose" GUESS. detectComposeTypeRaw() returns null when it
-//     genuinely cannot tell. At send time (strictComposeType) an unknown type
-//     refuses to match context-specific rules and falls through to the
-//     persisted-active-signature path — which is the correct answer anyway.
-//     getComposeTypeAsync is also wrapped in a 1.5s timeout so a dead callback
-//     can't burn the whole send budget.
-//  3. SNAPSHOT SHORT-CIRCUIT. Compose time records the recipient set alongside
-//     the signature it applied. If recipients are unchanged at send time, we
-//     trust the applied signature and skip re-evaluation entirely — killing the
-//     bug in the common case and saving the 2.5s Mac fetch.
-//  4. SINGLE SHARED CustomProperties HANDLE per item (_propsByItem). v5 loaded
-//     a fresh snapshot in each of getManualOverride / setActiveSigOnItem and
-//     saved independently, so concurrent saveAsync calls clobbered each other.
-//  5. recipientTypeMatches(): "internal" can now mean "ALL recipients are
-//     internal" via INTERNAL_REQUIRES_NO_EXTERNAL. This is a PRODUCT DECISION
-//     affecting every platform — see the constant. Default is v5 behavior.
-//  6. Removed the dead `item.inReplyToId` branch (not an Office.js compose API
-//     — it never fired, and it looked like a safety net that wasn't there).
-//  7. X_PLATFORM_FORCE is a real constant again instead of commented-out code.
-//  8. CB_VERSION is logged on load, so you can confirm which build Mac has
-//     actually cached.
+//  WRITE TOKEN. Windows/OWA share one runtime, so OnNewMessageCompose and
+//  OnMessageRecipientsChanged overlap and both write the body across long
+//  awaits. Each entry point takes a seq from beginWrite(); a write is dropped
+//  if seq is no longer current. Last decision wins deterministically instead of
+//  by network luck.
 //
-//  DEPLOYMENT PREREQS FOR MAC (not fixable in this file — verify these):
-//  a) https://ns-enterprise.cardbyte.ai/.well-known/microsoft-officeaddins-allowed.json
-//     must exist and list this add-in's ID and the full URL of this JS file,
-//     and the API must return proper CORS headers. Without it, ALL fetches
-//     from the Mac event runtime reject with "TypeError: Load failed".
-//  b) Manifest must be the ADD-IN ONLY (XML) manifest for Mac, and LaunchEvents
-//     must include OnNewMessageCompose, OnMessageRecipientsChanged,
-//     OnMessageFromChanged, OnMessageSend.
-//  c) Debug on Mac: defaults write com.microsoft.Outlook
-//     OfficeWebAddinDeveloperExtras -bool true  -> inspect via Safari Develop.
+//  CHANGES FROM v6 THAT ALTER BEHAVIOUR — VALIDATE THESE:
+//   1. Recipient POLLING and the 4-minute MAC_KEEPALIVE are gone. Deferring
+//      event.completed() for 4 min can delay or drop OnMessageSend, since the
+//      event runtime serialises activations. Recipient tracking now relies on
+//      the OnMessageRecipientsChanged LaunchEvent. Confirm it fires on your Mac
+//      build; if it does not, re-add polling there specifically.
+//   2. An empty recipient list no longer resets the body to the default. OWA
+//      fires mid-typing with zero recipients; v6 wrote the default on each one.
+//   3. X_PLATFORM_FORCE is removed. The real platform is reported, including a
+//      new "OWA" value. Verify the backend accepts MAC / OWA / MOBILE before
+//      deploying, or set X_PLATFORM_MAP below to collapse them.
+//   4. Default-signature HTML shares the one id-keyed cache (id = "default").
+//      The legacy cardbyte_cached_signature key is still read, so a warm cache
+//      written by the taskpane build is not thrown away.
 //
-//  HOW TO CONFIRM THE FIX: send a reply on Mac and look for the
-//  "[CardByte] Rule evaluation context:" line emitted during onSendHandler.
-//  composeType must be "reply". You should usually see the snapshot
-//  short-circuit fire before rule evaluation even runs.
+//  DEPLOYMENT PREREQS FOR MAC (not fixable in this file):
+//   a) /.well-known/microsoft-officeaddins-allowed.json must list the add-in id
+//      and this file's URL, and the API must send CORS headers. Otherwise every
+//      fetch from the Mac event runtime rejects with "TypeError: Load failed".
+//   b) XML (add-in only) manifest with LaunchEvents: OnNewMessageCompose,
+//      OnMessageRecipientsChanged, OnMessageFromChanged, OnMessageSend.
+//   c) Mac debugging: defaults write com.microsoft.Outlook
+//      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v6.0.0";
+const CB_VERSION = "v7.0.0";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
 
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-
 const BASE_URL = "https://newqa-enterprise.cardbyte.ai/email-signature";
 
-const SESSION_KEY = "cardbyte_session_id";
-const CACHE_KEY = "cardbyte_cached_signature";
-const CACHE_SESSION_KEY = "cardbyte_cached_signature_session";
-const CACHE_TIMESTAMP_KEY = "cardbyte_cached_signature_ts";
-const CACHE_TTL_MS = 5 * 60 * 1000;
+// The id standing for "the user's default (non-rule) signature".
+// Replace with a real backend id when /html/outlook/get-active returns one;
+// that removes the only remaining special case in resolveSigHtml().
+const DEFAULT_ID = "default";
 
-const RULES_CACHE_KEY = "cardbyte_cached_rules";
-const RULES_CACHE_TIMESTAMP_KEY = "cardbyte_cached_rules_ts";
-const RULES_CACHE_TTL_MS = 5 * 60 * 1000;
+// localStorage / sessionStorage keys
+const K_SESSION = "cardbyte_session_id";
+const K_SIG_CACHE = "cardbyte_sig_cache";              // { [id]: { html, ts } }
+const K_SIG_CACHE_LEGACY_DEFAULT = "cardbyte_cached_signature";
+const K_RULES = "cardbyte_cached_rules";
+const K_RULES_TS = "cardbyte_cached_rules_ts";
+const K_ACTIVE_SIG = "cardbyte_active_sig_id";
+const K_ACTIVE_SIG_TS = "cardbyte_active_sig_ts";
 
-const SIG_BY_ID_CACHE_KEY = "cardbyte_sig_by_id";
-const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;
-const SIG_BY_ID_PURGE_MS = 24 * 60 * 60 * 1000;
+// Item custom properties — the cross-runtime channel (survives Mac's fresh
+// WKWebView per event, unlike localStorage).
+const P_ACTIVE_SIG = "cardbyte_active_sig_id";
+const P_MANUAL_SIG = "cardbyte_manual_sig_id";
+const P_COMPOSE_TYPE = "cardbyte_compose_type";
+const P_RECIP_SNAPSHOT = "cardbyte_recip_snapshot";
 
-const ACTIVE_SIG_KEY = "cardbyte_active_sig_id";
-const ACTIVE_SIG_TS_KEY = "cardbyte_active_sig_ts";
+// roamingSettings — mailbox-scoped, ~32KB total. Small values only; never HTML.
+const R_ACTIVE_SIG = "cb_active_sig";
+const R_RULES = "cb_rules";
+const R_RULES_MAX_BYTES = 20 * 1024;
+
+const SIG_TTL_MS = 5 * 60 * 1000;
+const SIG_PURGE_MS = 24 * 60 * 60 * 1000;
+const RULES_TTL_MS = 5 * 60 * 1000;
 const ACTIVE_SIG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-// Item-scoped custom property names (cross-runtime, cross-platform).
-const ACTIVE_SIG_PROP = "cardbyte_active_sig_id";
-const MANUAL_OVERRIDE_PROP = "cardbyte_manual_sig_id";
-const COMPOSE_TYPE_PROP = "cardbyte_compose_type";   // v6
-const RECIP_SNAPSHOT_PROP = "cardbyte_recip_snapshot"; // v6
+// One size ceiling, actually enforced. v6 declared 500KB/200KB constants and
+// then hardcoded 100KB in the apply path; observed rule signatures are ~42KB.
+const MAX_SIG_BYTES = 200 * 1024;
 
-// Sentinel meaning "the default (non-rule) signature is what's in the body".
-const DEFAULT_SIG_SENTINEL = "default";
-
-// roamingSettings keys (mailbox-scoped, ~32KB total budget — small values only)
-const ROAM_ACTIVE_SIG = "cb_active_sig";
-const ROAM_RULES = "cb_rules";
-const ROAM_RULES_TS = "cb_rules_ts";
-const ROAM_MAX_RULES_BYTES = 20 * 1024;
-
-const MAX_SAFE_HTML_SIZE = 500_000;
-const MAX_SAFE_HTML_SIZE_MOBILE = 200_000;
-const MAX_RETRIES = 2;
-const RECIPIENT_POLL_MS = 900;
-
-// Send-time budgets. Mac gets a longer budget + one quick network try because
-// its event runtime starts with an empty cache.
-const SEND_TIMEOUT_MS_MAC = 12_000;
-const SEND_TIMEOUT_MS_DEFAULT = 5_000;
-const SEND_QUICK_FETCH_MS = 2_500;
-
-// v6: hard ceiling on getComposeTypeAsync so a callback that never fires
-// cannot consume the send budget.
+// Send budgets. Mac starts cold, so it gets headroom plus per-leg fetch bounds.
+const SEND_BUDGET_MS_MAC = 12_000;
+const SEND_BUDGET_MS = 5_000;
+const FETCH_BUDGET_MS = 2_500;
 const COMPOSE_TYPE_TIMEOUT_MS = 1_500;
 
-// Keep the Mac compose event runtime alive so recipient polling keeps working.
-const MAC_KEEPALIVE_MS = 4 * 60 * 1000;
+// Let OWA's recipient events settle before reading; avoids a burst of
+// evaluations while an address is still being typed.
+const RECIPIENT_SETTLE_MS = 350;
 
-// Set to "WINDOWS" to force the old behavior if the backend rejects "MAC".
-// null => report the real platform.
-const X_PLATFORM_FORCE = "WINDOWS";
+// Set a value to collapse a platform onto another header value if the backend
+// rejects it, e.g. { OWA: "WINDOWS" }. Empty = report the truth.
+const X_PLATFORM_MAP = {};
 
-// v6 / Fix 4 — PRODUCT DECISION, affects every platform.
-//   false (v5 behavior): recipientType "internal" matches if ANY recipient is
-//         internal. With mixed internal+external To, BOTH the internal and the
-//         external rule match and priority decides the winner.
+// PRODUCT DECISION, all platforms.
+//   false: recipientType "internal" matches if ANY recipient is internal, so a
+//          mixed To matches both the internal and external rules and priority
+//          decides.
 //   true : "internal" matches only when EVERY recipient is internal.
-// Flip to true only if that is the intended product semantics.
 const INTERNAL_REQUIRES_NO_EXTERNAL = false;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
-let CACHED_SIGNATURE_HTML = null;
+// ─────────────────────────────────────────────────────────────────────────────
+//  LOGGING
+// ─────────────────────────────────────────────────────────────────────────────
 
-// =============================================================================
-//  TIMING LOGGER
-// =============================================================================
+const log = (...a) => console.log("[CardByte]", ...a);
+const warn = (...a) => console.warn("[CardByte]", ...a);
+const err = (...a) => console.error("[CardByte]", ...a);
+const since = (t0) => `${Date.now() - t0}ms`;
+const timed = (label, t0) => log(`⏱ ${label}: ${since(t0)}`);
 
-function logTiming(label, startMs) {
-    const elapsed = Date.now() - startMs;
-    console.log(`[CardByte] ⏱ ${label}: ${elapsed}ms`);
-}
+// ─────────────────────────────────────────────────────────────────────────────
+//  PLATFORM
+//  v6 read Office.context.platform, which does not exist — it resolved to ""
+//  and every classification fell through to a user-agent guess (and, with
+//  X_PLATFORM_FORCE set, to the literal "WINDOWS"). The real property is
+//  Office.context.diagnostics.platform (Mailbox 1.5+); UA stays as fallback.
+// ─────────────────────────────────────────────────────────────────────────────
 
-// =============================================================================
-//  PLATFORM DETECTION
-// =============================================================================
+let _platform = null;
 
 function detectPlatform() {
-    const platform = (Office?.context?.platform || "").toLowerCase();
-    const ua = (navigator?.userAgent || "").toLowerCase();
+    if (_platform) return _platform;
 
-    if (platform === "ios" || platform === "iphone" || platform === "ipad") return "mobile-ios";
-    if (platform === "android") return "mobile-android";
+    const PT = typeof Office !== "undefined" ? Office.PlatformType : null;
+    const d = (() => {
+        try { return Office?.context?.diagnostics?.platform || null; } catch (_) { return null; }
+    })();
+    const ua = (() => {
+        try { return (navigator?.userAgent || "").toLowerCase(); } catch (_) { return ""; }
+    })();
 
-    if (ua.includes("outlookmobile") || ua.includes("outlook-ios") || ua.includes("outlook-android"))
-        return ua.includes("android") ? "mobile-android" : "mobile-ios";
+    const uaMobile = () => {
+        if (ua.includes("android")) return "mobile-android";
+        if (ua.includes("iphone") || ua.includes("ipad")) return "mobile-ios";
+        return null;
+    };
 
-    if (
-        (platform === "officeonline" || platform === "web" || platform === "") &&
-        (ua.includes("iphone") || ua.includes("ipad") || ua.includes("android"))
-    ) return ua.includes("android") ? "mobile-android" : "mobile-ios";
+    if (d && PT) {
+        if (d === PT.iOS) return (_platform = "mobile-ios");
+        if (d === PT.Android) return (_platform = "mobile-android");
+        if (d === PT.Mac) return (_platform = "mac");
+        if (d === PT.PC) return (_platform = "windows");
+        if (d === PT.OfficeOnline) return (_platform = uaMobile() || "owa");
+        if (d === PT.Universal) return (_platform = uaMobile() || "owa");
+    }
 
-    if (
-        platform === "mac" ||
-        ((platform === "" || platform === "desktop") &&
-            (ua.includes("macintosh") || ua.includes("mac os x")) &&
-            !ua.includes("iphone") && !ua.includes("ipad"))
-    ) return "mac";
+    // diagnostics unavailable (requirement set < 1.5, or a stripped runtime).
+    if (ua.includes("outlook-android")) return (_platform = "mobile-android");
+    if (ua.includes("outlook-ios") || ua.includes("outlookmobile")) return (_platform = uaMobile() || "mobile-ios");
+    const m = uaMobile();
+    if (m) return (_platform = m);
+    if (ua.includes("macintosh") || ua.includes("mac os x")) return (_platform = "mac");
 
-    if (platform === "officeonline" || platform === "web" || platform === "") return "owa";
-    return "desktop";
+    return (_platform = "owa");
 }
 
-const isMobile = () => { const p = detectPlatform(); return p === "mobile-ios" || p === "mobile-android"; };
-const isOWA = () => detectPlatform() === "owa";
 const isMac = () => detectPlatform() === "mac";
-const getMaxHtmlSize = () => isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
+const isMobile = () => detectPlatform().startsWith("mobile-");
 
 function getXPlatform() {
-    // if (X_PLATFORM_FORCE) return X_PLATFORM_FORCE;
     const p = detectPlatform();
-    if (p === "mac") return "MAC";
-    return "WINDOWS";
+    const base =
+        p === "mac" ? "MAC" :
+            p === "owa" ? "OWA" :
+                isMobile() ? "MOBILE" :
+                    "WINDOWS";
+    return X_PLATFORM_MAP[base] || base;
 }
 
-// =============================================================================
-//  NOTIFICATION HELPERS
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+//  ASYNC UTILITIES
+// ─────────────────────────────────────────────────────────────────────────────
 
-function showNotification(item, message, type = "informationalMessage", persistent = false, startMs = null) {
-    try {
-        if (!item || typeof item.notificationMessages?.addAsync !== "function") return;
+// Note: this bounds how long we WAIT, it cannot cancel the underlying work.
+function withTimeout(promise, ms, label = "operation") {
+    let timer;
+    return Promise.race([
+        Promise.resolve(promise).finally(() => clearTimeout(timer)),
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        }),
+    ]);
+}
 
-        let finalMessage = message;
-        if (startMs) finalMessage += ` (${Date.now() - startMs}ms)`;
-        if (finalMessage.length > 140) finalMessage = finalMessage.slice(0, 137) + "...";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-        const details = { type, message: finalMessage, icon: "none", persistent };
-
-        item.notificationMessages.replaceAsync(NOTIF_KEY, details, (result) => {
-            try {
-                if (result.status !== "succeeded") {
-                    item.notificationMessages.addAsync(NOTIF_KEY, details, (r) => {
-                        if (r.status !== "succeeded")
-                            console.warn("[CardByte] addAsync notification failed:", r.error?.message);
-                    });
+// Wrap a callback-style Office API in a promise with a hard ceiling, resolving
+// to `fallback` on failure or timeout so no caller can hang.
+function officeAsync(fn, { ms = COMPOSE_TYPE_TIMEOUT_MS, fallback = null, label = "office call" } = {}) {
+    return new Promise((resolve) => {
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
+        const timer = setTimeout(() => { warn(`${label} timed out after ${ms}ms`); finish(fallback); }, ms);
+        try {
+            fn((res) => {
+                if (res?.status !== Office.AsyncResultStatus.Succeeded) {
+                    warn(`${label} failed:`, res?.error?.message);
+                    return finish(fallback);
                 }
-            } catch (e) {
-                console.warn("[CardByte] notification callback threw:", e);
-            }
+                finish(res);
+            });
+        } catch (e) {
+            warn(`${label} threw:`, e);
+            finish(fallback);
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  WRITE TOKEN
+//  Guards every body/state write against a newer decision made during an await.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _writeSeq = 0;
+const beginWrite = () => ++_writeSeq;
+const isCurrent = (seq) => seq === _writeSeq;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+function showNotification(item, message, type = "informationalMessage", startMs = null) {
+    try {
+        if (typeof item?.notificationMessages?.replaceAsync !== "function") return;
+        let msg = startMs ? `${message} (${since(startMs)})` : message;
+        if (msg.length > 140) msg = `${msg.slice(0, 137)}...`;
+        const details = { type, message: msg, icon: "none", persistent: false };
+        item.notificationMessages.replaceAsync(NOTIF_KEY, details, (r) => {
+            if (r?.status === Office.AsyncResultStatus.Succeeded) return;
+            try { item.notificationMessages.addAsync(NOTIF_KEY, details, () => { }); } catch (_) { }
         });
     } catch (e) {
-        console.warn("[CardByte] showNotification threw, ignoring:", e);
+        warn("showNotification threw, ignoring:", e);
     }
 }
 
 function removeNotification(item) {
-    if (!item || typeof item.notificationMessages?.removeAsync !== "function") return;
-    item.notificationMessages.removeAsync(NOTIF_KEY, () => { });
+    try { item?.notificationMessages?.removeAsync?.(NOTIF_KEY, () => { }); } catch (_) { }
 }
 
-function notifyWithTiming(item, phase, startMs) {
-    const elapsed = Date.now() - startMs;
-    console.log(`[CardByte] ${phase}: ${elapsed}ms`);
-    showNotification(item, phase, "informationalMessage", false, startMs);
-}
+const notifyError = (item, msg) => showNotification(item, msg, "errorMessage");
 
-// =============================================================================
-//  CRYPTO — AES-CBC via Web Crypto API (unchanged)
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+//  CRYPTO — AES-CBC via Web Crypto
+// ─────────────────────────────────────────────────────────────────────────────
 
 function base64ToArrayBuffer(base64) {
     let b = base64.replace(/-/g, "+").replace(/_/g, "/");
@@ -251,69 +280,59 @@ function arrayBufferToBase64(buffer) {
     return btoa(bin);
 }
 
-async function handleAesDecrypt(encryptedText, generatedKey) {
-    const t0 = Date.now();
+async function importAesKey(usage) {
+    const keyBuffer = base64ToArrayBuffer(AES_KEY);
+    if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
+        throw new Error(`AES key must be 16 or 32 bytes, got ${keyBuffer.byteLength}`);
+    }
+    return crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, [usage]);
+}
+
+async function aesDecrypt(encryptedText) {
+    if (!encryptedText) return "";
     try {
-        if (!encryptedText) return "";
-        const keyToUse = generatedKey || AES_KEY;
-        let keyBuffer;
-        try { keyBuffer = base64ToArrayBuffer(keyToUse); }
-        catch (e) { console.error("Failed to decode key:", e); return encryptedText; }
-
-        if (keyBuffer.byteLength !== 16 && keyBuffer.byteLength !== 32) {
-            if (generatedKey && generatedKey !== AES_KEY) return handleAesDecrypt(encryptedText, AES_KEY);
-            return encryptedText;
-        }
-
-        const ivBuffer = base64ToArrayBuffer(AES_IV);
-        if (ivBuffer.byteLength !== 16) return encryptedText;
-
-        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["decrypt"]);
-
-        let encryptedBuffer;
-        try { encryptedBuffer = base64ToArrayBuffer(encryptedText); }
-        catch { return encryptedText; }
-
-        const decryptedBuffer = await crypto.subtle.decrypt({ name: "AES-CBC", iv: ivBuffer }, key, encryptedBuffer);
-        const result = new TextDecoder().decode(decryptedBuffer);
-        logTiming("handleAesDecrypt", t0);
-        return result;
-    } catch (err) {
-        logTiming("handleAesDecrypt (error)", t0);
+        const key = await importAesKey("decrypt");
+        const iv = base64ToArrayBuffer(AES_IV);
+        if (iv.byteLength !== 16) throw new Error("AES IV must be 16 bytes");
+        const plain = await crypto.subtle.decrypt(
+            { name: "AES-CBC", iv },
+            key,
+            base64ToArrayBuffer(encryptedText)
+        );
+        return new TextDecoder().decode(plain);
+    } catch (e) {
+        warn("aesDecrypt failed, returning input unchanged:", e.message);
         return encryptedText;
     }
 }
 
 async function encryptEmail(email = "") {
-    const t0 = Date.now();
+    if (!email.trim()) return "";
     try {
-        if (!email || email.trim() === "") return "";
-        const keyBuffer = base64ToArrayBuffer(AES_KEY);
-        const ivBuffer = base64ToArrayBuffer(AES_IV);
-        const key = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CBC" }, false, ["encrypt"]);
-        const data = new TextEncoder().encode(email);
-        const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: ivBuffer }, key, data);
-        const result = arrayBufferToBase64(encrypted);
-        logTiming("encryptEmail", t0);
-        return result;
-    } catch (err) {
-        logTiming("encryptEmail (error)", t0);
+        const key = await importAesKey("encrypt");
+        const iv = base64ToArrayBuffer(AES_IV);
+        const enc = await crypto.subtle.encrypt(
+            { name: "AES-CBC", iv },
+            key,
+            new TextEncoder().encode(email)
+        );
+        return arrayBufferToBase64(enc);
+    } catch (e) {
+        err("encryptEmail failed:", e);
         return "";
     }
 }
 
-// =============================================================================
-//  STORAGE — MULTI-SOURCE
-//  L1: in-memory (this runtime).  L2: localStorage (best effort — EMPTY in the
-//  Mac event runtime).  L3: roamingSettings (mailbox-scoped, works in every
-//  runtime incl. Mac events; ~32KB budget so only small values live here).
-//  Signature HTML never goes to roaming.
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+//  STORAGE
+//  L1 memory (this runtime) / L2 localStorage (empty in Mac event runtime) /
+//  L3 roamingSettings (mailbox-scoped, reaches every runtime, tiny budget).
+// ─────────────────────────────────────────────────────────────────────────────
 
 const _mem = new Map();
 
 const store = {
-    get: (key) => {
+    get(key) {
         if (_mem.has(key)) return _mem.get(key);
         try {
             const v = localStorage.getItem(key);
@@ -321,90 +340,149 @@ const store = {
         } catch (_) { }
         return null;
     },
-    set: (key, val) => {
+    set(key, val) {
         _mem.set(key, val);
         try { localStorage.setItem(key, val); } catch (_) { }
     },
-    remove: (...keys) => {
-        keys.forEach(k => _mem.delete(k));
-        try { keys.forEach(k => localStorage.removeItem(k)); } catch (_) { }
+    remove(...keys) {
+        keys.forEach((k) => _mem.delete(k));
+        try { keys.forEach((k) => localStorage.removeItem(k)); } catch (_) { }
     },
-    getJson: (key) => {
+    getJson(key) {
         try { const v = store.get(key); return v ? JSON.parse(v) : null; } catch (_) { return null; }
     },
-    setJson: (key, val) => {
+    setJson(key, val) {
         try { store.set(key, JSON.stringify(val)); } catch (_) { }
     },
 };
 
-function roamGet(key) {
-    try { return Office?.context?.roamingSettings?.get(key) ?? null; } catch (_) { return null; }
-}
-function roamSet(key, val) {
-    try {
-        const rs = Office?.context?.roamingSettings;
-        if (!rs) return;
-        rs.set(key, val);
-        rs.saveAsync(() => { });
-    } catch (_) { }
-}
-function roamRemove(key) {
-    try {
-        const rs = Office?.context?.roamingSettings;
-        if (!rs) return;
-        rs.remove(key);
-        rs.saveAsync(() => { });
-    } catch (_) { }
-}
+const roam = {
+    get(key) {
+        try { return Office?.context?.roamingSettings?.get(key) ?? null; } catch (_) { return null; }
+    },
+    set(key, val) {
+        try {
+            const rs = Office?.context?.roamingSettings;
+            if (!rs) return;
+            rs.set(key, val);
+            rs.saveAsync(() => { });
+        } catch (_) { }
+    },
+    remove(key) {
+        try {
+            const rs = Office?.context?.roamingSettings;
+            if (!rs) return;
+            rs.remove(key);
+            rs.saveAsync(() => { });
+        } catch (_) { }
+    },
+};
 
-// =============================================================================
-//  SESSION ID
-// =============================================================================
-
-function getOrCreateSessionId() {
+function getSessionId() {
     try {
-        let sid = sessionStorage.getItem(SESSION_KEY);
+        let sid = sessionStorage.getItem(K_SESSION);
         if (!sid) {
             sid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36);
-            sessionStorage.setItem(SESSION_KEY, sid);
+            sessionStorage.setItem(K_SESSION, sid);
         }
         return sid;
     } catch (_) {
-        return "mobile-session";
+        return "no-session";
     }
 }
 
-// =============================================================================
-//  ITEM CUSTOM PROPERTIES — v6: ONE shared handle per item.
-//
-//  v5 loaded a fresh CustomProperties snapshot inside each of
-//  getManualOverride / getActiveSigFromItem / setActiveSigOnItem and called
-//  saveAsync on each one independently. Two concurrent writers each held a
-//  stale snapshot, so the later saveAsync silently discarded the other's key.
-//  A single cached handle per item makes writes additive.
-//
-//  Caveat kept from v5: Mac doesn't cache custom props offline, and saveAsync
-//  is fire-and-forget — this is the PRIMARY cross-runtime channel, not the
-//  only one. localStorage + roamingSettings remain as fallbacks.
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+//  SIGNATURE HTML CACHE — one id-keyed map, DEFAULT_ID included.
+//  HTML is disposable: a miss costs a fetch, never correctness.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const sigCache = {
+    read() { return store.getJson(K_SIG_CACHE) || {}; },
+    write(map) { store.setJson(K_SIG_CACHE, map); },
+
+    get(id, { skipTtl = false } = {}) {
+        const key = String(id);
+        const entry = sigCache.read()[key];
+        if (entry?.html) {
+            if (skipTtl || Date.now() - entry.ts <= SIG_TTL_MS) return entry.html;
+            log(`sig cache stale for id=${key}`);
+        }
+        // Migration: a warm default written by the taskpane build.
+        if (key === DEFAULT_ID) {
+            const legacy = store.get(K_SIG_CACHE_LEGACY_DEFAULT);
+            if (legacy) { log("sig cache: using legacy default key"); return legacy; }
+        }
+        return null;
+    },
+
+    set(id, html) {
+        if (!html) return;
+        const map = sigCache.read();
+        map[String(id)] = { html, ts: Date.now() };
+        sigCache.write(map);
+    },
+
+    purge() {
+        const map = sigCache.read();
+        const now = Date.now();
+        let n = 0;
+        for (const id of Object.keys(map)) {
+            if (now - (map[id]?.ts || 0) > SIG_PURGE_MS) { delete map[id]; n++; }
+        }
+        if (n) { sigCache.write(map); log(`purged ${n} stale signature cache entr${n === 1 ? "y" : "ies"}`); }
+    },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RULES CACHE — mirrored to roaming when small enough, so the Mac send
+//  runtime can evaluate without a network round trip.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function getCachedRules({ skipTtl = false } = {}) {
+    if (!skipTtl) {
+        const ts = parseInt(store.get(K_RULES_TS) || "0", 10);
+        if (!ts || Date.now() - ts > RULES_TTL_MS) {
+            const roamed = readRoamedRules();
+            if (roamed) return roamed;
+            log("rules cache stale");
+            return null;
+        }
+    }
+    return store.getJson(K_RULES) || readRoamedRules();
+}
+
+function readRoamedRules() {
+    try {
+        const raw = roam.get(R_RULES);
+        return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+}
+
+function setCachedRules(rulesJson) {
+    store.setJson(K_RULES, rulesJson);
+    store.set(K_RULES_TS, Date.now().toString());
+    try {
+        const s = JSON.stringify(rulesJson);
+        if (s.length <= R_RULES_MAX_BYTES) roam.set(R_RULES, s);
+        else warn(`rulesJson too large to roam (${s.length}B) — Mac event runtime will fetch live`);
+    } catch (_) { }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ITEM CUSTOM PROPERTIES
+//  ONE shared handle per item, and saveAsync is AWAITED. v6 fired and forgot,
+//  so a Send moments after compose could read a property that never landed —
+//  and concurrent writers silently clobbered each other's keys.
+// ─────────────────────────────────────────────────────────────────────────────
 
 const _propsByItem = new WeakMap();
 
 function getProps(item) {
     if (_propsByItem.has(item)) return _propsByItem.get(item);
-    const p = new Promise((resolve) => {
-        if (typeof item?.loadCustomPropertiesAsync !== "function") return resolve(null);
-        try {
-            item.loadCustomPropertiesAsync((res) => {
-                if (res.status !== Office.AsyncResultStatus.Succeeded)
-                    console.warn("[CardByte] loadCustomPropertiesAsync failed:", res.error?.message);
-                resolve(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null);
-            });
-        } catch (e) {
-            console.warn("[CardByte] loadCustomPropertiesAsync threw:", e);
-            resolve(null);
-        }
-    });
+    const p = officeAsync((cb) => item.loadCustomPropertiesAsync(cb), {
+        ms: FETCH_BUDGET_MS,
+        label: "loadCustomPropertiesAsync",
+    }).then((res) => res?.value ?? null);
     _propsByItem.set(item, p);
     return p;
 }
@@ -418,413 +496,300 @@ async function getItemProp(item, key) {
 
 async function setItemProps(item, kv) {
     const props = await getProps(item);
-    if (!props) return;
+    if (!props) return false;
     try {
         for (const [k, v] of Object.entries(kv)) {
             if (v == null) props.remove(k);
             else props.set(k, String(v));
         }
-        props.saveAsync((res) => {
-            if (res.status !== Office.AsyncResultStatus.Succeeded)
-                console.warn("[CardByte] customProps saveAsync failed:", res.error?.message);
+        const res = await officeAsync((cb) => props.saveAsync(cb), {
+            ms: FETCH_BUDGET_MS,
+            label: "customProps saveAsync",
         });
+        return !!res;
     } catch (e) {
-        console.warn("[CardByte] setItemProps threw:", e);
+        warn("setItemProps threw:", e);
+        return false;
     }
 }
 
-async function getManualOverride(item) {
-    return getItemProp(item, MANUAL_OVERRIDE_PROP);
-}
+const getManualOverride = (item) => getItemProp(item, P_MANUAL_SIG);
 
-// =============================================================================
-//  ACTIVE SIGNATURE ID + RECIPIENT SNAPSHOT
-//  Written to item props (per-draft, cross-runtime) + roaming + localStorage.
-//  The snapshot is what lets the send handler know nothing changed since the
-//  compose runtime made its decision.
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+//  ACTIVE SIGNATURE ID (+ recipient snapshot)
+//  This is the authoritative state. Item props are the primary channel;
+//  localStorage and roaming are fallbacks.
+// ─────────────────────────────────────────────────────────────────────────────
 
-async function markActiveSignature(item, id, { snapshot } = {}) {
+async function markActiveSignature(item, id, snapshot = null) {
     if (id == null) {
-        store.remove(ACTIVE_SIG_KEY, ACTIVE_SIG_TS_KEY);
-        roamRemove(ROAM_ACTIVE_SIG);
+        store.remove(K_ACTIVE_SIG, K_ACTIVE_SIG_TS);
+        roam.remove(R_ACTIVE_SIG);
     } else {
-        store.set(ACTIVE_SIG_KEY, String(id));
-        store.set(ACTIVE_SIG_TS_KEY, Date.now().toString());
-        roamSet(ROAM_ACTIVE_SIG, String(id));
+        store.set(K_ACTIVE_SIG, String(id));
+        store.set(K_ACTIVE_SIG_TS, Date.now().toString());
+        roam.set(R_ACTIVE_SIG, String(id));
     }
-
     if (!item) return;
-
-    let snap = snapshot;
-    if (id != null && snap === undefined) {
-        try { snap = serializeRecipients(await getAllRecipientEmails(item)); }
-        catch (_) { snap = null; }
-    }
-
     await setItemProps(item, {
-        [ACTIVE_SIG_PROP]: id == null ? null : String(id),
-        [RECIP_SNAPSHOT_PROP]: id == null ? null : snap,
+        [P_ACTIVE_SIG]: id == null ? null : String(id),
+        [P_RECIP_SNAPSHOT]: id == null ? null : snapshot,
     });
 }
 
 async function getActiveSignatureId(item = null) {
-    // 1. Item custom property — authoritative for THIS draft, cross-runtime.
     if (item) {
-        const fromItem = await getItemProp(item, ACTIVE_SIG_PROP);
+        const fromItem = await getItemProp(item, P_ACTIVE_SIG);
         if (fromItem) return fromItem;
     }
-    // 2. localStorage/memory (works on Windows, same-runtime elsewhere).
-    const id = store.get(ACTIVE_SIG_KEY);
+    const id = store.get(K_ACTIVE_SIG);
     if (id) {
-        const ts = parseInt(store.get(ACTIVE_SIG_TS_KEY) || "0", 10);
+        const ts = parseInt(store.get(K_ACTIVE_SIG_TS) || "0", 10);
         if (!ts || Date.now() - ts <= ACTIVE_SIG_MAX_AGE_MS) return id;
     }
-    // 3. roamingSettings — survives runtime isolation on Mac.
-    const roamed = roamGet(ROAM_ACTIVE_SIG);
+    const roamed = roam.get(R_ACTIVE_SIG);
     return roamed ? String(roamed) : null;
 }
 
-// =============================================================================
-//  DEFAULT SIGNATURE CACHE
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+//  API
+// ─────────────────────────────────────────────────────────────────────────────
 
-function getCachedSignature({ skipTtl = false, skipSessionCheck = false } = {}) {
-    const t0 = Date.now();
-
-    if (skipSessionCheck) {
-        const val = store.get(CACHE_KEY);
-        logTiming("getCachedSignature (skipSessionCheck)", t0);
-        return val;
-    }
-
-    const currentSid = getOrCreateSessionId();
-    if (store.get(CACHE_SESSION_KEY) !== currentSid) {
-        console.log("[CardByte] New session detected — signature cache treated as stale (kept on disk)");
-        logTiming("getCachedSignature (session mismatch)", t0);
-        return null;
-    }
-
-    if (!skipTtl) {
-        const ts = parseInt(store.get(CACHE_TIMESTAMP_KEY) || "0", 10);
-        if (Date.now() - ts > CACHE_TTL_MS) {
-            console.log("[CardByte] Signature cache TTL expired — treated as stale (kept on disk)");
-            logTiming("getCachedSignature (ttl expired)", t0);
-            return null;
-        }
-    }
-
-    const val = store.get(CACHE_KEY);
-    logTiming("getCachedSignature (hit)", t0);
-    return val;
+function apiHeaders(encryptedMail, extra = {}) {
+    return { username: encryptedMail, "X-Platform": getXPlatform(), ...extra };
 }
 
-function setCachedSignature(html) {
-    const t0 = Date.now();
-    const sid = getOrCreateSessionId();
-    try {
-        store.set(CACHE_KEY, html);
-        store.set(CACHE_SESSION_KEY, sid);
-        store.set(CACHE_TIMESTAMP_KEY, Date.now().toString());
-        logTiming("setCachedSignature", t0);
-    } catch (_) {
-        logTiming("setCachedSignature (failed)", t0);
-    }
-}
-
-// =============================================================================
-//  RULES CACHE — mirrored to roamingSettings when small enough.
-// =============================================================================
-
-function getCachedRules({ skipTtl = false, skipSessionCheck = false } = {}) {
-    const t0 = Date.now();
-
-    const readLocal = () => store.getJson(RULES_CACHE_KEY);
-    const readRoam = () => {
-        try {
-            const raw = roamGet(ROAM_RULES);
-            return raw ? JSON.parse(raw) : null;
-        } catch (_) { return null; }
-    };
-
-    if (skipSessionCheck) {
-        const val = readLocal() || readRoam();
-        logTiming("getCachedRules (skipSessionCheck)", t0);
-        return val;
-    }
-
-    const currentSid = getOrCreateSessionId();
-    if (store.get(CACHE_SESSION_KEY) !== currentSid) {
-        console.log("[CardByte] New session detected — rules cache treated as stale (kept on disk)");
-        logTiming("getCachedRules (session mismatch)", t0);
-        return null;
-    }
-
-    if (!skipTtl) {
-        const ts = parseInt(store.get(RULES_CACHE_TIMESTAMP_KEY) || "0", 10);
-        if (Date.now() - ts > RULES_CACHE_TTL_MS) {
-            console.log("[CardByte] Rules cache TTL expired — treated as stale (kept on disk)");
-            logTiming("getCachedRules (ttl expired)", t0);
-            return null;
-        }
-    }
-
-    const val = readLocal() || readRoam();
-    logTiming("getCachedRules (hit)", t0);
-    return val;
-}
-
-function setCachedRules(rulesJson) {
-    const t0 = Date.now();
-    const sid = getOrCreateSessionId();
-    try {
-        store.setJson(RULES_CACHE_KEY, rulesJson);
-        store.set(RULES_CACHE_TIMESTAMP_KEY, Date.now().toString());
-        store.set(CACHE_SESSION_KEY, sid);
-
-        const serialized = JSON.stringify(rulesJson);
-        if (serialized.length <= ROAM_MAX_RULES_BYTES) {
-            roamSet(ROAM_RULES, serialized);
-            roamSet(ROAM_RULES_TS, Date.now().toString());
-        } else {
-            console.warn(`[CardByte] rulesJson too large for roamingSettings (${serialized.length}B > ${ROAM_MAX_RULES_BYTES}B) — Mac event runtime will fetch live`);
-        }
-        logTiming("setCachedRules", t0);
-    } catch (_) {
-        logTiming("setCachedRules (failed)", t0);
-    }
-}
-
-// =============================================================================
-//  PER-SIGNATURE-ID HTML CACHE (localStorage + memory only — too big to roam)
-// =============================================================================
-
-function _readSigByIdMap() { return store.getJson(SIG_BY_ID_CACHE_KEY) || {}; }
-function _writeSigByIdMap(map) { store.setJson(SIG_BY_ID_CACHE_KEY, map); }
-
-function getSigById(signatureId, { skipTtl = false } = {}) {
-    const id = String(signatureId);
-    const map = _readSigByIdMap();
-    const entry = map[id];
-    if (!entry) return null;
-    if (!skipTtl && Date.now() - entry.ts > SIG_BY_ID_TTL_MS) {
-        console.log(`[CardByte] sigById TTL expired for id=${id}`);
-        return null;
-    }
-    return entry.html;
-}
-
-function setSigById(signatureId, html) {
-    const id = String(signatureId);
-    const map = _readSigByIdMap();
-    map[id] = { html, ts: Date.now() };
-    _writeSigByIdMap(map);
-    console.log(`[CardByte] sigById cached: id=${id}`);
-}
-
-function purgeStaleSigById() {
-    const map = _readSigByIdMap();
-    const now = Date.now();
-    let purged = 0;
-    for (const id of Object.keys(map)) {
-        if (now - map[id].ts > SIG_BY_ID_PURGE_MS) { delete map[id]; purged++; }
-    }
-    if (purged > 0) {
-        _writeSigByIdMap(map);
-        console.log(`[CardByte] purgeStaleSigById: removed ${purged} stale entries`);
-    }
-}
-
-// =============================================================================
-//  API LAYER
-// =============================================================================
-
-async function decryptHtmlResponse(rawText) {
-    const decrypted = await handleAesDecrypt(rawText);
-    return JSON.parse(decrypted)?.html || null;
-}
-
-async function fetchAndCacheRules(encryptedMail, xPlatform) {
+async function fetchRules(encryptedMail) {
     try {
         const res = await fetch(`${BASE_URL}/rules-config/get-active`, {
             method: "GET",
-            headers: { "Content-Type": "application/json", username: encryptedMail, "X-Platform": xPlatform },
+            headers: apiHeaders(encryptedMail, { "Content-Type": "application/json" }),
         });
-        if (!res.ok) { console.warn("[CardByte] Rules fetch returned", res.status); return null; }
-
-        const parsed = JSON.parse(await res.text());
-        const rulesJson = parsed?.rulesJson;
-        if (!rulesJson) { console.warn("[CardByte] Rules response had no rulesJson"); return null; }
-
+        if (!res.ok) { warn("rules fetch returned", res.status); return null; }
+        const rulesJson = JSON.parse(await res.text())?.rulesJson;
+        if (!rulesJson) { warn("rules response had no rulesJson"); return null; }
         setCachedRules(rulesJson);
-        console.log("[CardByte] rulesJson fetched and cached");
+        log("rulesJson fetched and cached");
         return rulesJson;
-    } catch (err) {
-        // On Mac event runtime "TypeError: Load failed" here = CORS/well-known
-        // URI misconfiguration. See file header prereq (a).
-        console.error("[CardByte] fetchAndCacheRules failed:", err);
+    } catch (e) {
+        // "TypeError: Load failed" in the Mac event runtime means the
+        // well-known allowlist / CORS setup is wrong. See header prereq (a).
+        err("fetchRules failed:", e);
         return null;
     }
 }
 
-async function renderSignatureOnServer(userEmail) {
-    const t0 = Date.now();
-    const item = Office?.context?.mailbox?.item;
-    const xPlatform = getXPlatform();
-
+// Default signature. Returns { html, explicit } — explicit means the server
+// gave a definitive answer, so an empty result is "unassigned", not "unknown".
+async function fetchDefaultSignature(encryptedMail) {
     try {
-        notifyWithTiming(item, "Loading signature...", t0);
-        const encryptedMail = await encryptEmail(userEmail);
-
-        const primaryRes = await fetch(`${BASE_URL}/html/outlook/get-active`, {
+        const res = await fetch(`${BASE_URL}/html/outlook/get-active`, {
             method: "GET",
-            headers: { username: encryptedMail, "X-Platform": xPlatform },
+            headers: apiHeaders(encryptedMail),
         });
-
-        notifyWithTiming(item, "API response received ✓", t0);
-
-        if (primaryRes.ok) {
-            const data = await primaryRes.text();
-            const decryptedData = await handleAesDecrypt(data);
-            notifyWithTiming(item, "Signature decrypted ✓", t0);
-            logTiming("renderSignatureOnServer", t0);
-
-            const html = JSON.parse(decryptedData)?.html;
-
-            if (html === "" || html == null) {
-                showNotification(item, "Signature not assigned. Please Contact Admin.", "errorMessage", false, t0);
-                return { html: null, explicit: true };
-            }
-            return { html, explicit: true };
+        if (!res.ok) {
+            let msg = "";
+            try { const b = JSON.parse(await res.text()); msg = String(b?.message || b?.error || ""); } catch (_) { }
+            warn("default signature fetch failed:", res.status, msg);
+            const notFound = res.status === 404 || /not\s*found/i.test(msg);
+            return { html: null, explicit: notFound };
         }
-
-        console.warn("[CardByte] Primary fetch failed:", primaryRes.status);
-    } catch (err) {
-        console.warn("[CardByte] renderSignatureOnServer crashed:", err);
-        showNotification(item, `API error: ${err.message}`, "errorMessage", false, t0);
+        const html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
+        return { html, explicit: true };
+    } catch (e) {
+        warn("fetchDefaultSignature crashed:", e);
+        return { html: null, explicit: false };
     }
-
-    return { html: null, explicit: false };
 }
 
-async function fetchSignatureById(signatureId, encryptedMail, xPlatform) {
+async function fetchSignatureById(id, encryptedMail) {
     try {
-        const res = await fetch(`${BASE_URL}/rules-config/get/${signatureId}`, {
+        const res = await fetch(`${BASE_URL}/rules-config/get/${id}`, {
             method: "GET",
-            headers: { username: encryptedMail, "X-Platform": xPlatform },
+            headers: apiHeaders(encryptedMail),
         });
-        if (!res.ok) { console.error("[CardByte] Signature fetch failed:", res.status); return null; }
-        const html = await decryptHtmlResponse(await res.text());
-        if (!html) console.warn("[CardByte] Signature HTML empty for signatureId:", signatureId);
+        if (!res.ok) { err(`signature fetch failed id=${id}:`, res.status); return null; }
+        const html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
+        if (!html) warn("signature HTML empty for id:", id);
         return html;
-    } catch (err) {
-        console.error("[CardByte] fetchSignatureById crashed:", err);
+    } catch (e) {
+        err(`fetchSignatureById crashed id=${id}:`, e);
         return null;
     }
 }
 
-async function getOrFetchSignatureById(signatureId, encryptedMail, xPlatform, { skipTtl = false } = {}) {
-    const id = String(signatureId);
-    const cached = getSigById(id, { skipTtl });
-    if (cached) {
-        console.log(`[CardByte] ✅ sigById cache hit: id=${id}`);
-        return cached;
+/**
+ * THE CORE OF THE ID-AS-STATE DESIGN: id -> HTML, cache then network.
+ * @returns {Promise<{ html: string|null, source: "cache"|"network"|"none" }>}
+ */
+async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = FETCH_BUDGET_MS } = {}) {
+    const key = String(id);
+
+    const cached = sigCache.get(key, { skipTtl: true });
+    if (cached) return { html: cached, source: "cache" };
+
+    if (!allowNetwork || !userEmail) return { html: null, source: "none" };
+
+    try {
+        const enc = await encryptEmail(userEmail);
+        const html = key === DEFAULT_ID
+            ? (await withTimeout(fetchDefaultSignature(enc), budgetMs, "default fetch")).html
+            : await withTimeout(fetchSignatureById(key, enc), budgetMs, `sig fetch ${key}`);
+        if (html) {
+            sigCache.set(key, html);
+            return { html, source: "network" };
+        }
+    } catch (e) {
+        warn(`resolveSigHtml failed id=${key}:`, e.message);
     }
-    console.log(`[CardByte] 🌐 sigById cache miss — fetching id=${id}`);
-    const html = await fetchSignatureById(id, encryptedMail, xPlatform);
-    if (html) setSigById(id, html);
-    return html;
+    return { html: null, source: "none" };
 }
 
-async function prefetchAllRuleSignatures(userEmail) {
-    const rulesJson = getCachedRules({ skipTtl: true, skipSessionCheck: true });
-    if (!rulesJson) {
-        console.log("[CardByte] prefetchAllRuleSignatures: rules not cached yet — skipping");
-        return;
+// Revalidate in the background and refresh the cache. Returns fresh HTML only
+// when it actually differs from what we already applied.
+async function revalidateSigHtml(id, userEmail, appliedHtml) {
+    const key = String(id);
+    try {
+        const enc = await encryptEmail(userEmail);
+        const html = key === DEFAULT_ID
+            ? (await fetchDefaultSignature(enc)).html
+            : await fetchSignatureById(key, enc);
+        if (!html) return null;
+        sigCache.set(key, html);
+        return html === appliedHtml ? null : html;
+    } catch (e) {
+        warn(`revalidate failed id=${key}:`, e.message);
+        return null;
     }
-    const enabledRules = (rulesJson?.rulesList || []).filter(r => r.enabled && r.signatureId != null);
-    if (enabledRules.length === 0) return;
-
-    const xPlatform = getXPlatform();
-    const encryptedMail = await encryptEmail(userEmail);
-
-    // De-dupe: several rules commonly point at the same signatureId.
-    const uniqueIds = [...new Set(enabledRules.map(r => String(r.signatureId)))];
-
-    console.log(`[CardByte] 🔄 Prefetching ${uniqueIds.length} unique signature(s) for ${enabledRules.length} rule(s)...`);
-
-    await Promise.allSettled(
-        uniqueIds.map(id =>
-            getOrFetchSignatureById(id, encryptedMail, xPlatform)
-                .catch(err => console.warn(`[CardByte] Prefetch error signatureId=${id}:`, err))
-        )
-    );
-    console.log("[CardByte] Prefetch complete");
 }
 
-// =============================================================================
-//  RECIPIENT HELPERS
-// =============================================================================
+async function prefetchRuleSignatures(userEmail) {
+    const rulesJson = getCachedRules({ skipTtl: true });
+    const ids = [...new Set(
+        (rulesJson?.rulesList || [])
+            .filter((r) => r.enabled && r.signatureId != null)
+            .map((r) => String(r.signatureId))
+    )].filter((id) => !sigCache.get(id, { skipTtl: true }));
 
-function getRecipientsAsync(field) {
-    return new Promise((resolve) => {
-        if (typeof field?.getAsync !== "function") return resolve([]);
-        try {
-            field.getAsync((result) => {
-                resolve(result.status === Office.AsyncResultStatus.Succeeded ? (result.value || []) : []);
-            });
-        } catch (_) { resolve([]); }
+    if (!ids.length) return;
+    log(`prefetching ${ids.length} signature(s)`);
+    await Promise.allSettled(ids.map((id) => resolveSigHtml(id, userEmail)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RECIPIENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getRecipients(field) {
+    const res = await officeAsync((cb) => field.getAsync(cb), {
+        ms: FETCH_BUDGET_MS,
+        label: "recipients getAsync",
     });
+    return res?.value || [];
 }
 
 async function getAllRecipientEmails(item) {
+    if (!item?.to?.getAsync) return [];
     const [to, cc] = await Promise.all([
-        getRecipientsAsync(item?.to),
-        getRecipientsAsync(item?.cc),
+        getRecipients(item.to),
+        item.cc?.getAsync ? getRecipients(item.cc) : Promise.resolve([]),
     ]);
-    const emails = [...to, ...cc].map(r => (r.emailAddress || "").toLowerCase()).filter(Boolean);
-    return [...new Set(emails)];
+    return [...new Set(
+        [...to, ...cc].map((r) => (r.emailAddress || "").toLowerCase().trim()).filter(Boolean)
+    )];
 }
 
-function serializeRecipients(emails) {
-    return [...emails].sort().join(",");
+const serializeRecipients = (emails) => [...emails].sort().join(",");
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  COMPOSE TYPE
+//  Resolution order: this runtime's cache -> the item property written at
+//  compose -> live detection. Step 2 is what lets Mac's fresh send runtime
+//  inherit the compose runtime's answer instead of re-deriving it from an API
+//  that misreports there. Unknown is null, never a silent "compose".
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _composeTypeByItem = new WeakMap();
+
+// Multi-letter reply/forward prefixes. Bare "R:"/"I:" are deliberately absent:
+// a false positive would misclassify a new mail as a reply.
+const REPLY_PREFIX_RE = /^\s*(re|aw|sv|vs|antw|res|ref|fw|fwd|wg|tr|vb|rv|enc|odp|доб|回复|转发)\s*(\[\d+\])?\s*:/i;
+
+async function detectComposeType(item, strict) {
+    const res = await officeAsync((cb) => item.getComposeTypeAsync(cb), {
+        label: "getComposeTypeAsync",
+    });
+    const raw = String(res?.value?.composeType || "").toLowerCase();
+    log("getComposeTypeAsync raw =", JSON.stringify(raw));
+
+    if (raw === "reply" || raw === "replyall" || raw === "forward") return "reply";
+    if (raw === "newmail") return "compose";
+
+    const subjRes = await officeAsync((cb) => item.subject.getAsync(cb), { label: "subject getAsync" });
+    const subject = String(subjRes?.value || "");
+
+    // The heuristic may only ever promote to "reply".
+    if (REPLY_PREFIX_RE.test(subject)) {
+        log("composeType inferred 'reply' from subject prefix");
+        return "reply";
+    }
+    // A subject with no reply prefix is weak evidence of a new mail — not good
+    // enough at send time, where guessing wrong overwrites a correct signature.
+    if (!strict && subject.trim() !== "") return "compose";
+
+    return null;
 }
 
-// =============================================================================
-//  RULES MATCHING ENGINE
-// =============================================================================
+async function getComposeType(item, { strict = false, persist = false } = {}) {
+    if (_composeTypeByItem.has(item)) return _composeTypeByItem.get(item);
+
+    const fromProp = await getItemProp(item, P_COMPOSE_TYPE);
+    if (fromProp === "compose" || fromProp === "reply") {
+        log("composeType from item props:", fromProp);
+        _composeTypeByItem.set(item, fromProp);
+        return fromProp;
+    }
+
+    let t = await detectComposeType(item, strict);
+    if (!t && !strict) {
+        warn("composeType undetermined — assuming 'compose' (non-strict caller)");
+        t = "compose";
+    }
+    if (t) {
+        _composeTypeByItem.set(item, t);
+        if (persist) await setItemProps(item, { [P_COMPOSE_TYPE]: t });
+    }
+    return t;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RULE MATCHING
+// ─────────────────────────────────────────────────────────────────────────────
 
 function getDomain(email) {
     const at = (email || "").lastIndexOf("@");
     return at === -1 ? "" : email.slice(at + 1).toLowerCase();
 }
 
-// v6 / Fix 4 — see INTERNAL_REQUIRES_NO_EXTERNAL.
 function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
-    if (!recipientType || recipientType.trim() === "") return true;
-    const rt = recipientType.toLowerCase();
-    if (rt === "all") return true;
-    if (rt === "internal") return INTERNAL_REQUIRES_NO_EXTERNAL ? (hasInternal && !hasExternal) : hasInternal;
+    const rt = (recipientType || "").toLowerCase().trim();
+    if (!rt || rt === "all") return true;
+    if (rt === "internal") return INTERNAL_REQUIRES_NO_EXTERNAL ? hasInternal && !hasExternal : hasInternal;
     if (rt === "external") return hasExternal;
     return true;
 }
 
 function contextMatches(ruleContext, composeType) {
-    if (!ruleContext || ruleContext.trim() === "") return true;
-    const rc = ruleContext.toLowerCase();
-    if (rc === "all") return true;
-    if (composeType === null || composeType === undefined) {
-        console.warn("[CardByte] contextMatches called with null composeType — using conservative fallback");
-        return false;
-    }
+    const rc = (ruleContext || "").toLowerCase().trim();
+    if (!rc || rc === "all") return true;
+    if (!composeType) return false; // conservative: never match on an unknown
     return rc === composeType.toLowerCase();
 }
 
-function senderMatches(rule, currentSenderEmail) {
-    if (!rule.Senders || rule.Senders.length === 0) return true;
-    const sender = (currentSenderEmail || "").toLowerCase();
-
-    return rule.Senders.some(raw => {
+function senderMatches(rule, senderEmail) {
+    if (!rule.Senders?.length) return true;
+    const sender = (senderEmail || "").toLowerCase().trim();
+    return rule.Senders.some((raw) => {
         const s = (raw || "").toLowerCase().trim();
         if (s === "*" || s === "all") return true;
         if (s.startsWith("*@")) return sender.endsWith(s.slice(1));
@@ -832,710 +797,343 @@ function senderMatches(rule, currentSenderEmail) {
     });
 }
 
-// =============================================================================
-//  COMPOSE TYPE DETECTION — v6 CORE FIX
-//
-//  Three behavioral changes vs v5:
-//   (a) getComposeTypeAsync is bounded by COMPOSE_TYPE_TIMEOUT_MS. On Mac's
-//       send runtime a callback that never fires used to hang until the outer
-//       send budget expired, and then the whole flow was abandoned.
-//   (b) The dead `item.inReplyToId` branch is gone — that is not an Office.js
-//       compose-item property, so it never once returned "reply".
-//   (c) NO unconditional `return "compose"`. Unknown is now null. The send-time
-//       caller (strict) treats null as "refuse to match context rules", which
-//       routes to the persisted-active-signature path instead of guessing.
-// =============================================================================
-
-const _composeTypeByItem = new WeakMap();
-
-// Multi-letter reply/forward prefixes across common locales. Bare "R:" / "I:"
-// (Italian) are omitted deliberately: a false positive there would misclassify
-// a brand-new mail as a reply, which is the exact class of bug we're fixing.
-const REPLY_PREFIX_RE = /^\s*(re|aw|sv|vs|antw|res|ref|fw|fwd|wg|tr|vb|rv|enc|odp|доб|回复|转发)\s*(\[\d+\])?\s*:/i;
-
-function getComposeTypeAsyncBounded(item) {
-    return new Promise((resolve) => {
-        if (typeof item?.getComposeTypeAsync !== "function") return resolve("");
-        let done = false;
-        const timer = setTimeout(() => {
-            if (done) return;
-            done = true;
-            console.warn(`[CardByte] getComposeTypeAsync timed out after ${COMPOSE_TYPE_TIMEOUT_MS}ms`);
-            resolve("");
-        }, COMPOSE_TYPE_TIMEOUT_MS);
-
-        try {
-            item.getComposeTypeAsync((res) => {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                if (res.status !== Office.AsyncResultStatus.Succeeded)
-                    console.warn("[CardByte] getComposeTypeAsync failed:", res.error?.message);
-                resolve(res.status === Office.AsyncResultStatus.Succeeded ? (res.value?.composeType || "") : "");
-            });
-        } catch (e) {
-            if (done) return;
-            done = true;
-            clearTimeout(timer);
-            console.warn("[CardByte] getComposeTypeAsync threw:", e);
-            resolve("");
-        }
-    });
-}
-
-function getSubjectBounded(item) {
-    return new Promise((resolve) => {
-        if (typeof item?.subject?.getAsync !== "function") return resolve("");
-        let done = false;
-        const timer = setTimeout(() => {
-            if (!done) { done = true; resolve(""); }
-        }, COMPOSE_TYPE_TIMEOUT_MS);
-        try {
-            item.subject.getAsync((res) => {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                resolve(res.status === Office.AsyncResultStatus.Succeeded ? (res.value || "") : "");
-            });
-        } catch (_) {
-            if (!done) { done = true; clearTimeout(timer); resolve(""); }
-        }
-    });
-}
-
 /**
- * @returns {Promise<"compose"|"reply"|null>} null === genuinely undetermined.
+ * @returns {Promise<{ rule: object|null, blocked: boolean }>}
+ *   blocked = we could not evaluate safely (unknown compose type in strict
+ *   mode, or no rules available), so the caller must NOT treat a null rule as
+ *   "the default applies".
  */
-async function detectComposeTypeRaw(item, { strict = false } = {}) {
-    const raw = await getComposeTypeAsyncBounded(item);
-    console.log("[CardByte] getComposeTypeAsync raw =", JSON.stringify(raw));
-
-    const v = String(raw).toLowerCase();
-    if (v === "reply" || v === "forward" || v === "replyall") return "reply";
-    if (v === "newmail") return "compose";
-
-    // Subject heuristic — only ever promotes to "reply". A non-empty subject
-    // with no reply prefix is weak evidence of a new mail, and in strict mode
-    // (send time) weak evidence is not good enough.
-    const subject = await getSubjectBounded(item);
-    if (subject && REPLY_PREFIX_RE.test(subject)) {
-        console.log("[CardByte] composeType inferred 'reply' from subject prefix");
-        return "reply";
-    }
-    if (!strict && subject.trim() !== "") return "compose";
-
-    return null;
-}
-
-/**
- * Resolution order:
- *   1. this runtime's WeakMap
- *   2. the item custom property written by the compose runtime  <-- v6
- *   3. live detection
- * Step 2 is what fixes Mac: the send runtime inherits the compose runtime's
- * answer instead of re-deriving it from an API that misbehaves there.
- */
-async function getComposeType(item, { strict = false, persist = false } = {}) {
-    if (_composeTypeByItem.has(item)) return _composeTypeByItem.get(item);
-
-    const fromProp = await getItemProp(item, COMPOSE_TYPE_PROP);
-    if (fromProp === "compose" || fromProp === "reply") {
-        console.log("[CardByte] composeType from item props:", fromProp);
-        _composeTypeByItem.set(item, fromProp);
-        return fromProp;
-    }
-
-    let t = await detectComposeTypeRaw(item, { strict });
-
-    if (!t && !strict) {
-        console.warn("[CardByte] composeType undetermined — assuming 'compose' (non-strict caller)");
-        t = "compose";
-    }
-
-    if (t) {
-        _composeTypeByItem.set(item, t);
-        if (persist) setItemProps(item, { [COMPOSE_TYPE_PROP]: t }).catch(() => { });
-    }
-    return t;
-}
-
-// =============================================================================
-//  FIND MATCHING RULE
-//  v6 adds strictComposeType / persistComposeType. At send time strict mode
-//  refuses to evaluate context-specific rules on an unknown compose type,
-//  rather than defaulting to "compose" and letting a compose rule win.
-// =============================================================================
-
-async function findMatchingRule(item, {
-    cacheOnly = false,
-    allowQuickFetchMs = 0,
+async function findMatchingRule(item, senderEmail, {
+    allowNetwork = false,
+    budgetMs = FETCH_BUDGET_MS,
     strictComposeType = false,
     persistComposeType = false,
 } = {}) {
-    let rulesJson = cacheOnly
-        ? getCachedRules({ skipTtl: true, skipSessionCheck: true })
-        : getCachedRules();
+    let rulesJson = getCachedRules({ skipTtl: strictComposeType });
 
-    if (!rulesJson && (!cacheOnly || allowQuickFetchMs > 0)) {
-        console.warn("[CardByte] Rules not in cache — live fetch...");
-        const userEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
-        if (userEmail) {
-            const enc = await encryptEmail(userEmail);
-            const fetchP = fetchAndCacheRules(enc, getXPlatform());
-            rulesJson = allowQuickFetchMs > 0
-                ? await withTimeout(fetchP, allowQuickFetchMs).catch(() => null)
-                : await fetchP;
-        }
+    if (!rulesJson && allowNetwork && senderEmail) {
+        warn("rules not cached — live fetch");
+        const enc = await encryptEmail(senderEmail);
+        rulesJson = await withTimeout(fetchRules(enc), budgetMs, "rules fetch").catch(() => null);
     }
-
-    if (!rulesJson) { console.warn("[CardByte] findMatchingRule: no rules available"); return null; }
-
-    const senderEmail = Office?.context?.mailbox?.userProfile?.emailAddress;
-    const senderDomain = getDomain(senderEmail);
-
-    let emails = await getAllRecipientEmails(item);
-    if (emails.length === 0 && isMac()) {
-        console.warn("[CardByte] Mac: recipients empty on first read — retrying after short delay");
-        await new Promise(r => setTimeout(r, 400));
-        emails = await getAllRecipientEmails(item);
-    }
+    if (!rulesJson) { warn("no rules available"); return { rule: null, blocked: true }; }
 
     const composeType = await getComposeType(item, {
         strict: strictComposeType,
         persist: persistComposeType,
     });
-
     if (strictComposeType && !composeType) {
-        console.warn("[CardByte] send-time: composeType unknown — refusing to match context-specific rules");
-        return null; // caller falls through to the persisted-active-sig path
+        warn("composeType unknown at send — refusing to match context-specific rules");
+        return { rule: null, blocked: true };
     }
 
-    if (emails.length === 0) {
-        console.warn("[CardByte] No recipients — cannot match rules (will fallback to default)");
-        return null;
+    let emails = await getAllRecipientEmails(item);
+    if (!emails.length && isMac()) {
+        // Mac occasionally reports an empty list on first read.
+        await sleep(400);
+        emails = await getAllRecipientEmails(item);
+    }
+    if (!emails.length) {
+        log("no recipients — cannot evaluate rules");
+        return { rule: null, blocked: true };
     }
 
+    const senderDomain = getDomain(senderEmail);
     let hasInternal = false;
     let hasExternal = false;
-    const recipientDomains = [];
-
-    emails.forEach(e => {
+    const domains = [];
+    for (const e of emails) {
         const d = getDomain(e);
-        if (d && !recipientDomains.includes(d)) recipientDomains.push(d);
+        if (d && !domains.includes(d)) domains.push(d);
         if (senderDomain && d === senderDomain) hasInternal = true;
         else hasExternal = true;
-    });
+    }
 
-    console.log("[CardByte] Rule evaluation context:", {
-        version: CB_VERSION,
-        platform: detectPlatform(),
-        strictComposeType,
-        senderEmail, senderDomain, composeType, hasInternal, hasExternal,
-        recipientDomains, totalRules: rulesJson?.rulesList?.length ?? 0,
-    });
-
-    const sortedRules = (rulesJson?.rulesList || [])
-        .filter(r => r.enabled)
+    const rules = (rulesJson.rulesList || [])
+        .filter((r) => r.enabled)
         .sort((a, b) => a.priority - b.priority);
 
-    let matched = null;
-
-    for (const r of sortedRules) {
-        const senderOk = senderMatches(r, senderEmail);
-        const contextOk = contextMatches(r.context, composeType);
-        const recipOk = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
-        const allMatch = senderOk && contextOk && recipOk;
-
-        console.log(
-            (allMatch ? ">>> MATCH" : "    skip "),
-            `| priority=${r.priority}`,
-            `| sender=${senderOk}`,
-            `| context=${r.context} (ok=${contextOk})`,
-            `| recipientType=${r.recipientType} (ok=${recipOk})`,
-            `| sigId=${r.signatureId ?? "NULL"}`
-        );
-
-        if (allMatch) { matched = r; break; }
-    }
-
-    if (!matched) console.warn("[CardByte] ❌ No rules matched", { composeType, hasInternal, hasExternal });
-    return matched;
-}
-
-// =============================================================================
-//  SIGNATURE INJECTION
-// =============================================================================
-
-function bodySetSignatureAsync(item, html) {
-    return new Promise((resolve, reject) => {
-        if (typeof item.body.setSignatureAsync !== "function") {
-            reject(new Error("setSignatureAsync not available"));
-            return;
-        }
-        const t0 = Date.now();
-        item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, (r) => {
-            logTiming("setSignatureAsync", t0);
-            r.status === "succeeded" ? resolve() : reject(r.error);
-        });
+    log("rule evaluation:", {
+        version: CB_VERSION,
+        platform: detectPlatform(),
+        strict: strictComposeType,
+        composeType,
+        senderDomain,
+        hasInternal,
+        hasExternal,
+        domains,
+        rules: rules.length,
     });
+
+    for (const r of rules) {
+        const s = senderMatches(r, senderEmail);
+        const c = contextMatches(r.context, composeType);
+        const p = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
+        log(
+            s && c && p ? ">>> MATCH" : "    skip ",
+            `| priority=${r.priority} | sender=${s} | context=${r.context}(${c})`,
+            `| recipientType=${r.recipientType}(${p}) | sigId=${r.signatureId ?? "NULL"}`
+        );
+        if (s && c && p) return { rule: r, blocked: false };
+    }
+
+    log("no rule matched — default applies");
+    return { rule: null, blocked: false };
 }
 
-async function applySignatureWithFallback(item, html, isSendTime = false) {
-    const htmlSize = new Blob([html]).size;
-    console.log("[CardByte] Signature size:", htmlSize, "bytes");
+// ─────────────────────────────────────────────────────────────────────────────
+//  BODY WRITES
+//  setSignatureAsync REPLACES the signature block, so reapplying the same id is
+//  idempotent. appendOnSendAsync is a send-time-only fallback for hosts without
+//  setSignatureAsync (Mailbox < 1.10) — it appends, hence the failure guard.
+// ─────────────────────────────────────────────────────────────────────────────
 
-    const maxSize = 100 * 1024;
-    if (htmlSize > maxSize) {
-        console.warn(`[CardByte] Signature exceeds max size (${htmlSize} > ${maxSize} bytes) — not applying`);
-        showNotification(item, "Signature could not be applied — size exceeds allowed threshold. Please contact Admin.", "errorMessage", false);
+async function writeSignature(item, html, { isSendTime = false } = {}) {
+    const bytes = new Blob([html]).size;
+    if (bytes > MAX_SIG_BYTES) {
+        warn(`signature ${bytes}B exceeds ${MAX_SIG_BYTES}B — not applying`);
+        notifyError(item, "Signature exceeds the allowed size. Please contact Admin.");
         return false;
     }
 
-    try {
-        removeNotification(item);
-        await bodySetSignatureAsync(item, html);
-        return true;
-    } catch (err) {
-        console.error("[CardByte] setSignatureAsync failed:", err);
-        showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage", false);
-        return false;
+    if (typeof item.body?.setSignatureAsync === "function") {
+        const res = await officeAsync(
+            (cb) => item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, cb),
+            { ms: FETCH_BUDGET_MS, label: "setSignatureAsync" }
+        );
+        if (res) { log(`signature written (${bytes}B)`); return true; }
+    } else {
+        warn("setSignatureAsync unavailable on this host");
     }
+
+    if (isSendTime && typeof item.body?.appendOnSendAsync === "function") {
+        const res = await officeAsync(
+            (cb) => item.body.appendOnSendAsync(html, { coercionType: Office.CoercionType.Html }, cb),
+            { ms: FETCH_BUDGET_MS, label: "appendOnSendAsync" }
+        );
+        if (res) { log("signature appended via appendOnSendAsync"); return true; }
+    }
+
+    notifyError(item, "Signature could not be applied. Please contact Admin.");
+    return false;
 }
 
-// =============================================================================
-//  CORE SIGNATURE ORCHESTRATOR — cache-first fast apply.
-// =============================================================================
+/**
+ * Apply the signature for `id`, guarded by the write token.
+ * Fast path applies a cached copy immediately; revalidation rewrites only if
+ * the server copy differs AND no newer decision has been made meanwhile.
+ */
+async function applyById(item, id, userEmail, seq, { revalidate = false, isSendTime = false } = {}) {
+    const key = String(id);
 
-async function applySignatureCore(item, mailbox, opts = {}, isSendTime = false) {
+    const { html, source } = await resolveSigHtml(key, userEmail, {
+        budgetMs: isSendTime ? FETCH_BUDGET_MS : 10_000,
+    });
+
+    if (!html) {
+        // Never blank the body or substitute a guess: whatever is there already
+        // is better than nothing.
+        warn(`could not resolve id=${key} — leaving body as-is`);
+        if (!isSendTime) notifyError(item, "Signature not available. Please contact Admin.");
+        return false;
+    }
+    if (!isCurrent(seq)) { log(`stale write dropped (seq=${seq}, current=${_writeSeq})`); return false; }
+
+    const ok = await writeSignature(item, html, { isSendTime });
+    if (!ok) return false;
+    log(`applied id=${key} from ${source}`);
+
+    if (revalidate && source === "cache" && userEmail && !isSendTime) {
+        // Background only — never blocks the user, never races the token.
+        revalidateSigHtml(key, userEmail, html).then(async (fresh) => {
+            if (!fresh || !isCurrent(seq)) return;
+            log(`id=${key} changed on server — rewriting`);
+            await writeSignature(item, fresh);
+        }).catch(() => { });
+    }
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  THE SINGLE DECISION PATH
+//  Everything at compose time funnels through here: pick an id, apply it once,
+//  persist it. Replaces v6's applySignatureCore + onRecipientsChanged pair,
+//  which each wrote the body independently.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}) {
     const t0 = Date.now();
-    const { fetchIfMissing = false, overrideHtml = null, markDefault = false } = opts;
     const userEmail = mailbox?.userProfile?.emailAddress;
 
-    let appliedHtml = null;
-    let explicitlyUnassigned = false;
-
-    // ─── FAST PATH: apply any cached copy immediately ───
-    let fastHtml = overrideHtml
-        || getCachedSignature({ skipTtl: true, skipSessionCheck: true })
-        || CACHED_SIGNATURE_HTML;
-
-    if (fastHtml) {
-        notifyWithTiming(item, "Applying signature (cached)...", t0);
-        const ok = await applySignatureWithFallback(item, fastHtml, isSendTime);
-        if (ok) appliedHtml = fastHtml;
-    }
-
-    // ─── REFRESH: fetch from server; re-apply only if different ───
-    if (fetchIfMissing && userEmail && !overrideHtml) {
-        let attempt = 0;
-        while (attempt <= MAX_RETRIES) {
-            try {
-                if (attempt > 0) {
-                    console.warn(`[CardByte] Retry ${attempt}/${MAX_RETRIES}...`);
-                    await new Promise(r => setTimeout(r, 1000 * attempt));
-                }
-                const { html: fetched, explicit } = await renderSignatureOnServer(userEmail);
-                if (fetched) {
-                    CACHED_SIGNATURE_HTML = fetched;
-                    setCachedSignature(fetched);
-                    if (fetched !== appliedHtml) {
-                        notifyWithTiming(item, "Updating to latest signature...", t0);
-                        const ok = await applySignatureWithFallback(item, fetched, isSendTime);
-                        if (ok) appliedHtml = fetched;
-                    }
-                    break;
-                }
-                if (explicit) {
-                    explicitlyUnassigned = true;
-                    store.remove(CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY);
-                    break;
-                }
-            } catch (err) {
-                console.warn(`[CardByte] Fetch attempt ${attempt + 1} failed:`, err);
-            }
-            attempt++;
-        }
-    }
-
-    if (!appliedHtml && !explicitlyUnassigned) {
-        console.error("[CardByte] No signature available — nothing applied");
-        removeNotification(item);
-        showNotification(item, "Signature not available. Please contact Admin.", "errorMessage", false);
-        logTiming("applySignatureCore (no signature)", t0);
-        return false;
-    }
-
-    if (appliedHtml) {
-        // v6: record that the DEFAULT signature is what's in the body, with a
-        // recipient snapshot, so the send handler's short-circuit can fire here
-        // too instead of re-evaluating rules from a cold Mac runtime.
-        if (markDefault && !isSendTime) {
-            markActiveSignature(item, DEFAULT_SIG_SENTINEL).catch(() => { });
-        }
-        notifyWithTiming(item, "Signature applied ✓", t0);
-        setTimeout(() => removeNotification(item), 3000);
-    }
-    logTiming("applySignatureCore total", t0);
-    return !!appliedHtml;
-}
-
-// =============================================================================
-//  RECIPIENT-CHANGE HANDLER
-//  v6: persists composeType AND the recipient snapshot alongside the sig id.
-// =============================================================================
-
-async function onRecipientsChanged(item, mailbox) {
-    if (await getManualOverride(item)) {
-        console.log("[CardByte] Manual override active — skipping rule re-eval on recipient change");
+    const override = await getManualOverride(item);
+    if (override) {
+        log("manual override active — leaving signature untouched:", override);
         return;
     }
 
-    const matched = await findMatchingRule(item, { persistComposeType: true });
-
-    if (matched) {
-        console.log(`[CardByte] 🎯 Rule matched → signatureId: ${matched.signatureId}`);
-
-        const userEmail = mailbox?.userProfile?.emailAddress;
-        const xPlatform = getXPlatform();
-        const encryptedMail = await encryptEmail(userEmail);
-
-        const ruleHtml = await getOrFetchSignatureById(matched.signatureId, encryptedMail, xPlatform);
-        if (!ruleHtml) {
-            console.warn("[CardByte] Rule signature fetch returned null — keeping current signature");
-            return;
-        }
-        const applied = await applySignatureWithFallback(item, ruleHtml, false);
-        if (applied) {
-            _activeSignatureId = String(matched.signatureId);
-            // Snapshot is captured HERE, after the apply, so it reflects the
-            // recipient set this signature was actually chosen for.
-            const snapshot = serializeRecipients(await getAllRecipientEmails(item));
-            await markActiveSignature(item, matched.signatureId, { snapshot });
-        }
-
-    } else {
-        console.warn("[CardByte] No rule matched / empty recipients — falling back to default signature");
-        _activeSignatureId = null;
-        await applySignatureCore(item, mailbox, { fetchIfMissing: true, markDefault: true }, false);
-    }
-}
-
-// =============================================================================
-//  RECIPIENT POLLING
-// =============================================================================
-
-let _lastRecipientSnapshot = "";
-let _recipientPollTimer = null;
-let _activeSignatureId = null;
-
-async function pollRecipients() {
-    const mailbox = Office?.context?.mailbox;
-    const item = mailbox?.item;
-    if (!item) return;
-
-    const emails = await getAllRecipientEmails(item);
-    const snapshot = serializeRecipients(emails);
-
-    if (snapshot === _lastRecipientSnapshot) return;
-    _lastRecipientSnapshot = snapshot;
-
-    console.log("[CardByte] 🔄 Recipient change detected via poll:", emails);
-    await onRecipientsChanged(item, mailbox);
-}
-
-function startRecipientPolling() {
-    if (_recipientPollTimer) return;
-    if (isMobile()) return;
-    console.log("[CardByte] 📡 Starting recipient polling...");
-    _recipientPollTimer = setInterval(() => {
-        pollRecipients().catch(err => console.warn("[CardByte] pollRecipients failed:", err));
-    }, RECIPIENT_POLL_MS);
-}
-
-function stopRecipientPolling() {
-    if (_recipientPollTimer) {
-        clearInterval(_recipientPollTimer);
-        _recipientPollTimer = null;
-    }
-}
-
-// =============================================================================
-//  TIMEOUT WRAPPER
-// =============================================================================
-
-function withTimeout(promise, ms) {
-    return Promise.race([
-        promise,
-        new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms)
-        ),
-    ]);
-}
-
-// =============================================================================
-//  SEND-TIME CORE
-// =============================================================================
-
-async function resolveOverrideHtml(overrideId, mailbox) {
-    if (overrideId === DEFAULT_SIG_SENTINEL) {
-        return getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-    }
-    let html = getSigById(overrideId, { skipTtl: true });
-    if (!html) {
-        const enc = await encryptEmail(mailbox?.userProfile?.emailAddress);
-        html = await getOrFetchSignatureById(overrideId, enc, getXPlatform(), { skipTtl: true });
-    }
-    return html;
-}
-
-// Resolve a signature id to HTML at send time — cache first, then (Mac
-// especially, where the event runtime cache is empty) a short live fetch.
-async function resolveSigHtmlAtSend(sigId, mailbox) {
-    if (String(sigId) === DEFAULT_SIG_SENTINEL) {
-        return getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-    }
-
-    let html = getSigById(String(sigId), { skipTtl: true });
-    if (html) return html;
-
-    try {
-        const enc = await encryptEmail(mailbox?.userProfile?.emailAddress);
-        html = await withTimeout(
-            fetchSignatureById(String(sigId), enc, getXPlatform()),
-            SEND_QUICK_FETCH_MS
-        );
-        if (html) setSigById(sigId, html);
-    } catch (e) {
-        console.warn(`[CardByte] onSend quick fetch failed for id=${sigId}:`, e.message);
-    }
-    return html || null;
-}
-
-async function _onSendCore(item, mailbox) {
-    const t0 = Date.now();
-    notifyWithTiming(item, "Verifying signature...", t0);
-
-    // ─── 1. Manual taskpane selection always wins ───
-    const overrideId = await getManualOverride(item);
-    if (overrideId) {
-        const html = await resolveOverrideHtml(overrideId, mailbox);
-        if (html) {
-            await applySignatureWithFallback(item, html, true);
-            logTiming("_onSendCore (manual override)", t0);
-            return;
-        }
-        console.warn("[CardByte] Override id set but html unavailable — falling back to rules");
-    }
-
-    // ─── 2. v6 SHORT-CIRCUIT ───
-    // If the recipient set hasn't changed since the compose runtime picked a
-    // signature, that pick is still correct by construction. Don't re-evaluate:
-    // re-evaluation in the cold Mac send runtime is exactly what produced the
-    // wrong-rule bug, and skipping it also saves the quick-fetch round trips.
-    const [persistedId, persistedSnap] = await Promise.all([
-        getItemProp(item, ACTIVE_SIG_PROP),
-        getItemProp(item, RECIP_SNAPSHOT_PROP),
-    ]);
-    const currentSnap = serializeRecipients(await getAllRecipientEmails(item));
-
-    if (persistedId && persistedSnap !== null && persistedSnap === currentSnap) {
-        console.log(`[CardByte] onSend: recipients unchanged since compose (id=${persistedId}) — trusting applied signature`);
-        removeNotification(item);
-        logTiming("_onSendCore (unchanged, no re-eval)", t0);
-        return;
-    }
-    console.log("[CardByte] onSend: recipients changed or no snapshot — re-evaluating", {
-        persistedId, persistedSnap, currentSnap,
+    const { rule, blocked } = await findMatchingRule(item, userEmail, {
+        allowNetwork,
+        persistComposeType: true,
     });
 
-    // ─── 3. Rule evaluation. strictComposeType means an unknown compose type
-    //        will NOT be guessed as "compose" (the Mac bug). One bounded live
-    //        rules fetch is allowed on Mac since its localStorage is empty. ───
-    const matched = await findMatchingRule(item, {
-        cacheOnly: true,
-        allowQuickFetchMs: isMac() ? SEND_QUICK_FETCH_MS : 0,
+    if (blocked) {
+        // Could not evaluate (no recipients yet, no rules). Do NOT reset the
+        // body to the default — that was v6's mid-typing signature flicker.
+        const active = await getItemProp(item, P_ACTIVE_SIG);
+        if (active) { log("evaluation blocked — keeping active id:", active); return; }
+        log("evaluation blocked and nothing applied yet — applying default");
+    }
+
+    const targetId = rule ? String(rule.signatureId) : DEFAULT_ID;
+    if (!isCurrent(seq)) { log("stale evaluation dropped"); return; }
+
+    const applied = await applyById(item, targetId, userEmail, seq, { revalidate: true });
+    if (applied && isCurrent(seq)) {
+        const snapshot = serializeRecipients(await getAllRecipientEmails(item));
+        await markActiveSignature(item, targetId, snapshot);
+    }
+    timed(`evaluateAndApply (${targetId})`, t0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SEND
+//  Phase 1 decides an id with no body writes. Phase 2 resolves and writes once.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function decideSendId(item, userEmail) {
+    const currentSnap = serializeRecipients(await getAllRecipientEmails(item));
+
+    const override = await getManualOverride(item);
+    if (override) return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+
+    const [activeId, snapshot] = await Promise.all([
+        getItemProp(item, P_ACTIVE_SIG),
+        getItemProp(item, P_RECIP_SNAPSHOT),
+    ]);
+
+    // Recipients unchanged since the compose-time decision: skip re-evaluation
+    // (the expensive, Mac-hostile part) but still reapply the id.
+    if (activeId && snapshot !== null && snapshot === currentSnap) {
+        return { id: activeId, snapshot: currentSnap, reason: "recipients unchanged since compose", persist: false };
+    }
+
+    const { rule, blocked } = await findMatchingRule(item, userEmail, {
+        allowNetwork: true,
+        budgetMs: FETCH_BUDGET_MS,
         strictComposeType: true,
     });
 
-    if (matched) {
-        const ruleHtml = await resolveSigHtmlAtSend(matched.signatureId, mailbox);
-        if (ruleHtml) {
-            console.log(`[CardByte] onSend: injecting rule sig id=${matched.signatureId}`);
-            await applySignatureWithFallback(item, ruleHtml, true);
-            await markActiveSignature(item, matched.signatureId, { snapshot: currentSnap });
-            logTiming("_onSendCore (rule)", t0);
-            return;
-        }
-        console.warn(`[CardByte] onSend: rule sig id=${matched.signatureId} unavailable — trying last-applied signature`);
+    if (rule) {
+        return { id: String(rule.signatureId), snapshot: currentSnap, reason: `rule priority=${rule.priority}`, persist: true };
     }
 
-    // ─── 4. Cross-runtime fallback: whatever was actually applied to THIS
-    //        draft. Item props first (works on Mac), then localStorage, then
-    //        roamingSettings. ───
-    const persistedActiveId = persistedId || await getActiveSignatureId(item);
-    if (persistedActiveId) {
-        console.warn("[CardByte] onSend: falling back to persisted active signature id:", persistedActiveId);
-        const activeHtml = await resolveSigHtmlAtSend(persistedActiveId, mailbox);
-        if (activeHtml) {
-            await applySignatureWithFallback(item, activeHtml, true);
-            logTiming("_onSendCore (persisted fallback)", t0);
-            return;
-        }
-        // A signature IS already in the body — never overwrite it with default.
-        console.warn("[CardByte] onSend: active sig HTML unavailable — leaving body as-is");
-        removeNotification(item);
-        logTiming("_onSendCore (leave as-is)", t0);
-        return;
+    const fallback = activeId || await getActiveSignatureId(item);
+    if (blocked && fallback) {
+        return { id: fallback, snapshot: currentSnap, reason: "evaluation blocked — persisted id", persist: false };
     }
-
-    // ─── 5. No rule was ever active → default is genuinely correct. ───
-    const cached = getCachedSignature({ skipTtl: true, skipSessionCheck: true });
-    if (!cached) {
-        console.warn("[CardByte] onSend: no cached default — leaving body as-is");
-        removeNotification(item);
-        logTiming("_onSendCore (no sig)", t0);
-        return;
+    if (!blocked) {
+        return { id: DEFAULT_ID, snapshot: currentSnap, reason: "no rule matched", persist: true };
     }
-
-    console.log("[CardByte] onSend: injecting default sig from cache");
-    await applySignatureWithFallback(item, cached, true);
-    logTiming("_onSendCore (default)", t0);
+    return { id: fallback || DEFAULT_ID, snapshot: currentSnap, reason: "last resort", persist: false };
 }
 
-// =============================================================================
-//  OFFICE READY
-//  NOTE: on Windows classic the event runtime does NOT run Office.onReady —
-//  never put logic here that handlers depend on.
-// =============================================================================
+async function onSendCore(item, mailbox) {
+    const t0 = Date.now();
+    const userEmail = mailbox?.userProfile?.emailAddress;
+    const seq = beginWrite();
 
-Office.onReady(() => {
-    console.log(`✅ Office.onReady Started — CardByte ${CB_VERSION}`);
-    console.log(`[CardByte] Platform: ${detectPlatform()} | X-Platform header: ${getXPlatform()}`);
+    const { id, snapshot, reason, persist } = await decideSendId(item, userEmail);
+    log(`onSend: target id=${id} (${reason})`);
 
-    if (Office.context.mailbox) {
-        console.log("📧 Mailbox Diagnostics:", Office.context.mailbox.diagnostics);
-        console.log("📌 Host Name:", Office.context.mailbox.diagnostics.hostName);
-        console.log("📌 Host Version:", Office.context.mailbox.diagnostics.hostVersion);
-    }
+    const applied = await applyById(item, id, userEmail, seq, { isSendTime: true });
+    if (applied && persist) await markActiveSignature(item, id, snapshot);
 
-    purgeStaleSigById();
-});
+    removeNotification(item);
+    timed(`onSendCore (${applied ? "applied" : "left as-is"})`, t0);
+}
 
-// =============================================================================
-//  PUBLIC ENTRY POINTS
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+//  ENTRY POINTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Every handler completes exactly once, even if the body throws.
+function makeCompleter(label, t0, event, args) {
+    let done = false;
+    return () => {
+        if (done) return;
+        done = true;
+        timed(label, t0);
+        try { event.completed(args); } catch (_) { }
+    };
+}
 
 const applySignature = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
-
-    let _completed = false;
-    const completeOnce = () => {
-        if (_completed) return;
-        _completed = true;
-        stopRecipientPolling();
-        logTiming("applySignature total (completed)", t0);
-        try { event.completed(); } catch (_) { }
-    };
+    const complete = makeCompleter("applySignature total", t0, event);
 
     try {
-        if (!item) { completeOnce(); return; }
+        if (!item) return complete();
+        log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()})`);
 
-        console.log(`[CardByte] applySignature start — ${CB_VERSION} on ${detectPlatform()}`);
-        notifyWithTiming(item, "Starting signature flow...", t0);
+        const seq = beginWrite();
+        const userEmail = mailbox?.userProfile?.emailAddress;
 
-        _activeSignatureId = null;
         await markActiveSignature(item, null);
 
-        // v6: determine and PERSIST the compose type as early as possible, in
-        // the runtime where the Office API actually behaves. Everything
-        // downstream (including the send runtime) reads this instead of
-        // re-deriving it. Fire-and-forget so it never blocks the body apply.
+        // Persist the compose type here, in the runtime where the API behaves.
+        // The send runtime reads it instead of re-deriving it.
         const composeTypeP = getComposeType(item, { persist: true })
-            .then(t => { console.log("[CardByte] composeType resolved at compose:", t); return t; })
-            .catch(err => { console.warn("[CardByte] composeType resolution failed:", err); return null; });
+            .then((t) => log("composeType at compose:", t))
+            .catch((e) => warn("composeType resolution failed:", e));
 
-        // ─── FAST: apply default signature from cache immediately (network
-        //     refresh happens inside applySignatureCore afterwards). ───
-        const coreP = applySignatureCore(item, mailbox, { fetchIfMissing: true, markDefault: true }, false);
-
-        // ─── Rules refresh runs CONCURRENTLY. ───
-        const userEmail = mailbox?.userProfile?.emailAddress;
+        // Warm the rules cache before evaluating.
         const rulesP = (async () => {
-            if (!userEmail) return;
-            const rulesFresh = getCachedRules();
-            if (!rulesFresh) {
-                const enc = await encryptEmail(userEmail);
-                await fetchAndCacheRules(enc, getXPlatform());
-            }
-        })().catch(err => console.warn("[CardByte] Rules refresh failed:", err));
+            if (!userEmail || getCachedRules()) return;
+            await fetchRules(await encryptEmail(userEmail));
+        })().catch((e) => warn("rules refresh failed:", e));
 
-        await Promise.allSettled([coreP, rulesP, composeTypeP]);
+        await Promise.allSettled([composeTypeP, rulesP]);
+
+        _lastSnapshot = serializeRecipients(await getAllRecipientEmails(item));
+        await evaluateAndApply(item, mailbox, seq);
 
         if (userEmail && !isMobile()) {
-            prefetchAllRuleSignatures(userEmail).catch(err =>
-                console.warn("[CardByte] Background prefetch failed:", err)
-            );
+            prefetchRuleSignatures(userEmail).catch((e) => warn("prefetch failed:", e));
         }
-
-        const emails = await getAllRecipientEmails(item);
-        if (emails.length > 0) {
-            _lastRecipientSnapshot = serializeRecipients(emails);
-            await onRecipientsChanged(item, mailbox);
-        }
-
-        if (!isMobile()) startRecipientPolling();
-
-    } catch (err) {
-        console.error("[CardByte] applySignature error:", err);
+    } catch (e) {
+        err("applySignature error:", e);
     } finally {
-        // ─── MAC KEEP-ALIVE ───
-        // event.completed() tears down the Mac event runtime, killing recipient
-        // polling. Delay completion so the poller lives; the runtime hard-stops
-        // at ~5 min or when the user sends/navigates away regardless.
-        if (isMac()) {
-            console.log(`[CardByte] Mac: deferring event.completed() ${MAC_KEEPALIVE_MS}ms to keep polling alive`);
-            setTimeout(completeOnce, MAC_KEEPALIVE_MS);
-        } else {
-            completeOnce();
-        }
+        complete();
     }
 };
 
-const onSendHandler = async function (event = { completed: () => { } }) {
+let _lastSnapshot = "";
+
+const onRecipientsChangedHandler = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
-
-    let _done = false;
-    const done = (allow = true) => {
-        if (_done) return;
-        _done = true;
-        logTiming("onSendHandler total", t0);
-        try { event.completed({ allowEvent: allow }); } catch (_) { }
-    };
+    const complete = makeCompleter("onRecipientsChanged total", t0, event);
 
     try {
-        if (!item) { done(true); return; }
+        if (!item) return complete();
 
-        stopRecipientPolling();
+        // Let the host settle: OWA fires per keystroke-ish, and a half-typed
+        // address produces a recipient set we do not want to evaluate.
+        await sleep(RECIPIENT_SETTLE_MS);
 
-        console.log(`[CardByte] onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
-        notifyWithTiming(item, "Verifying before send...", t0);
+        const snapshot = serializeRecipients(await getAllRecipientEmails(item));
+        if (snapshot === _lastSnapshot) { log("recipients unchanged — skipping"); return complete(); }
+        _lastSnapshot = snapshot;
 
-        // Mac needs headroom for the bounded live fetches (its event runtime
-        // has no cache). The v6 short-circuit usually returns long before this.
-        const budget = isMac() ? SEND_TIMEOUT_MS_MAC : SEND_TIMEOUT_MS_DEFAULT;
-        await withTimeout(_onSendCore(item, mailbox), budget);
-
-        setTimeout(() => removeNotification(item), 3000);
-
-    } catch (err) {
-        console.warn("[CardByte] onSend timeout/error:", err.message);
-        removeNotification(item);
+        log("recipients changed — re-evaluating");
+        await evaluateAndApply(item, mailbox, beginWrite());
+    } catch (e) {
+        err("onRecipientsChangedHandler error:", e);
     } finally {
-        done(true);
+        complete();
     }
 };
 
@@ -1543,79 +1141,74 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
+    const complete = makeCompleter("onFromChanged total", t0, event);
 
     try {
-        if (!item) { event.completed(); return; }
+        if (!item) return complete();
+        log("from changed — re-evaluating for the new account");
 
-        console.log("[CardByte] onFromChangedHandler: account changed, re-evaluating rules...");
-        notifyWithTiming(item, "Account changed — updating signature...", t0);
+        const seq = beginWrite();
+        const userEmail = mailbox?.userProfile?.emailAddress;
 
-        _activeSignatureId = null;
+        // The account changed, so every cached signature and rule belongs to
+        // the previous identity.
+        store.remove(K_SIG_CACHE, K_SIG_CACHE_LEGACY_DEFAULT, K_RULES, K_RULES_TS);
         await markActiveSignature(item, null);
 
-        const userEmail = mailbox?.userProfile?.emailAddress;
-        if (userEmail) {
-            const enc = await encryptEmail(userEmail);
-            await fetchAndCacheRules(enc, getXPlatform());
-        }
+        if (userEmail) await fetchRules(await encryptEmail(userEmail));
 
-        const emails = await getAllRecipientEmails(item);
-        if (emails.length > 0) {
-            _lastRecipientSnapshot = serializeRecipients(emails);
-            await onRecipientsChanged(item, mailbox);
-        } else {
-            await applySignatureCore(item, mailbox, { fetchIfMissing: true, markDefault: true }, false);
-        }
-
-        setTimeout(() => removeNotification(item), 3000);
-
-    } catch (err) {
-        console.error("[CardByte] onFromChangedHandler error:", err);
+        _lastSnapshot = serializeRecipients(await getAllRecipientEmails(item));
+        await evaluateAndApply(item, mailbox, seq);
+    } catch (e) {
+        err("onFromChangedHandler error:", e);
     } finally {
-        logTiming("onFromChangedHandler total", t0);
-        try { event.completed(); } catch (_) { }
+        complete();
     }
 };
 
-const onRecipientsChangedHandler = async function (event = { completed: () => { } }) {
+const onSendHandler = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
     const item = mailbox?.item;
+    // Always allow the send: a signature problem must never block the user.
+    const complete = makeCompleter("onSendHandler total", t0, event, { allowEvent: true });
 
     try {
-        if (!item) { event.completed(); return; }
+        if (!item) return complete();
+        log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
+        showNotification(item, "Verifying signature...");
 
-        console.log("[CardByte] onRecipientsChangedHandler: recipients changed, re-evaluating rules...");
-
-        const emails = await getAllRecipientEmails(item);
-        const snapshot = serializeRecipients(emails);
-
-        if (snapshot === _lastRecipientSnapshot) {
-            event.completed();
-            return;
-        }
-        _lastRecipientSnapshot = snapshot;
-
-        await onRecipientsChanged(item, mailbox);
-
-    } catch (err) {
-        console.error("[CardByte] onRecipientsChangedHandler error:", err);
+        const budget = isMac() ? SEND_BUDGET_MS_MAC : SEND_BUDGET_MS;
+        await withTimeout(onSendCore(item, mailbox), budget, "onSendCore");
+    } catch (e) {
+        warn("onSend timeout/error:", e.message);
+        removeNotification(item);
     } finally {
-        logTiming("onRecipientsChangedHandler total", t0);
-        try { event.completed(); } catch (_) { }
+        complete();
     }
 };
 
-// =============================================================================
-//  REGISTER OFFICE ACTIONS
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+//  BOOTSTRAP
+//  NOTE: on Windows classic the event runtime does not run Office.onReady —
+//  never put logic here that a handler depends on.
+// ─────────────────────────────────────────────────────────────────────────────
 
-if (typeof Office !== "undefined" && typeof Office.actions !== "undefined") {
+Office.onReady(() => {
+    log(`ready — ${CB_VERSION} | platform=${detectPlatform()} | X-Platform=${getXPlatform()} | session=${getSessionId()}`);
+    try {
+        const d = Office.context.mailbox?.diagnostics;
+        if (d) log(`host=${d.hostName} version=${d.hostVersion}`);
+    } catch (_) { }
+    sigCache.purge();
+});
+
+if (typeof Office !== "undefined" && Office.actions?.associate) {
     Office.actions.associate("applySignature", applySignature);
     Office.actions.associate("onSendHandler", onSendHandler);
     Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
     Office.actions.associate("onRecipientsChangedHandler", onRecipientsChangedHandler);
-    console.log(`[CardByte] ${CB_VERSION} registered: applySignature, onSendHandler, onFromChangedHandler, onRecipientsChangedHandler`);
+    log(`${CB_VERSION} handlers registered`);
 } else {
-    console.log("[CardByte] Office.actions unavailable — LaunchEvent path inactive (Outlook 2016/2019)");
+    log("Office.actions unavailable — LaunchEvent path inactive (Outlook 2016/2019)");
 }
