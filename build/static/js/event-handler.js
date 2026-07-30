@@ -182,7 +182,7 @@ const isMac = () => detectPlatform() === "mac";
 const getMaxHtmlSize = () => isMobile() ? MAX_SAFE_HTML_SIZE_MOBILE : MAX_SAFE_HTML_SIZE;
 
 function getXPlatform() {
-    if (X_PLATFORM_FORCE) return X_PLATFORM_FORCE;
+    // if (X_PLATFORM_FORCE) return X_PLATFORM_FORCE;
     const p = detectPlatform();
     if (p === "mac") return "MAC";
     return "WINDOWS";
