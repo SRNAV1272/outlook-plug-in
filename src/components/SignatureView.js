@@ -128,9 +128,9 @@ export default function SignatureView({
 
     // ─── Platform helpers ────────────────────────────────────────────────────
     const getXPlatform = useCallback(() => {
-        // const p = (Office?.context?.platform || "").toLowerCase();
-        // if (p === "mac") return "MAC";
-        // if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
+        const p = (Office?.context?.platform || "").toLowerCase();
+        if (p === "mac") return "MAC";
+        if (p === "mobile-ios" || p === "mobile-android") return "MOBILE";
         return "WINDOWS";
     }, [Office]);
 

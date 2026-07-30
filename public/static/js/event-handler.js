@@ -1412,6 +1412,13 @@ async function _onSendCore(item, mailbox) {
 Office.onReady(() => {
     console.log(`✅ Office.onReady Started — CardByte ${CB_VERSION}`);
     console.log(`[CardByte] Platform: ${detectPlatform()} | X-Platform header: ${getXPlatform()}`);
+
+    if (Office.context.mailbox) {
+        console.log("📧 Mailbox Diagnostics:", Office.context.mailbox.diagnostics);
+        console.log("📌 Host Name:", Office.context.mailbox.diagnostics.hostName);
+        console.log("📌 Host Version:", Office.context.mailbox.diagnostics.hostVersion);
+    }
+
     purgeStaleSigById();
 });
 
