@@ -654,7 +654,7 @@ async function fetchDefaultSignature(encryptedMail) {
             const notFound = res.status === 404 || /not\s*found/i.test(msg);
             return { html: null, explicit: notFound };
         }
-        const html = JSON.parse(await aesDecrypt(await res.text()))?.html + `<table><tr><td>${getXPlatform()}</td></tr></table>` || null;
+        const html = JSON.parse(await aesDecrypt(await res.text()))?.html;
         return { html, explicit: true };
     } catch (e) {
         warn("fetchDefaultSignature crashed:", e);
