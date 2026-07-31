@@ -124,12 +124,12 @@ const R_RULES_MAX_BYTES = 20 * 1024;
 
 const SIG_TTL_MS = 5 * 60 * 1000;
 const SIG_PURGE_MS = 5 * 60 * 60 * 1000;
-const RULES_TTL_MS = 5 * 60 * 1000;
+const RULES_TTL_MS = 5 * 60 * 60 * 1000;
 const ACTIVE_SIG_MAX_AGE_MS = 1 * 60 * 60 * 1000;
 
 // One size ceiling, actually enforced. v6 declared 500KB/200KB constants and
 // then hardcoded 100KB in the apply path; observed rule signatures are ~42KB.
-const MAX_SIG_BYTES = 200 * 1024;
+const MAX_SIG_BYTES = 100 * 1024;
 
 // Send budgets. Mac starts cold, so it gets headroom plus per-leg fetch bounds.
 const SEND_BUDGET_MS_MAC = 12_000;
@@ -232,7 +232,7 @@ function getXPlatform() {
             // otherwise claim it. Android still reports MOBILE.
             p === "mobile-ios" ? "MAC" :
                 p === "owa" ? "OWA" :
-                    isMobile() ? "MOBILE" :
+                    isMobile() ? "MAC" :
                         "WINDOWS";
     return X_PLATFORM_MAP[base] || base;
 }
