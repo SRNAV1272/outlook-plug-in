@@ -1,8 +1,8 @@
 import axios from "axios";
 const API_BASE_URL =
   process.env.NODE_ENV === "development"
-    ? "https://ns-enterprise.cardbyte.ai" // proxy handles it
-    : "https://ns-enterprise.cardbyte.ai"; // PROD backend
+    ? "https://enterprise.cardbyte.ai" // proxy handles it
+    : "https://enterprise.cardbyte.ai"; // PROD backend
 
 export const API = axios.create({
   baseURL: API_BASE_URL,

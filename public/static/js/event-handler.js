@@ -93,7 +93,7 @@ const CB_VERSION = "v7.1.0";
 
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-const BASE_URL = "https://ns-enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://enterprise.cardbyte.ai/email-signature";
 
 // The id standing for "the user's default (non-rule) signature".
 // Replace with a real backend id when /html/outlook/get-active returns one;
