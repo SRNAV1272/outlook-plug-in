@@ -1,7 +1,7 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v7.1)
+//  CardByte Outlook Add-in — event-handler.js (v7.2)
 //
 //  ARCHITECTURE: THE SIGNATURE ID IS THE STATE. THE HTML IS A DISPOSABLE CACHE.
 //
@@ -25,6 +25,41 @@
 //  by network luck.
 //
 // -----------------------------------------------------------------------------
+//  CHANGES IN v7.2.0 — "NO RECIPIENTS" IS AN ANSWER, NOT A FAILURE
+//  (v7.1 symptom: remove every recipient from a mail that had already matched a
+//   rule, and the rule's signature stayed on the body. The default never came
+//   back.)
+//
+//   E. EMPTY RECIPIENT LIST vs FAILED RECIPIENT READ. v7.1 conflated the two:
+//      officeAsync falls back to null on timeout/error, getRecipients turned
+//      that into [], and findMatchingRule returned `blocked: true` for any
+//      empty list. evaluateAndApply's blocked branch then found the previously
+//      persisted P_ACTIVE_SIG and returned early — so the rule signature was
+//      pinned to the body for the rest of the compose session. It only ever
+//      looked right on first compose, where applySignature clears the active id
+//      before evaluating and so has nothing to keep.
+//
+//      Zero recipients is a perfectly evaluable state: hasInternal and
+//      hasExternal are both false, "internal"/"external" rules correctly fail
+//      to match, and an "all" rule (or DEFAULT_ID) legitimately wins. What
+//      actually prevents evaluation is a read that never returned.
+//
+//      getRecipients / getAllRecipientEmails / serializeRecipients now return
+//      null for "the host did not answer" and [] / "" for "genuinely none".
+//      findMatchingRule blocks on null only. Every snapshot call site is
+//      null-guarded; markActiveSignature already removes P_RECIP_SNAPSHOT when
+//      handed null, which makes send time re-evaluate rather than trust a
+//      snapshot that was never taken.
+//
+//      SUPERSEDES v7.1 change note 2. That note is why this bug shipped: it
+//      described "an empty recipient list no longer resets the body to the
+//      default" as the intended cure for OWA's mid-typing flicker. The flicker
+//      is real, but blocking on emptiness was too blunt a fix. The flicker is
+//      now handled where it belongs — EMPTY_RECIP_SETTLE_MS in
+//      onRecipientsChangedHandler re-reads before acting on a newly empty list,
+//      so deleting the last recipient in order to retype it does not churn the
+//      body. Do NOT reinstate the block; widen the debounce instead.
+//
 //  CHANGES IN v7.1.0 — RULES ARE FETCHED / EVALUATED CORRECTLY
 //  (v7.0 symptom: rules looked right in the React taskpane but were wrong or
 //   frozen here. All four causes were in this file, not the backend.)
@@ -65,8 +100,10 @@
 //      event runtime serialises activations. Recipient tracking now relies on
 //      the OnMessageRecipientsChanged LaunchEvent. Confirm it fires on your Mac
 //      build; if it does not, re-add polling there specifically.
-//   2. An empty recipient list no longer resets the body to the default. OWA
-//      fires mid-typing with zero recipients; v6 wrote the default on each one.
+//   2. (Superseded by (E) above.) Emptying the recipient list DOES return the
+//      body to the default signature — that is the correct evaluation result,
+//      not a reset. Mid-typing flicker is suppressed by debouncing, not by
+//      refusing to evaluate.
 //   3. X_PLATFORM_FORCE is removed. The real platform is detected, including a
 //      new "OWA" value, then mapped through X_PLATFORM_MAP before it is sent.
 //   4. Default-signature HTML shares the one id-keyed cache (id = "default").
@@ -85,7 +122,7 @@
 //      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v7.1.0";
+const CB_VERSION = "v7.2.0";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -141,6 +178,13 @@ const COMPOSE_TYPE_TIMEOUT_MS = 1_500;
 // evaluations while an address is still being typed.
 const RECIPIENT_SETTLE_MS = 350;
 
+// FIX (E). Extra settle applied ONLY when the list has just become empty.
+// Deleting the last recipient in order to retype it is the common case, and
+// without this the body would churn rule -> default -> rule. This is the right
+// place to widen if OWA still flickers on your build — do not go back to
+// treating "empty" as "cannot evaluate".
+const EMPTY_RECIP_SETTLE_MS = 400;
+
 // FIX (D). The backend accepts WINDOWS only; MAC and MOBILE come back non-2xx,
 // which is what made every rules fetch fail here while the taskpane (which
 // accidentally always sent WINDOWS) kept working. Empty this map — `{}` — once
@@ -152,6 +196,10 @@ const X_PLATFORM_MAP = { MAC: "MAC", MOBILE: "MAC", OWA: "WINDOWS" };
 //          mixed To matches both the internal and external rules and priority
 //          decides.
 //   true : "internal" matches only when EVERY recipient is internal.
+//
+// Note both readings agree on an EMPTY list: hasInternal and hasExternal are
+// false, so neither "internal" nor "external" matches and only an "all" rule
+// (or the default) can win. That is deliberate — see (E).
 const INTERNAL_REQUIRES_NO_EXTERNAL = false;
 
 const NOTIF_KEY = "cardbyte_sig_status";
@@ -256,6 +304,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Wrap a callback-style Office API in a promise with a hard ceiling, resolving
 // to `fallback` on failure or timeout so no caller can hang.
+//
+// IMPORTANT (E): callers that must distinguish "the host answered with nothing"
+// from "the host did not answer" have to inspect the resolved value, not the
+// payload inside it — on failure this resolves to `fallback`, which is null by
+// default. getRecipients depends on exactly that.
 function officeAsync(fn, { ms = COMPOSE_TYPE_TIMEOUT_MS, fallback = null, label = "office call" } = {}) {
     return new Promise((resolve) => {
         let done = false;
@@ -288,6 +341,9 @@ const isCurrent = (seq) => seq === _writeSeq;
 // Recipient snapshot of the last evaluation in THIS runtime. Declared up here
 // rather than between the entry points so it is unambiguously initialised
 // before any handler can read it.
+//
+// "" is a real value (evaluated, no recipients) and must never be conflated
+// with null (never read). Only ever assign a non-null snapshot to it.
 let _lastSnapshot = "";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -658,6 +714,10 @@ const getManualOverride = (item) => getItemProp(item, P_MANUAL_SIG);
 //  localStorage and roaming are fallbacks.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// `snapshot` may legitimately be "" (evaluated with no recipients). A null
+// snapshot means we never got a reliable read, and the property is REMOVED
+// rather than written — decideSendId then re-evaluates instead of trusting a
+// comparison against a snapshot that was never taken. See (E).
 async function markActiveSignature(item, id, snapshot = null) {
     if (id == null) {
         store.remove(K_ACTIVE_SIG, K_ACTIVE_SIG_TS);
@@ -834,6 +894,11 @@ async function prefetchRuleSignatures(userEmail) {
         enabledRulesWithSignatures(rulesJson).map((r) => String(r.signatureId))
     )].filter((id) => !sigCache.get(id, { skipTtl: true }));
 
+    // The default is now a first-class prefetch target: emptying the recipient
+    // list can send us back to it at any moment, and on Mac that would
+    // otherwise be a cold fetch inside the send budget. See (E).
+    if (!sigCache.get(DEFAULT_ID, { skipTtl: true })) ids.push(DEFAULT_ID);
+
     if (!ids.length) return;
     log(`prefetching ${ids.length} signature(s)`);
     await Promise.allSettled(ids.map((id) => resolveSigHtml(id, userEmail)));
@@ -841,6 +906,17 @@ async function prefetchRuleSignatures(userEmail) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  RECIPIENTS
+//
+//  FIX (E). THE RETURN CONTRACT IS THREE-VALUED, AND CALLERS DEPEND ON IT:
+//     null  — the host did not answer (timeout, error, unsupported item).
+//             Nothing can be concluded; do not evaluate, do not snapshot.
+//     []    — the host answered: there are no recipients. This is a RESULT.
+//             Rules evaluate against it normally and the default wins.
+//     [...] — the host answered with recipients.
+//
+//  v7.1 collapsed the first two into [] and then treated any empty list as
+//  "cannot evaluate", which pinned a rule signature to the body forever once
+//  the user cleared the To line. Keep the three states distinct.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function getRecipients(field) {
@@ -848,21 +924,33 @@ async function getRecipients(field) {
         ms: FETCH_BUDGET_MS,
         label: "recipients getAsync",
     });
-    return res?.value || [];
+    // officeAsync resolves to its fallback (null) on failure/timeout; a
+    // successful result with no recipients has .value === [].
+    return res ? (res.value || []) : null;
 }
 
 async function getAllRecipientEmails(item) {
-    if (!item?.to?.getAsync) return [];
+    if (!item?.to?.getAsync) return null;
+
     const [to, cc] = await Promise.all([
         getRecipients(item.to),
         item.cc?.getAsync ? getRecipients(item.cc) : Promise.resolve([]),
     ]);
+
+    // A failed To read makes the whole picture unusable. A failed Cc read is
+    // survivable — To alone already decides internal/external in every shipped
+    // rule — so it degrades to an empty Cc rather than poisoning the result.
+    if (to === null) return null;
+    if (cc === null) warn("cc read failed — evaluating against To only");
+
     return [...new Set(
-        [...to, ...cc].map((r) => (r.emailAddress || "").toLowerCase().trim()).filter(Boolean)
+        [...to, ...(cc || [])].map((r) => (r.emailAddress || "").toLowerCase().trim()).filter(Boolean)
     )];
 }
 
-const serializeRecipients = (emails) => [...emails].sort().join(",");
+// Preserves the three-valued contract: null in, null out. "" means "evaluated,
+// no recipients" and is a legitimate snapshot value to persist and compare.
+const serializeRecipients = (emails) => (emails === null ? null : [...emails].sort().join(","));
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  COMPOSE TYPE
@@ -958,6 +1046,9 @@ function enabledRulesWithSignatures(rulesJson) {
     return usable.sort((a, b) => (Number(a.priority) || 0) - (Number(b.priority) || 0));
 }
 
+// With zero recipients both flags are false, so "internal" and "external" both
+// fail and only "all" (or no recipientType) can match — which is exactly the
+// behaviour that returns an emptied mail to the default signature. See (E).
 function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     const rt = (recipientType || "").toLowerCase().trim();
     if (!rt || rt === "all") return true;
@@ -987,8 +1078,13 @@ function senderMatches(rule, senderEmail) {
 /**
  * @returns {Promise<{ rule: object|null, blocked: boolean }>}
  *   blocked = we could not evaluate safely (unknown compose type in strict
- *   mode, or no rules available), so the caller must NOT treat a null rule as
- *   "the default applies".
+ *   mode, no rules available, or an unreadable recipient list), so the caller
+ *   must NOT treat a null rule as "the default applies".
+ *
+ *   FIX (E): an EMPTY but successfully read recipient list is NOT blocked. It
+ *   evaluates normally — no recipient can be internal or external, so
+ *   recipient-scoped rules drop out and `{ rule: null, blocked: false }` tells
+ *   the caller the default legitimately applies.
  */
 async function findMatchingRule(item, senderEmail, {
     allowNetwork = false,
@@ -1017,14 +1113,23 @@ async function findMatchingRule(item, senderEmail, {
     }
 
     let emails = await getAllRecipientEmails(item);
-    if (!emails.length && isMac()) {
-        // Mac occasionally reports an empty list on first read.
+
+    // Mac occasionally reports null/empty on the first read of a list that is
+    // in fact populated. Retry once and prefer the retry only if it answered.
+    if ((emails === null || emails.length === 0) && isMac()) {
         await sleep(400);
-        emails = await getAllRecipientEmails(item);
+        const retry = await getAllRecipientEmails(item);
+        if (retry !== null) emails = retry;
     }
-    if (!emails.length) {
-        log("no recipients — cannot evaluate rules");
+
+    if (emails === null) {
+        warn("recipient list unreadable — refusing to evaluate");
         return { rule: null, blocked: true };
+    }
+    if (emails.length === 0) {
+        // Deliberately NOT blocked — see (E). Falls through so recipient-scoped
+        // rules fail to match and the caller applies the default.
+        log("no recipients — evaluating as an empty recipient set");
     }
 
     const senderDomain = getDomain(senderEmail);
@@ -1048,6 +1153,7 @@ async function findMatchingRule(item, senderEmail, {
         strict: strictComposeType,
         composeType,
         senderDomain,
+        recipients: emails.length,
         hasInternal,
         hasExternal,
         domains,
@@ -1183,8 +1289,10 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
     });
 
     if (blocked) {
-        // Could not evaluate (no recipients yet, no rules). Do NOT reset the
-        // body to the default — that was v6's mid-typing signature flicker.
+        // Could not evaluate (no rules, unreadable recipients, unknown compose
+        // type). Do NOT reset the body to the default — that was v6's mid-typing
+        // flicker. Note that an EMPTY recipient list no longer lands here: it is
+        // an evaluable state and falls through to DEFAULT_ID below. See (E).
         const active = await getItemProp(item, P_ACTIVE_SIG);
         if (active) { log("evaluation blocked — keeping active id:", active); return; }
         log("evaluation blocked and nothing applied yet — applying default");
@@ -1195,6 +1303,9 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 
     const applied = await applyById(item, targetId, userEmail, seq, { revalidate: true });
     if (applied && isCurrent(seq)) {
+        // May be null if the post-apply read failed; markActiveSignature then
+        // removes the snapshot property so send time re-evaluates rather than
+        // comparing against something we never measured.
         const snapshot = serializeRecipients(await getAllRecipientEmails(item));
         await markActiveSignature(item, targetId, snapshot);
     }
@@ -1207,6 +1318,9 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function decideSendId(item, userEmail) {
+    // null = unreadable. Never used as a snapshot, and never compared equal to
+    // a persisted one — an unreadable list must force re-evaluation, not a
+    // lucky match. "" (no recipients) IS comparable and IS persistable.
     const currentSnap = serializeRecipients(await getAllRecipientEmails(item));
 
     const override = await getManualOverride(item);
@@ -1219,7 +1333,7 @@ async function decideSendId(item, userEmail) {
 
     // Recipients unchanged since the compose-time decision: skip re-evaluation
     // (the expensive, Mac-hostile part) but still reapply the id.
-    if (activeId && snapshot !== null && snapshot === currentSnap) {
+    if (activeId && snapshot !== null && currentSnap !== null && snapshot === currentSnap) {
         return { id: activeId, snapshot: currentSnap, reason: "recipients unchanged since compose", persist: false };
     }
 
@@ -1238,6 +1352,9 @@ async function decideSendId(item, userEmail) {
         return { id: fallback, snapshot: currentSnap, reason: "evaluation blocked — persisted id", persist: false };
     }
     if (!blocked) {
+        // Includes the emptied-recipient-list case: evaluation succeeded and
+        // nothing matched, so the default is the right answer even though an
+        // earlier rule id is still persisted on the item.
         return { id: DEFAULT_ID, snapshot: currentSnap, reason: "no rule matched", persist: true };
     }
     return { id: fallback || DEFAULT_ID, snapshot: currentSnap, reason: "last resort", persist: false };
@@ -1306,7 +1423,11 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         await Promise.allSettled([composeTypeP, rulesP]);
 
-        _lastSnapshot = serializeRecipients(await getAllRecipientEmails(item));
+        // Only overwrite the baseline with a real reading — a null would make
+        // the next recipients-changed event compare against nothing.
+        const snap0 = serializeRecipients(await getAllRecipientEmails(item));
+        if (snap0 !== null) _lastSnapshot = snap0;
+
         await evaluateAndApply(item, mailbox, seq);
 
         if (userEmail && !isMobile()) {
@@ -1332,11 +1453,27 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
         // address produces a recipient set we do not want to evaluate.
         await sleep(RECIPIENT_SETTLE_MS);
 
-        const snapshot = serializeRecipients(await getAllRecipientEmails(item));
+        let snapshot = serializeRecipients(await getAllRecipientEmails(item));
+        if (snapshot === null) { log("recipient read failed — skipping"); return complete(); }
+
+        // FIX (E). The list has just gone empty. That is a legitimate state and
+        // WILL be evaluated — but it is also the midpoint of "delete the last
+        // recipient, type a new one", so re-read once before acting to avoid a
+        // rule -> default -> rule churn. Widen EMPTY_RECIP_SETTLE_MS here if a
+        // host still flickers; do not go back to skipping the evaluation.
+        if (snapshot === "" && _lastSnapshot !== "") {
+            await sleep(EMPTY_RECIP_SETTLE_MS);
+            const recheck = serializeRecipients(await getAllRecipientEmails(item));
+            if (recheck === null) { log("recipient re-read failed — skipping"); return complete(); }
+            snapshot = recheck;
+        }
+
         if (snapshot === _lastSnapshot) { log("recipients unchanged — skipping"); return complete(); }
         _lastSnapshot = snapshot;
 
-        log("recipients changed — re-evaluating");
+        log(snapshot === ""
+            ? "all recipients removed — re-evaluating (default expected)"
+            : "recipients changed — re-evaluating");
         await evaluateAndApply(item, mailbox, beginWrite());
     } catch (e) {
         err("onRecipientsChangedHandler error:", e);
@@ -1368,7 +1505,9 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
 
         if (userEmail) await fetchRules(await encryptEmail(userEmail));
 
-        _lastSnapshot = serializeRecipients(await getAllRecipientEmails(item));
+        const snap0 = serializeRecipients(await getAllRecipientEmails(item));
+        if (snap0 !== null) _lastSnapshot = snap0;
+
         await evaluateAndApply(item, mailbox, seq);
     } catch (e) {
         err("onFromChangedHandler error:", e);
