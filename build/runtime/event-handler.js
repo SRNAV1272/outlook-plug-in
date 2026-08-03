@@ -1,7 +1,7 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v7.2)
+//  CardByte Outlook Add-in — event-handler.js (v7.3)
 //
 //  ARCHITECTURE: THE SIGNATURE ID IS THE STATE. THE HTML IS A DISPOSABLE CACHE.
 //
@@ -23,6 +23,83 @@
 //  awaits. Each entry point takes a seq from beginWrite(); a write is dropped
 //  if seq is no longer current. Last decision wins deterministically instead of
 //  by network luck.
+//
+// -----------------------------------------------------------------------------
+//  CHANGES IN v7.3.0 — THE EMPTY-RECIPIENT DEFAULT NOW WORKS ON MOBILE
+//
+//  v7.2 fixed the empty-recipient case for Windows/OWA by making "no
+//  recipients" an evaluable state. Mobile still failed, for reasons entirely
+//  separate from that change. Mobile is the platform where NOTHING runs at
+//  compose time, so every one of these lands at send:
+//
+//   F. STRICT COMPOSE-TYPE BLOCKED THE SEND-TIME EVALUATION, AND THE FALLBACK
+//      WAS THE OLD RULE ID. Most likely cause of the reported symptom. Mobile
+//      does not support getComposeTypeAsync, so detectComposeType returns null;
+//      at send `strictComposeType` is on, so findMatchingRule returned
+//      `blocked: true` immediately. decideSendId then hit
+//      `if (blocked && fallback) return fallback` — and the fallback is the
+//      PREVIOUSLY PERSISTED RULE ID. Emptying the recipients therefore
+//      reapplied the rule signature at send, which is exactly "the default is
+//      not applied".
+//
+//      The blocking is now granular. Compose type is consulted only when it can
+//      still change the answer: sender and recipient are filtered FIRST, and if
+//      no enabled rule survives that filter, no rule can match whatever the
+//      compose type is — so the default applies and nothing is blocked. With an
+//      empty recipient list every internal/external rule drops out, which for
+//      most tenants leaves zero candidates. If candidates do survive and the
+//      highest-priority one is context-agnostic ("all"/unset), it wins outright
+//      without needing the compose type either.
+//
+//   G. THE BLOCKED FALLBACK REUSED AN ID DECIDED FOR A DIFFERENT RECIPIENT SET.
+//      By construction, decideSendId only reaches the blocked branch when the
+//      persisted snapshot does NOT match the current one — so the persisted id
+//      was chosen under recipients that no longer exist. When the current list
+//      is confirmed EMPTY, that id cannot be right and the default is used
+//      instead. (Left alone when the list is merely different: dropping a
+//      possibly-correct rule signature is worse than reapplying it.)
+//
+//   H. ROAMED ACTIVE ID LEAKED ACROSS DEVICES. R_ACTIVE_SIG is mailbox-scoped,
+//      so a rule id decided on the desktop roams to the phone. On mobile —
+//      where nothing is persisted on the item because no compose event fires —
+//      getActiveSignatureId() fell through to that roamed value and applied
+//      another device's decision to this mail. The roamed tier is now consulted
+//      only when the recipient list could not be read at all.
+//
+//   I. X_PLATFORM_MAP CONTRADICTED ITS OWN DOCUMENTATION. Fix (D) says MAC and
+//      MOBILE are collapsed onto WINDOWS because the backend has no bucket for
+//      them — but the map shipped as `{ MAC: "MAC", ... }`, so Mac and every
+//      mobile client (which resolve to MAC) kept sending a value the header
+//      itself says comes back non-2xx. Every fetch on those platforms then
+//      fails, and the default signature is the id least likely to be in cache
+//      when the recipients are emptied. Now mapped to WINDOWS as documented.
+//      VERIFY AGAINST YOUR BACKEND: if it does accept MAC, revert this one line
+//      rather than the rest of the fix.
+//
+//   J. DEFAULT_ID IS NOW PREFETCHED ON MOBILE. prefetching was skipped wholesale
+//      on mobile, so when a rule matched, the default HTML was never warmed —
+//      and the empty-recipient transition needs precisely that id, on a cold
+//      runtime, inside the send budget. Rule signatures are still not
+//      prefetched on mobile (bandwidth); the single default is.
+//
+//   K. COLD-RUNTIME BUDGETS NOW COVER MOBILE. Mobile got the 5s desktop send
+//      budget and the 2.5s recipient-read budget despite starting as cold as
+//      Mac. Both now use the cold-start values, and the Mac-only recipient
+//      re-read retry applies to mobile too. A slow read that times out is
+//      classified as UNREADABLE, which blocks evaluation — so a budget that is
+//      too tight reintroduces the bug it was meant to prevent.
+//
+//   L. HOSTS WITHOUT setSignatureAsync NO LONGER LOSE THE COMPOSE DECISION.
+//      Mobile has no setSignatureAsync, so a compose-time apply cannot succeed
+//      there; evaluateAndApply treated that as "nothing applied" and skipped
+//      persisting the id, discarding the decision. The id is now persisted
+//      anyway so the send runtime can act on it via appendOnSendAsync, and the
+//      user-facing error is suppressed when the host simply cannot write yet.
+//
+//  MOBILE PLATFORM LIMIT, NOT FIXABLE HERE: OnMessageRecipientsChanged is not
+//  raised by Outlook mobile. The signature therefore does not visibly update
+//  while composing on a phone — the correction happens at send. If it must be
+//  live there, that is the one place recipient polling would have to come back.
 //
 // -----------------------------------------------------------------------------
 //  CHANGES IN v7.2.0 — "NO RECIPIENTS" IS AN ANSWER, NOT A FAILURE
@@ -110,7 +187,7 @@
 //      The legacy cardbyte_cached_signature key is still read, so a warm cache
 //      written by the taskpane build is not thrown away.
 //
-//  DEPLOYMENT PREREQS FOR MAC (not fixable in this file):
+//  DEPLOYMENT PREREQS FOR MAC / MOBILE (not fixable in this file):
 //   a) /.well-known/microsoft-officeaddins-allowed.json must list the add-in id
 //      and this file's URL, and the API must send CORS headers. Otherwise every
 //      fetch from the Mac event runtime rejects with "TypeError: Load failed".
@@ -118,11 +195,13 @@
 //      a "Load failed" TypeError is this.
 //   b) XML (add-in only) manifest with LaunchEvents: OnNewMessageCompose,
 //      OnMessageRecipientsChanged, OnMessageFromChanged, OnMessageSend.
+//      Mobile honours only a subset — confirm which ones your build actually
+//      raises before assuming a handler ran.
 //   c) Mac debugging: defaults write com.microsoft.Outlook
 //      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v7.2.0";
+const CB_VERSION = "v7.3.0";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -154,6 +233,8 @@ const P_COMPOSE_TYPE = "cardbyte_compose_type";
 const P_RECIP_SNAPSHOT = "cardbyte_recip_snapshot";
 
 // roamingSettings — mailbox-scoped, ~32KB total. Small values only; never HTML.
+// NOTE (H): mailbox-scoped means CROSS-DEVICE. R_ACTIVE_SIG is a last-resort
+// hint, never evidence about the item currently being composed.
 const R_ACTIVE_SIG = "cb_active_sig";
 const R_RULES = "cb_rules";
 const R_RULES_TS = "cb_rules_ts";   // FIX (A): roamed rules were immortal without this
@@ -168,10 +249,12 @@ const ACTIVE_SIG_MAX_AGE_MS = 1 * 60 * 1000;
 // then hardcoded 100KB in the apply path; observed rule signatures are ~42KB.
 const MAX_SIG_BYTES = 100 * 1024;
 
-// Send budgets. Mac starts cold, so it gets headroom plus per-leg fetch bounds.
-const SEND_BUDGET_MS_MAC = 12_000;
+// Send budgets. FIX (K): "cold" is Mac AND mobile — both get a fresh runtime
+// with empty localStorage per event, so both may have to fetch inside the send.
+const SEND_BUDGET_MS_COLD = 12_000;
 const SEND_BUDGET_MS = 5_000;
 const FETCH_BUDGET_MS = 2_500;
+const FETCH_BUDGET_MS_COLD = 5_000;
 const COMPOSE_TYPE_TIMEOUT_MS = 1_500;
 
 // Let OWA's recipient events settle before reading; avoids a burst of
@@ -185,11 +268,13 @@ const RECIPIENT_SETTLE_MS = 350;
 // treating "empty" as "cannot evaluate".
 const EMPTY_RECIP_SETTLE_MS = 400;
 
-// FIX (D). The backend accepts WINDOWS only; MAC and MOBILE come back non-2xx,
-// which is what made every rules fetch fail here while the taskpane (which
-// accidentally always sent WINDOWS) kept working. Empty this map — `{}` — once
-// the API accepts the real values, and nothing else needs to change.
-const X_PLATFORM_MAP = { MAC: "MAC", MOBILE: "MAC", OWA: "WINDOWS" };
+// FIX (I). This map exists because the backend accepts WINDOWS only — MAC and
+// MOBILE come back non-2xx, which is what makes every fetch fail on those
+// platforms. v7.1/v7.2 documented that collapse but shipped `MAC: "MAC"`, so it
+// never actually happened; mobile resolves to MAC and was hit hardest.
+// Empty this map — `{}` — once the API accepts the real values. If your backend
+// DOES accept MAC, change this line back and re-test; nothing else depends on it.
+const X_PLATFORM_MAP = { MAC: "WINDOWS", MOBILE: "WINDOWS", OWA: "WINDOWS" };
 
 // PRODUCT DECISION, all platforms.
 //   false: recipientType "internal" matches if ANY recipient is internal, so a
@@ -199,7 +284,7 @@ const X_PLATFORM_MAP = { MAC: "MAC", MOBILE: "MAC", OWA: "WINDOWS" };
 //
 // Note both readings agree on an EMPTY list: hasInternal and hasExternal are
 // false, so neither "internal" nor "external" matches and only an "all" rule
-// (or the default) can win. That is deliberate — see (E).
+// (or the default) can win. That is deliberate — see (E) and (F).
 const INTERNAL_REQUIRES_NO_EXTERNAL = false;
 
 const NOTIF_KEY = "cardbyte_sig_status";
@@ -269,6 +354,10 @@ function detectPlatform() {
 
 const isMac = () => detectPlatform() === "mac";
 const isMobile = () => detectPlatform().startsWith("mobile-");
+
+// Fresh runtime per event, empty localStorage, slower network. Mac and mobile
+// behave the same way here and get the same budgets — see (K).
+const isColdRuntime = () => isMac() || isMobile();
 
 function getXPlatform() {
     const p = detectPlatform();
@@ -485,8 +574,9 @@ async function encryptEmail(email = "") {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  STORAGE
-//  L1 memory (this runtime) / L2 localStorage (empty in Mac event runtime) /
-//  L3 roamingSettings (mailbox-scoped, reaches every runtime, tiny budget).
+//  L1 memory (this runtime) / L2 localStorage (empty in Mac and mobile event
+//  runtimes) / L3 roamingSettings (mailbox-scoped, so it reaches every runtime
+//  AND every device, tiny budget).
 // ─────────────────────────────────────────────────────────────────────────────
 
 const _mem = new Map();
@@ -594,8 +684,8 @@ const sigCache = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  RULES CACHE — mirrored to roaming when small enough, so the Mac send
-//  runtime can evaluate without a network round trip.
+//  RULES CACHE — mirrored to roaming when small enough, so the Mac and mobile
+//  send runtimes can evaluate without a network round trip.
 //
 //  FIX (A). Both tiers are now age-checked against the SAME TTL. v7.0 checked
 //  only the local timestamp and then fell back to an untimestamped roamed copy,
@@ -641,7 +731,7 @@ function setCachedRules(rulesJson) {
             // ruleset in place — a stale roam is worse than a cold fetch.
             roam.remove(R_RULES);
             roam.remove(R_RULES_TS);
-            warn(`rulesJson too large to roam (${s.length}B) — Mac event runtime will fetch live`);
+            warn(`rulesJson too large to roam (${s.length}B) — cold runtimes will fetch live`);
         }
     } catch (_) { }
 }
@@ -673,7 +763,7 @@ const _propsByItem = new WeakMap();
 function getProps(item) {
     if (_propsByItem.has(item)) return _propsByItem.get(item);
     const p = officeAsync((cb) => item.loadCustomPropertiesAsync(cb), {
-        ms: FETCH_BUDGET_MS,
+        ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS,
         label: "loadCustomPropertiesAsync",
     }).then((res) => res?.value ?? null);
     _propsByItem.set(item, p);
@@ -696,7 +786,7 @@ async function setItemProps(item, kv) {
             else props.set(k, String(v));
         }
         const res = await officeAsync((cb) => props.saveAsync(cb), {
-            ms: FETCH_BUDGET_MS,
+            ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS,
             label: "customProps saveAsync",
         });
         return !!res;
@@ -734,7 +824,15 @@ async function markActiveSignature(item, id, snapshot = null) {
     });
 }
 
-async function getActiveSignatureId(item = null) {
+/**
+ * FIX (H). `allowRoam` exists because R_ACTIVE_SIG is MAILBOX-scoped, not
+ * device-scoped: the id the desktop decided for some other mail roams to the
+ * phone. On mobile, where no compose event runs and the item properties are
+ * empty, that roamed value was the only thing left and got applied to an
+ * unrelated item. Callers that successfully read the current recipient list
+ * have enough information to decide locally and must pass allowRoam:false.
+ */
+async function getActiveSignatureId(item = null, { allowRoam = true } = {}) {
     if (item) {
         const fromItem = await getItemProp(item, P_ACTIVE_SIG);
         if (fromItem) return fromItem;
@@ -744,7 +842,9 @@ async function getActiveSignatureId(item = null) {
         const ts = parseInt(store.get(K_ACTIVE_SIG_TS) || "0", 10);
         if (!ts || Date.now() - ts <= ACTIVE_SIG_MAX_AGE_MS) return id;
     }
+    if (!allowRoam) return null;
     const roamed = roam.get(R_ACTIVE_SIG);
+    if (roamed) warn("falling back to the ROAMED active id — may belong to another device");
     return roamed ? String(roamed) : null;
 }
 
@@ -765,7 +865,7 @@ async function fetchRules(encryptedMail) {
         });
         if (!res.ok) {
             // Status is logged WITH the platform header: a 4xx that disappears
-            // when X-Platform is WINDOWS is fix (D), not a backend outage.
+            // when X-Platform is WINDOWS is fix (I), not a backend outage.
             let body = "";
             try { body = (await res.text()).slice(0, 200); } catch (_) { }
             warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, body);
@@ -777,8 +877,8 @@ async function fetchRules(encryptedMail) {
         log(`rulesJson fetched and cached (${(rulesJson.rulesList || []).length} rule(s), X-Platform=${xp})`);
         return rulesJson;
     } catch (e) {
-        // "TypeError: Load failed" in the Mac event runtime means the
-        // well-known allowlist / CORS setup is wrong. See header prereq (a).
+        // "TypeError: Load failed" in a cold runtime means the well-known
+        // allowlist / CORS setup is wrong. See header prereq (a).
         err(`fetchRules failed (X-Platform=${xp}):`, e);
         return null;
     }
@@ -787,6 +887,7 @@ async function fetchRules(encryptedMail) {
 // Default signature. Returns { html, explicit } — explicit means the server
 // gave a definitive answer, so an empty result is "unassigned", not "unknown".
 async function fetchDefaultSignature(encryptedMail) {
+    const xp = getXPlatform();
     try {
         const res = await fetch(`${BASE_URL}/html/outlook/get-active`, {
             method: "GET",
@@ -795,14 +896,14 @@ async function fetchDefaultSignature(encryptedMail) {
         if (!res.ok) {
             let msg = "";
             try { const b = JSON.parse(await res.text()); msg = String(b?.message || b?.error || ""); } catch (_) { }
-            warn("default signature fetch failed:", res.status, msg);
+            warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, msg);
             const notFound = res.status === 404 || /not\s*found/i.test(msg);
             return { html: null, explicit: notFound };
         }
         const html = JSON.parse(await aesDecrypt(await res.text()))?.html;
         return { html, explicit: true };
     } catch (e) {
-        warn("fetchDefaultSignature crashed:", e);
+        warn(`fetchDefaultSignature crashed (X-Platform=${xp}):`, e);
         return { html: null, explicit: false };
     }
 }
@@ -816,7 +917,7 @@ async function fetchSignatureById(id, encryptedMail) {
             headers: apiHeaders(encryptedMail),
         });
         if (!res.ok) {
-            err(`signature fetch failed id=${id}:`, res.status);
+            err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`);
             return { html: null, explicit: res.status === 404 };
         }
         const html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
@@ -838,8 +939,9 @@ async function fetchSignatureById(id, encryptedMail) {
  *
  * @returns {Promise<{ html: string|null, source: "cache"|"network"|"none", unassigned: boolean }>}
  */
-async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = FETCH_BUDGET_MS } = {}) {
+async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = null } = {}) {
     const key = String(id);
+    const budget = budgetMs ?? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
 
     // FIX (C) belt-and-braces: a rule that slipped through with no signatureId
     // would otherwise be requested as the literal "null" / "undefined".
@@ -856,8 +958,8 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = F
     try {
         const enc = await encryptEmail(userEmail);
         const { html, explicit } = key === DEFAULT_ID
-            ? await withTimeout(fetchDefaultSignature(enc), budgetMs, "default fetch")
-            : await withTimeout(fetchSignatureById(key, enc), budgetMs, `sig fetch ${key}`);
+            ? await withTimeout(fetchDefaultSignature(enc), budget, "default fetch")
+            : await withTimeout(fetchSignatureById(key, enc), budget, `sig fetch ${key}`);
         if (html) {
             sigCache.set(key, html);
             return { html, source: "network", unassigned: false };
@@ -888,20 +990,31 @@ async function revalidateSigHtml(id, userEmail, appliedHtml) {
     }
 }
 
-async function prefetchRuleSignatures(userEmail) {
-    const rulesJson = getCachedRules({ skipTtl: true });
-    const ids = [...new Set(
-        enabledRulesWithSignatures(rulesJson).map((r) => String(r.signatureId))
-    )].filter((id) => !sigCache.get(id, { skipTtl: true }));
+/**
+ * FIX (J). DEFAULT_ID is warmed on EVERY platform, mobile included.
+ *
+ * The default is the id most likely to be needed at the worst possible moment:
+ * a rule matched at compose (so only the rule's HTML got cached), the user then
+ * clears the To line, and the correct answer flips to the one id nobody
+ * fetched — on a cold runtime, inside the send budget. Rule signatures stay off
+ * mobile for bandwidth; the single default is worth it.
+ */
+async function prefetchSignatures(userEmail, { includeRules = true } = {}) {
+    const ids = [];
 
-    // The default is now a first-class prefetch target: emptying the recipient
-    // list can send us back to it at any moment, and on Mac that would
-    // otherwise be a cold fetch inside the send budget. See (E).
-    if (!sigCache.get(DEFAULT_ID, { skipTtl: true })) ids.push(DEFAULT_ID);
+    if (includeRules) {
+        const rulesJson = getCachedRules({ skipTtl: true });
+        for (const r of enabledRulesWithSignatures(rulesJson)) {
+            const id = String(r.signatureId);
+            if (!ids.includes(id)) ids.push(id);
+        }
+    }
+    if (!ids.includes(DEFAULT_ID)) ids.push(DEFAULT_ID);
 
-    if (!ids.length) return;
-    log(`prefetching ${ids.length} signature(s)`);
-    await Promise.allSettled(ids.map((id) => resolveSigHtml(id, userEmail)));
+    const missing = ids.filter((id) => !sigCache.get(id, { skipTtl: true }));
+    if (!missing.length) return;
+    log(`prefetching ${missing.length} signature(s):`, missing.join(", "));
+    await Promise.allSettled(missing.map((id) => resolveSigHtml(id, userEmail)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -921,7 +1034,9 @@ async function prefetchRuleSignatures(userEmail) {
 
 async function getRecipients(field) {
     const res = await officeAsync((cb) => field.getAsync(cb), {
-        ms: FETCH_BUDGET_MS,
+        // FIX (K): cold runtimes are slower; 2.5s was turning slow mobile reads
+        // into "unreadable", which blocks evaluation entirely.
+        ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS,
         label: "recipients getAsync",
     });
     // officeAsync resolves to its fallback (null) on failure/timeout; a
@@ -948,6 +1063,22 @@ async function getAllRecipientEmails(item) {
     )];
 }
 
+/**
+ * FIX (K). Cold runtimes (Mac AND mobile) sometimes answer null or an empty
+ * list on the first read of a list that is in fact populated. Retry once, and
+ * prefer the retry only if it actually answered — a null retry must never
+ * overwrite a good first read.
+ */
+async function readRecipientEmails(item) {
+    let emails = await getAllRecipientEmails(item);
+    if ((emails === null || emails.length === 0) && isColdRuntime()) {
+        await sleep(400);
+        const retry = await getAllRecipientEmails(item);
+        if (retry !== null) emails = retry;
+    }
+    return emails;
+}
+
 // Preserves the three-valued contract: null in, null out. "" means "evaluated,
 // no recipients" and is a legitimate snapshot value to persist and compare.
 const serializeRecipients = (emails) => (emails === null ? null : [...emails].sort().join(","));
@@ -955,9 +1086,14 @@ const serializeRecipients = (emails) => (emails === null ? null : [...emails].so
 // ─────────────────────────────────────────────────────────────────────────────
 //  COMPOSE TYPE
 //  Resolution order: this runtime's cache -> the item property written at
-//  compose -> live detection. Step 2 is what lets Mac's fresh send runtime
-//  inherit the compose runtime's answer instead of re-deriving it from an API
-//  that misreports there. Unknown is null, never a silent "compose".
+//  compose -> live detection. Step 2 is what lets a cold send runtime inherit
+//  the compose runtime's answer instead of re-deriving it from an API that
+//  misreports (Mac) or is absent (mobile). Unknown is null, never a silent
+//  "compose".
+//
+//  ON MOBILE STEP 2 IS USUALLY EMPTY, because no compose-time event runs to
+//  write it — which is why findMatchingRule must not treat an unknown compose
+//  type as fatal on its own. See (F).
 // ─────────────────────────────────────────────────────────────────────────────
 
 const _composeTypeByItem = new WeakMap();
@@ -1057,6 +1193,13 @@ function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     return true;
 }
 
+// A rule that applies regardless of reply/compose. These can be decided without
+// knowing the compose type at all — the hinge of fix (F).
+function isContextAgnostic(rule) {
+    const rc = (rule?.context || "").toLowerCase().trim();
+    return !rc || rc === "all";
+}
+
 function contextMatches(ruleContext, composeType) {
     const rc = (ruleContext || "").toLowerCase().trim();
     if (!rc || rc === "all") return true;
@@ -1077,58 +1220,47 @@ function senderMatches(rule, senderEmail) {
 
 /**
  * @returns {Promise<{ rule: object|null, blocked: boolean }>}
- *   blocked = we could not evaluate safely (unknown compose type in strict
- *   mode, no rules available, or an unreadable recipient list), so the caller
- *   must NOT treat a null rule as "the default applies".
+ *   blocked = we could not evaluate safely, so the caller must NOT treat a null
+ *   rule as "the default applies".
  *
- *   FIX (E): an EMPTY but successfully read recipient list is NOT blocked. It
- *   evaluates normally — no recipient can be internal or external, so
- *   recipient-scoped rules drop out and `{ rule: null, blocked: false }` tells
- *   the caller the default legitimately applies.
+ *   FIX (E): an EMPTY but successfully read recipient list is NOT blocked. No
+ *   recipient can be internal or external, so recipient-scoped rules drop out
+ *   and `{ rule: null, blocked: false }` tells the caller the default applies.
+ *
+ *   FIX (F): NEITHER IS AN UNKNOWN COMPOSE TYPE, unless it can actually change
+ *   the answer. Sender and recipient are filtered first; the compose type is
+ *   consulted only when a surviving candidate is context-scoped. This is what
+ *   makes mobile work — getComposeTypeAsync does not exist there, and the old
+ *   unconditional bail-out sent every send-time evaluation down the "reuse the
+ *   persisted rule id" path, which is precisely the reported bug.
  */
 async function findMatchingRule(item, senderEmail, {
     allowNetwork = false,
-    budgetMs = FETCH_BUDGET_MS,
+    budgetMs = null,
     strictComposeType = false,
     persistComposeType = false,
 } = {}) {
+    const budget = budgetMs ?? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
+
     let rulesJson = getCachedRules({ skipTtl: strictComposeType });
     let source = rulesJson ? describeRulesSource() : "none";
 
     if (!rulesJson && allowNetwork && senderEmail) {
         warn("rules not cached — live fetch");
         const enc = await encryptEmail(senderEmail);
-        rulesJson = await withTimeout(fetchRules(enc), budgetMs, "rules fetch").catch(() => null);
+        rulesJson = await withTimeout(fetchRules(enc), budget, "rules fetch").catch(() => null);
         source = rulesJson ? "network" : "none";
     }
     if (!rulesJson) { warn("no rules available"); return { rule: null, blocked: true }; }
 
-    const composeType = await getComposeType(item, {
-        strict: strictComposeType,
-        persist: persistComposeType,
-    });
-    if (strictComposeType && !composeType) {
-        warn("composeType unknown at send — refusing to match context-specific rules");
-        return { rule: null, blocked: true };
-    }
-
-    let emails = await getAllRecipientEmails(item);
-
-    // Mac occasionally reports null/empty on the first read of a list that is
-    // in fact populated. Retry once and prefer the retry only if it answered.
-    if ((emails === null || emails.length === 0) && isMac()) {
-        await sleep(400);
-        const retry = await getAllRecipientEmails(item);
-        if (retry !== null) emails = retry;
-    }
+    const emails = await readRecipientEmails(item);
 
     if (emails === null) {
         warn("recipient list unreadable — refusing to evaluate");
         return { rule: null, blocked: true };
     }
     if (emails.length === 0) {
-        // Deliberately NOT blocked — see (E). Falls through so recipient-scoped
-        // rules fail to match and the caller applies the default.
+        // Deliberately NOT blocked — see (E).
         log("no recipients — evaluating as an empty recipient set");
     }
 
@@ -1145,31 +1277,65 @@ async function findMatchingRule(item, senderEmail, {
 
     const rules = enabledRulesWithSignatures(rulesJson);
 
+    // Everything decidable WITHOUT the compose type, in priority order.
+    const candidates = rules.filter(
+        (r) => senderMatches(r, senderEmail) && recipientTypeMatches(r.recipientType, hasInternal, hasExternal)
+    );
+
     log("rule evaluation:", {
         version: CB_VERSION,
         platform: detectPlatform(),
         xPlatform: getXPlatform(),
         rulesSource: source,          // local / roamed / network — with age
         strict: strictComposeType,
-        composeType,
         senderDomain,
         recipients: emails.length,
         hasInternal,
         hasExternal,
         domains,
         rules: rules.length,
+        candidates: candidates.length,
     });
 
-    for (const r of rules) {
-        const s = senderMatches(r, senderEmail);
+    // FIX (F), part 1. Nothing survives sender+recipient, so no rule can match
+    // whatever the compose type turns out to be. The default applies, and this
+    // is NOT a blocked evaluation. On an empty recipient list this is the usual
+    // outcome, since internal/external rules all drop out here.
+    if (!candidates.length) {
+        log("no rule can match this recipient set — default applies");
+        if (persistComposeType) {
+            // Still worth recording for the send runtime; not worth waiting for.
+            getComposeType(item, { persist: true }).catch(() => { });
+        }
+        return { rule: null, blocked: false };
+    }
+
+    const composeType = await getComposeType(item, {
+        strict: strictComposeType,
+        persist: persistComposeType,
+    });
+
+    // FIX (F), part 2. Compose type is unknown (mobile, or a strict caller with
+    // no persisted property). If the top candidate does not care about context,
+    // it wins anyway. Only when it does care is this genuinely undecidable.
+    if (strictComposeType && !composeType) {
+        const top = candidates[0];
+        if (isContextAgnostic(top)) {
+            log(`composeType unknown but top candidate is context-agnostic — matching priority=${top.priority}`);
+            return { rule: top, blocked: false };
+        }
+        warn("composeType unknown at send and the top candidate is context-scoped — cannot decide");
+        return { rule: null, blocked: true };
+    }
+
+    for (const r of candidates) {
         const c = contextMatches(r.context, composeType);
-        const p = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
         log(
-            s && c && p ? ">>> MATCH" : "    skip ",
-            `| priority=${r.priority} | sender=${s} | context=${r.context}(${c})`,
-            `| recipientType=${r.recipientType}(${p}) | sigId=${r.signatureId}`
+            c ? ">>> MATCH" : "    skip ",
+            `| priority=${r.priority} | context=${r.context}(${c})`,
+            `| recipientType=${r.recipientType} | sigId=${r.signatureId}`
         );
-        if (s && c && p) return { rule: r, blocked: false };
+        if (c) return { rule: r, blocked: false };
     }
 
     log("no rule matched — default applies");
@@ -1180,8 +1346,14 @@ async function findMatchingRule(item, senderEmail, {
 //  BODY WRITES
 //  setSignatureAsync REPLACES the signature block, so reapplying the same id is
 //  idempotent. appendOnSendAsync is a send-time-only fallback for hosts without
-//  setSignatureAsync (Mailbox < 1.10) — it appends, hence the failure guard.
+//  setSignatureAsync (Mailbox < 1.10, and Outlook mobile) — it appends, hence
+//  the failure guard.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Hosts without setSignatureAsync cannot write anything at compose time; the
+// write has to wait for appendOnSendAsync at send. Mobile is the case that
+// matters — see (L).
+const hostCanSetSignature = (item) => typeof item?.body?.setSignatureAsync === "function";
 
 async function writeSignature(item, html, { isSendTime = false } = {}) {
     const bytes = new Blob([html]).size;
@@ -1191,12 +1363,18 @@ async function writeSignature(item, html, { isSendTime = false } = {}) {
         return false;
     }
 
-    if (typeof item.body?.setSignatureAsync === "function") {
+    if (hostCanSetSignature(item)) {
         const res = await officeAsync(
             (cb) => item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, cb),
-            { ms: FETCH_BUDGET_MS, label: "setSignatureAsync" }
+            { ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS, label: "setSignatureAsync" }
         );
         if (res) { log(`signature written (${bytes}B)`); return true; }
+    } else if (!isSendTime) {
+        // FIX (L). Not an error, and not the user's problem: this host defers
+        // all signature writing to send. Stay quiet and let the decision be
+        // persisted so the send runtime can act on it.
+        log("setSignatureAsync unavailable at compose on this host — deferring the write to send");
+        return false;
     } else {
         warn("setSignatureAsync unavailable on this host");
     }
@@ -1204,7 +1382,7 @@ async function writeSignature(item, html, { isSendTime = false } = {}) {
     if (isSendTime && typeof item.body?.appendOnSendAsync === "function") {
         const res = await officeAsync(
             (cb) => item.body.appendOnSendAsync(html, { coercionType: Office.CoercionType.Html }, cb),
-            { ms: FETCH_BUDGET_MS, label: "appendOnSendAsync" }
+            { ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS, label: "appendOnSendAsync" }
         );
         if (res) { log("signature appended via appendOnSendAsync"); return true; }
     }
@@ -1222,13 +1400,20 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
     const key = String(id);
     const t0 = Date.now();
 
+    // Nothing can be written at compose on this host — do not fetch, do not
+    // notify. evaluateAndApply still persists the id for the send runtime.
+    if (!isSendTime && !hostCanSetSignature(item)) {
+        log(`host cannot write at compose — id=${key} decided but not applied yet`);
+        return false;
+    }
+
     // Only announce a wait if there is one: a cache hit writes in ~300ms.
     if (!isSendTime && !sigCache.get(key, { skipTtl: true })) {
         notifyStatus(item, "Loading your signature...", t0);
     }
 
     const { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
-        budgetMs: isSendTime ? FETCH_BUDGET_MS : 10_000,
+        budgetMs: isSendTime ? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS) : 10_000,
     });
 
     if (!html) {
@@ -1289,10 +1474,11 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
     });
 
     if (blocked) {
-        // Could not evaluate (no rules, unreadable recipients, unknown compose
-        // type). Do NOT reset the body to the default — that was v6's mid-typing
-        // flicker. Note that an EMPTY recipient list no longer lands here: it is
-        // an evaluable state and falls through to DEFAULT_ID below. See (E).
+        // Could not evaluate (no rules, unreadable recipients, or a genuinely
+        // undecidable context-scoped candidate). Do NOT reset the body to the
+        // default — that was v6's mid-typing flicker. An EMPTY recipient list no
+        // longer lands here, and neither does an unknown compose type on its
+        // own; see (E) and (F).
         const active = await getItemProp(item, P_ACTIVE_SIG);
         if (active) { log("evaluation blocked — keeping active id:", active); return; }
         log("evaluation blocked and nothing applied yet — applying default");
@@ -1302,12 +1488,18 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
     if (!isCurrent(seq)) { log("stale evaluation dropped"); return; }
 
     const applied = await applyById(item, targetId, userEmail, seq, { revalidate: true });
-    if (applied && isCurrent(seq)) {
+
+    // FIX (L). Persist the decision even when this host could not write it yet
+    // (mobile has no setSignatureAsync). Without this the compose-time decision
+    // was discarded and the send runtime had to start from nothing.
+    const deferred = !applied && !hostCanSetSignature(item);
+    if ((applied || deferred) && isCurrent(seq)) {
         // May be null if the post-apply read failed; markActiveSignature then
         // removes the snapshot property so send time re-evaluates rather than
         // comparing against something we never measured.
-        const snapshot = serializeRecipients(await getAllRecipientEmails(item));
+        const snapshot = serializeRecipients(await readRecipientEmails(item));
         await markActiveSignature(item, targetId, snapshot);
+        if (deferred) log(`id=${targetId} persisted for the send runtime to apply`);
     }
     timed(`evaluateAndApply (${targetId})`, t0);
 }
@@ -1315,13 +1507,15 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 // ─────────────────────────────────────────────────────────────────────────────
 //  SEND
 //  Phase 1 decides an id with no body writes. Phase 2 resolves and writes once.
+//  On mobile this is the ONLY phase that runs — no compose-time event fires
+//  there — so every decision has to be reachable from here.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function decideSendId(item, userEmail) {
     // null = unreadable. Never used as a snapshot, and never compared equal to
     // a persisted one — an unreadable list must force re-evaluation, not a
     // lucky match. "" (no recipients) IS comparable and IS persistable.
-    const currentSnap = serializeRecipients(await getAllRecipientEmails(item));
+    const currentSnap = serializeRecipients(await readRecipientEmails(item));
 
     const override = await getManualOverride(item);
     if (override) return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
@@ -1332,14 +1526,13 @@ async function decideSendId(item, userEmail) {
     ]);
 
     // Recipients unchanged since the compose-time decision: skip re-evaluation
-    // (the expensive, Mac-hostile part) but still reapply the id.
+    // (the expensive, cold-runtime-hostile part) but still reapply the id.
     if (activeId && snapshot !== null && currentSnap !== null && snapshot === currentSnap) {
         return { id: activeId, snapshot: currentSnap, reason: "recipients unchanged since compose", persist: false };
     }
 
     const { rule, blocked } = await findMatchingRule(item, userEmail, {
         allowNetwork: true,
-        budgetMs: FETCH_BUDGET_MS,
         strictComposeType: true,
     });
 
@@ -1347,17 +1540,32 @@ async function decideSendId(item, userEmail) {
         return { id: String(rule.signatureId), snapshot: currentSnap, reason: `rule priority=${rule.priority}`, persist: true };
     }
 
-    const fallback = activeId || await getActiveSignatureId(item);
-    if (blocked && fallback) {
-        return { id: fallback, snapshot: currentSnap, reason: "evaluation blocked — persisted id", persist: false };
-    }
     if (!blocked) {
         // Includes the emptied-recipient-list case: evaluation succeeded and
-        // nothing matched, so the default is the right answer even though an
-        // earlier rule id is still persisted on the item.
+        // nothing matched, so the default is right even though an earlier rule
+        // id may still be persisted on the item.
         return { id: DEFAULT_ID, snapshot: currentSnap, reason: "no rule matched", persist: true };
     }
-    return { id: fallback || DEFAULT_ID, snapshot: currentSnap, reason: "last resort", persist: false };
+
+    // FIX (G). We only reach here when the persisted snapshot did NOT match the
+    // current one, so any persisted id was decided for a recipient set that no
+    // longer exists. With the list confirmed EMPTY that id cannot be right — no
+    // recipient-scoped rule applies to nobody — so use the default rather than
+    // reapplying a stale rule signature. (When the list is merely different we
+    // still prefer the persisted id: dropping a possibly-correct rule signature
+    // is worse than reapplying it.)
+    if (currentSnap === "") {
+        return { id: DEFAULT_ID, snapshot: currentSnap, reason: "blocked, but recipients confirmed empty", persist: true };
+    }
+
+    // FIX (H). allowRoam only when we could not read the recipients at all. If
+    // we read them, we have enough to decide here, and the roamed id may belong
+    // to a different device entirely.
+    const fallback = activeId || await getActiveSignatureId(item, { allowRoam: currentSnap === null });
+    if (fallback) {
+        return { id: fallback, snapshot: currentSnap, reason: "evaluation blocked — persisted id", persist: false };
+    }
+    return { id: DEFAULT_ID, snapshot: currentSnap, reason: "last resort", persist: false };
 }
 
 async function onSendCore(item, mailbox) {
@@ -1406,7 +1614,7 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         await markActiveSignature(item, null);
 
-        // Persist the compose type here, in the runtime where the API behaves.
+        // Persist the compose type here, in a runtime where the API behaves.
         // The send runtime reads it instead of re-deriving it.
         const composeTypeP = getComposeType(item, { persist: true })
             .then((t) => log("composeType at compose:", t))
@@ -1425,13 +1633,15 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         // Only overwrite the baseline with a real reading — a null would make
         // the next recipients-changed event compare against nothing.
-        const snap0 = serializeRecipients(await getAllRecipientEmails(item));
+        const snap0 = serializeRecipients(await readRecipientEmails(item));
         if (snap0 !== null) _lastSnapshot = snap0;
 
         await evaluateAndApply(item, mailbox, seq);
 
-        if (userEmail && !isMobile()) {
-            prefetchRuleSignatures(userEmail).catch((e) => warn("prefetch failed:", e));
+        // FIX (J). Mobile gets the default warmed, but not every rule signature.
+        if (userEmail) {
+            prefetchSignatures(userEmail, { includeRules: !isMobile() })
+                .catch((e) => warn("prefetch failed:", e));
         }
     } catch (e) {
         err("applySignature error:", e);
@@ -1440,6 +1650,9 @@ const applySignature = async function (event = { completed: () => { } }) {
     }
 };
 
+// NOTE: Outlook mobile does not raise OnMessageRecipientsChanged, so on a phone
+// this handler simply never runs and the signature does not update live while
+// composing. The send-time path is what corrects it there.
 const onRecipientsChangedHandler = async function (event = { completed: () => { } }) {
     const t0 = Date.now();
     const mailbox = Office?.context?.mailbox;
@@ -1453,7 +1666,7 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
         // address produces a recipient set we do not want to evaluate.
         await sleep(RECIPIENT_SETTLE_MS);
 
-        let snapshot = serializeRecipients(await getAllRecipientEmails(item));
+        let snapshot = serializeRecipients(await readRecipientEmails(item));
         if (snapshot === null) { log("recipient read failed — skipping"); return complete(); }
 
         // FIX (E). The list has just gone empty. That is a legitimate state and
@@ -1463,7 +1676,7 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
         // host still flickers; do not go back to skipping the evaluation.
         if (snapshot === "" && _lastSnapshot !== "") {
             await sleep(EMPTY_RECIP_SETTLE_MS);
-            const recheck = serializeRecipients(await getAllRecipientEmails(item));
+            const recheck = serializeRecipients(await readRecipientEmails(item));
             if (recheck === null) { log("recipient re-read failed — skipping"); return complete(); }
             snapshot = recheck;
         }
@@ -1505,7 +1718,7 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
 
         if (userEmail) await fetchRules(await encryptEmail(userEmail));
 
-        const snap0 = serializeRecipients(await getAllRecipientEmails(item));
+        const snap0 = serializeRecipients(await readRecipientEmails(item));
         if (snap0 !== null) _lastSnapshot = snap0;
 
         await evaluateAndApply(item, mailbox, seq);
@@ -1528,7 +1741,8 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
         showNotification(item, "Verifying signature...");
 
-        const budget = isMac() ? SEND_BUDGET_MS_MAC : SEND_BUDGET_MS;
+        // FIX (K): mobile is a cold runtime too and needs the same headroom.
+        const budget = isColdRuntime() ? SEND_BUDGET_MS_COLD : SEND_BUDGET_MS;
         await withTimeout(onSendCore(item, mailbox), budget, "onSendCore");
     } catch (e) {
         warn("onSend timeout/error:", e.message);
