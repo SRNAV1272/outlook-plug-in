@@ -145,7 +145,7 @@ const RECIPIENT_SETTLE_MS = 350;
 // which is what made every rules fetch fail here while the taskpane (which
 // accidentally always sent WINDOWS) kept working. Empty this map — `{}` — once
 // the API accepts the real values, and nothing else needs to change.
-const X_PLATFORM_MAP = { MAC: "WINDOWS", MOBILE: "WINDOWS", OWA: "WINDOWS" };
+const X_PLATFORM_MAP = { MAC: "MAC", MOBILE: "MAC", OWA: "WINDOWS" };
 
 // PRODUCT DECISION, all platforms.
 //   false: recipientType "internal" matches if ANY recipient is internal, so a
