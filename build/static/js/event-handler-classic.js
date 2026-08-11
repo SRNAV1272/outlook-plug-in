@@ -6697,18 +6697,70 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler-classic.js (FIXED v3)
-//  
-//  CRITICAL FIX: Removed polling entirely. Classic Outlook JSRuntime is
-//  ephemeral — setInterval is unreliable across event boundaries.
-//  
-//  Instead, we rely on the OnMessageRecipientsChanged LaunchEvent registered
-//  in the manifest. Each event creates a fresh JSRuntime, reads rules from
-//  OfficeRuntime.storage cache, evaluates, injects, and completes.
-//  
-//  This eliminates the "5 times works, 5 times stops" intermittent behavior.
+//  CardByte Outlook Add-in — event-handler-classic.js (FIXED v4)
 //
-//  Previous fixes preserved:
+//  CHANGES IN v4 — THE NOTIFICATION BAR IS TWO MESSAGES, NOT FIVE
+//
+//  1. ONLY TWO THINGS REACH THE USER: "Signature applied", and a failure
+//     reason. "Applying signature...", "Fetching signature..." and the bare
+//     removeNotification-on-success are gone. Progress chatter told the user
+//     nothing they could act on, and on this runtime it was especially noisy:
+//     every recipient change spawns a fresh JSRuntime and replayed the whole
+//     sequence.
+//
+//     NOTE this also ADDS a message that v3 never showed. v3's injectSignature
+//     announced "Applying signature..." and then, on success, silently removed
+//     it — so a successful apply ended with an empty bar and the user had no
+//     confirmation at all. Success is now stated once and auto-clears after
+//     CONFIG.NOTIFY_CLEAR_MS.
+//
+//  2. FAILURES ARE REPORTED FROM ONE PLACE, AT THE END OF THE RUN. v3 notified
+//     from inside writeSignature and injectDefaultSignature, i.e. at the moment
+//     of failure. Two consequences, both visible in the product: a failure that
+//     was then recovered from (default fetch failed, cache served it anyway)
+//     still flashed an error, and because notificationMessages is
+//     last-write-wins on one key, a later success could overwrite a real error.
+//
+//     Every step that can fail now RECORDS the reason (recordFailure) and
+//     reportOutcome() raises exactly ONE message once the outcome is known:
+//
+//       fatal failure  -> that failure's message (persistent)
+//       degraded       -> what went wrong, given something was still applied
+//                         (rules unreachable; a rule's signature unavailable so
+//                         a fallback was used)
+//       applied        -> "Signature applied", auto-cleared
+//       nothing to say -> silence (manual override, or a blocked run that left
+//                         a good signature alone)
+//
+//     _beginRun() resets the ledger at the top of every handler, so an error
+//     from one JSRuntime activation can never be reported against the next.
+//
+//  3. EVERY STEP FEEDS THE LEDGER, NOT JUST setSignatureAsync. xhrGet now
+//     reports WHY it failed and each fetcher passes that up:
+//       XHR timeout / onerror / construct throw -> offline ("check connection")
+//       non-2xx                                 -> server  ("contact Admin")
+//       404, or a 2xx with no html field         -> unassigned (admin config)
+//       decrypt or JSON parse failure           -> server
+//     A recovered failure stays silent: injectDefaultSignature only records the
+//     fetch failure if the cache fallback ALSO comes up empty.
+//
+//  4. SEND TIME RAISES FAILURES ONLY. The item is already closing, so a success
+//     message has nothing to land on. The send is never blocked either way.
+//
+//  5. THE GUARD TIMEOUT NOW SPEAKS, AND STILL ALLOWS THE SEND. v3's
+//     makeGuardedEvent called event.completed() with no arguments on timeout —
+//     at send that omits { allowEvent: true }, so a slow network could block
+//     the user's mail. The guard now carries the completion args it was created
+//     with, and reports a failure if it fires before anything else did.
+//
+//  ── Preserved from v3 ───────────────────────────────────────────────────────
+//  CRITICAL FIX: no polling. Classic Outlook JSRuntime is ephemeral —
+//  setInterval is unreliable across event boundaries. We rely on the
+//  OnMessageRecipientsChanged LaunchEvent registered in the manifest. Each
+//  event creates a fresh JSRuntime, reads rules from OfficeRuntime.storage
+//  cache, evaluates, injects, and completes. This eliminates the "5 times
+//  works, 5 times stops" intermittent behavior.
+//
 //    - Sequential flow (no race between default and rule injection)
 //    - Compose type detection with fallbacks
 //    - contextMatches no longer treats null as pass-through
@@ -6740,7 +6792,13 @@ const CONFIG = {
 
     SIGNATURE_SENTINEL: "cardbyte-sig",
     NOTIF_KEY: "cardbyte_sig_status",
-    MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",   // ← add this
+    MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
+
+    // The bar carries exactly two kinds of message: the success below, which
+    // auto-clears, and a failure reason, which is left up for the user to
+    // dismiss. There is no progress chatter — diagnostics live in _diag.
+    MSG_APPLIED: "Signature applied",
+    NOTIFY_CLEAR_MS: 3000,
 
     DIAG_ENABLED: false,
 };
@@ -6938,12 +6996,183 @@ function setSigById(signatureId, html, cb) {
     });
 }
 
+// ─── Notifications ────────────────────────────────────────────────────────────
+//
+//  Two messages, one key, ONE writer (reportOutcome). Nothing else in this file
+//  may call showNotification directly — everything records a failure instead and
+//  lets the outcome be decided once, at the end of the run.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Guards the auto-clear timer so it only clears the message it was scheduled
+// for; a later error can never be wiped by an earlier success's timeout.
+let _notifSeq = 0;
+
+function showNotification(item, message, type) {
+    try {
+        if (!item || !item.notificationMessages ||
+            typeof item.notificationMessages.replaceAsync !== "function") return;
+
+        const kind = type || "informationalMessage";
+        const msg = message.length > 140 ? message.slice(0, 137) + "..." : message;
+
+        // icon/persistent are only valid for informationalMessage — Windows
+        // desktop rejects the whole call when they are sent with errorMessage.
+        const details = { type: kind, message: msg };
+        if (kind === "informationalMessage") {
+            details.icon = "none";
+            details.persistent = false;
+        }
+
+        _notifSeq++;
+        item.notificationMessages.replaceAsync(CONFIG.NOTIF_KEY, details, function (r) {
+            if (r.status !== "succeeded") {
+                item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, function () { });
+            }
+        });
+    } catch (e) { _diag.warn("showNotification threw: " + e.message); }
+}
+
+function removeNotification(item) {
+    try { item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { }); }
+    catch (_) { }
+}
+
+function clearNotificationSoon(item) {
+    const mine = _notifSeq;
+    setTimeout(function () {
+        if (mine === _notifSeq) removeNotification(item);
+    }, CONFIG.NOTIFY_CLEAR_MS);
+}
+
+// ─── Failure ledger ───────────────────────────────────────────────────────────
+//
+//  Any step may fail: the rules call, either signature call, their timeouts, or
+//  the body write itself. None of them notify at the point of failure — they
+//  record here, and reportOutcome() raises ONE message when the outcome is
+//  known. That is what makes a recovered failure silent and "applied, but the
+//  rules were never checked" honest.
+//
+//  RANK breaks ties when several things go wrong in one activation: a fatal
+//  failure always outranks a degradation, and the most specific message wins.
+//  First writer wins within a rank, since the earliest failure is usually the
+//  cause of the later ones.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FAILURES = {
+    // FATAL — no signature reached the body.
+    offline: {
+        rank: 3, fatal: true,
+        msg: "Couldn't reach the signature service. Check your connection and try again, or contact Admin.",
+    },
+    server: {
+        rank: 3, fatal: true,
+        msg: "The signature service returned an error. Please contact Admin.",
+    },
+    unassigned: {
+        rank: 4, fatal: true,
+        msg: "No signature is assigned to your account. Please contact Admin.",
+    },
+    write_failed: {
+        rank: 4, fatal: true,
+        msg: "Signature could not be applied. Please contact Admin.",
+    },
+    // DEGRADED — something WAS applied, but not necessarily the right thing.
+    // Deliberately worded to fit both "the default was used instead" and "a
+    // previously applied signature was left alone".
+    rule_sig_unavailable: {
+        rank: 2, fatal: false,
+        msg: "Couldn't load the signature for these recipients — a fallback signature was used. Please contact Admin.",
+    },
+    rules_offline: {
+        rank: 2, fatal: false,
+        msg: "Couldn't reach the signature service, so your signature rules weren't checked. Check your connection.",
+    },
+    rules_error: {
+        rank: 2, fatal: false,
+        msg: "Couldn't load your signature rules. Please contact Admin.",
+    },
+};
+
+let _failure = null;          // { kind, rank, fatal, msg }
+let _rulesFetchError = null;  // "offline" | "server" | null
+let _reported = false;        // has a message actually been raised this run?
+
+// Called at the top of every handler. Each JSRuntime activation is one run.
+function _beginRun() {
+    _failure = null;
+    _rulesFetchError = null;
+    _reported = false;
+}
+
+function hasFailure() { return _failure !== null; }
+function wasReported() { return _reported; }
+
+function recordFailure(kind, detail) {
+    const f = FAILURES[kind];
+    if (!f) { _diag.warn("recordFailure: unknown kind " + kind); return; }
+    _diag.warn("failure recorded: " + kind + (detail ? " — " + detail : ""));
+    if (!_failure || f.rank > _failure.rank) {
+        _failure = { kind: kind, rank: f.rank, fatal: f.fatal, msg: f.msg };
+    }
+}
+
+// The rules call records its outcome separately: whether it MATTERS depends on
+// whether a cached ruleset covered for it, which only the caller knows.
+function noteRulesFetchError(kind) { _rulesFetchError = kind; }
+function rulesFailureKind() { return _rulesFetchError === "offline" ? "rules_offline" : "rules_error"; }
+
+/**
+ * THE ONLY PLACE A NOTIFICATION IS RAISED.
+ *   outcome "applied" — the signature is on the body
+ *           "failed"  — it is not, and nothing more specific was recorded
+ *           "quiet"   — nothing to do / nothing changed
+ */
+function reportOutcome(item, outcome) {
+    function show(msg, type) { _reported = true; showNotification(item, msg, type); }
+
+    if (_failure) { show(_failure.msg, "errorMessage"); return; }
+    if (outcome === "applied") {
+        show(CONFIG.MSG_APPLIED, "informationalMessage");
+        clearNotificationSoon(item);
+        return;
+    }
+    if (outcome === "failed") { show(FAILURES.write_failed.msg, "errorMessage"); return; }
+    removeNotification(item);
+}
+
+/**
+ * Report once, then complete the event. Every terminal path goes through here.
+ * At send time only failures are raised: the item is already closing, so a
+ * success message has nothing to land on. The send is allowed either way.
+ */
+function finishRun(item, guarded, outcome, opts) {
+    const isSend = !!(opts && opts.isSendTime);
+    if (isSend) {
+        if (outcome === "applied" && !hasFailure()) removeNotification(item);
+        else reportOutcome(item, outcome);
+        guarded.completed({ allowEvent: true });
+    } else {
+        reportOutcome(item, outcome);
+        guarded.completed();
+    }
+}
+
 // ─── XHR helper ───────────────────────────────────────────────────────────────
+//
+//  cb(responseText, failure) — failure is null on success, otherwise
+//  { kind: "offline"|"server", status } so callers can tell "never answered"
+//  from "answered badly". That distinction is the difference between telling the
+//  user to check their connection and telling them to call the admin.
+// ─────────────────────────────────────────────────────────────────────────────
 
 function xhrGet(url, headers, cb) {
     let xhr;
     try { xhr = new XMLHttpRequest(); }
-    catch (e) { _diag.error("XHR construct failed: " + e.message); cb(null); return; }
+    catch (e) {
+        _diag.error("XHR construct failed: " + e.message);
+        cb(null, { kind: "offline", status: 0 });
+        return;
+    }
 
     try {
         xhr.open("GET", url, true);
@@ -6953,23 +7182,45 @@ function xhrGet(url, headers, cb) {
                 xhr.setRequestHeader(k, headers[k]);
             }
         }
-    } catch (e) { _diag.error("xhr.open threw: " + e.message); cb(null); return; }
+    } catch (e) {
+        _diag.error("xhr.open threw: " + e.message);
+        cb(null, { kind: "offline", status: 0 });
+        return;
+    }
 
     xhr.onreadystatechange = function () {
         if (xhr.readyState !== 4) return;
         _diag.info("XHR status=" + xhr.status + " url=" + url);
         if (xhr.status >= 200 && xhr.status < 300) {
-            cb(xhr.responseText);
+            cb(xhr.responseText, null);
         } else {
             _diag.warn("XHR non-2xx: " + xhr.status);
-            cb(null);
+            // Status 0 at readyState 4 means the request never really landed.
+            cb(null, { kind: xhr.status === 0 ? "offline" : "server", status: xhr.status });
         }
     };
-    xhr.ontimeout = function () { _diag.warn("XHR timeout: " + url); cb(null); };
-    xhr.onerror = function () { _diag.error("XHR network error: " + url); cb(null); };
+    xhr.ontimeout = function () {
+        _diag.warn("XHR timeout: " + url);
+        cb(null, { kind: "offline", status: 0 });
+    };
+    xhr.onerror = function () {
+        _diag.error("XHR network error: " + url);
+        cb(null, { kind: "offline", status: 0 });
+    };
 
     try { xhr.send(); }
-    catch (e) { _diag.error("xhr.send threw: " + e.message); cb(null); }
+    catch (e) {
+        _diag.error("xhr.send threw: " + e.message);
+        cb(null, { kind: "offline", status: 0 });
+    }
+}
+
+// A 404 is not a transport or server fault: it is the definitive "there is
+// nothing assigned", which is an admin configuration problem.
+function _kindFor(failure) {
+    if (!failure) return "server";
+    if (failure.status === 404) return "unassigned";
+    return failure.kind || "server";
 }
 
 // ─── Platform helpers ─────────────────────────────────────────────────────────
@@ -6985,26 +7236,6 @@ function getXPlatform() {
 function getUserEmail() {
     try { return (Office.context.mailbox.userProfile.emailAddress || "").trim(); }
     catch (_) { return ""; }
-}
-
-// ─── Notifications ────────────────────────────────────────────────────────────
-
-function showNotification(item, message, type) {
-    try {
-        if (!item || typeof item.notificationMessages.replaceAsync !== "function") return;
-        const msg = message.length > 140 ? message.slice(0, 137) + "..." : message;
-        const details = { type: type || "informationalMessage", message: msg, icon: "none", persistent: false };
-        item.notificationMessages.replaceAsync(CONFIG.NOTIF_KEY, details, function (r) {
-            if (r.status !== "succeeded") {
-                item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, function () { });
-            }
-        });
-    } catch (e) { _diag.warn("showNotification threw: " + e.message); }
-}
-
-function removeNotification(item) {
-    try { item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { }); }
-    catch (_) { }
 }
 
 // ─── Manual override (taskpane selection) ─────────────────────────────────────
@@ -7029,107 +7260,154 @@ function getManualOverride(item, cb) {
 
 // Resolves an override id to HTML: "default" → cached default sig,
 // otherwise cache-first then network fallback for a rule signature.
+// cb(html, failKind)
 function resolveOverrideHtml(overrideId, cb) {
     if (overrideId === "default") {
-        getCachedSignature(cb);
+        getCachedSignature(function (html) { cb(html, html ? null : "unassigned"); });
         return;
     }
     getOrFetchSignatureById(overrideId, cb);
 }
 
 // ─── Guarded event.completed ──────────────────────────────────────────────────
+//
+//  FIX 5. The guard now knows how it is supposed to complete, so a timeout at
+//  send still passes { allowEvent: true } instead of silently blocking the
+//  user's mail — v3 called event.completed() bare. It also reports a failure if
+//  it fires before anything else has spoken.
+// ─────────────────────────────────────────────────────────────────────────────
 
-function makeGuardedEvent(event, timeoutMs) {
+function makeGuardedEvent(event, timeoutMs, opts) {
+    const isSend = !!(opts && opts.isSendTime);
+    const defaultArgs = isSend ? { allowEvent: true } : null;
     let done = false;
+    let itemRef = null;
+
     const timer = setTimeout(function () {
         if (done) return;
         _diag.warn("Guard timeout (" + timeoutMs + "ms) — forcing complete");
-        complete();
+        // Nothing finished in time, so nothing was applied. Say so, unless the
+        // run has already reported an outcome.
+        if (itemRef && !wasReported()) {
+            if (!hasFailure()) recordFailure("offline", "guard timeout after " + timeoutMs + "ms");
+            reportOutcome(itemRef, "failed");
+        }
+        complete(defaultArgs);
     }, timeoutMs);
 
-    function complete(opts) {
+    function complete(args) {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        try { if (opts) event.completed(opts); else event.completed(); }
+        const finalArgs = args || defaultArgs;
+        try { if (finalArgs) event.completed(finalArgs); else event.completed(); }
         catch (e) { _diag.error("event.completed threw: " + e.message); }
     }
-    return { completed: complete };
+
+    return {
+        completed: complete,
+        // Handlers resolve the item after the guard is armed; hand it over so a
+        // timeout can still notify.
+        attach: function (item) { itemRef = item; },
+    };
 }
 
 // ─── Backend fetchers ─────────────────────────────────────────────────────────
+//
+//  No fetcher notifies. Each reports WHAT went wrong to its caller as a ledger
+//  kind, and the caller decides whether it is worth telling the user about.
+// ─────────────────────────────────────────────────────────────────────────────
 
+// cb(html, failKind)
 function fetchDefaultSignature(cb) {
     const email = getUserEmail();
-    if (!email) { _diag.error("fetchDefaultSignature: no email"); cb(null); return; }
+    if (!email) { _diag.error("fetchDefaultSignature: no email"); cb(null, "server"); return; }
 
     const encrypted = encryptEmail(email);
-    if (!encrypted) { _diag.error("fetchDefaultSignature: encrypt failed"); cb(null); return; }
+    if (!encrypted) { _diag.error("fetchDefaultSignature: encrypt failed"); cb(null, "server"); return; }
 
     const url = CONFIG.BASE_URL + "/html/outlook/get-active";
     const headers = { "username": encrypted, "X-Platform": getXPlatform() };
 
     _diag.info("fetchDefaultSignature: GET " + url);
 
-    xhrGet(url, headers, function (raw) {
-        if (!raw) { cb(null); return; }
+    xhrGet(url, headers, function (raw, failure) {
+        if (!raw) { cb(null, _kindFor(failure)); return; }
 
         const plaintext = decryptResponse(raw);
-        if (!plaintext) { _diag.error("fetchDefaultSignature: decrypt failed"); cb(null); return; }
+        if (!plaintext) { _diag.error("fetchDefaultSignature: decrypt failed"); cb(null, "server"); return; }
 
         let parsed;
         try { parsed = JSON.parse(plaintext); }
-        catch (e) { _diag.error("fetchDefaultSignature: JSON parse error: " + e.message); cb(null); return; }
+        catch (e) { _diag.error("fetchDefaultSignature: JSON parse error: " + e.message); cb(null, "server"); return; }
 
         const html = parsed && parsed.html;
-        if (!html) { _diag.warn("fetchDefaultSignature: no html field"); cb(null); return; }
+        // A 2xx with no html field is a definitive "nothing assigned".
+        if (!html) { _diag.warn("fetchDefaultSignature: no html field"); cb(null, "unassigned"); return; }
 
         _diag.info("fetchDefaultSignature: success, length=" + html.length);
-        cb(html);
+        cb(html, null);
     });
 }
 
+// cb(rulesJson, failKind). Also notes the reason on the ledger's rules channel,
+// so a caller that recovers from a cached ruleset can stay silent.
 function fetchRulesConfig(cb) {
     const email = getUserEmail();
-    if (!email) { cb(null); return; }
+    if (!email) { noteRulesFetchError("server"); cb(null, "rules_error"); return; }
 
     const encrypted = encryptEmail(email);
-    if (!encrypted) { cb(null); return; }
+    if (!encrypted) { noteRulesFetchError("server"); cb(null, "rules_error"); return; }
 
     const url = CONFIG.BASE_URL + "/rules-config/get-active";
     const headers = { "Content-Type": "application/json", "username": encrypted, "X-Platform": getXPlatform() };
 
-    xhrGet(url, headers, function (raw) {
-        if (!raw) { cb(null); return; }
+    xhrGet(url, headers, function (raw, failure) {
+        if (!raw) {
+            noteRulesFetchError(failure && failure.kind === "offline" ? "offline" : "server");
+            cb(null, rulesFailureKind());
+            return;
+        }
 
         let parsed;
         try { parsed = JSON.parse(raw); }
-        catch (e) { _diag.error("fetchRulesConfig: JSON parse: " + e.message); cb(null); return; }
+        catch (e) {
+            _diag.error("fetchRulesConfig: JSON parse: " + e.message);
+            noteRulesFetchError("server");
+            cb(null, rulesFailureKind());
+            return;
+        }
 
         const rulesJson = parsed && parsed.rulesJson;
-        if (!rulesJson) { _diag.warn("fetchRulesConfig: no rulesJson field"); cb(null); return; }
+        if (!rulesJson) {
+            _diag.warn("fetchRulesConfig: no rulesJson field");
+            noteRulesFetchError("server");
+            cb(null, rulesFailureKind());
+            return;
+        }
 
         setCachedRules(rulesJson, function () {
             _diag.info("fetchRulesConfig: cached");
         });
-        cb(rulesJson);
+        cb(rulesJson, null);
     });
 }
 
+// cb(html, failKind)
 function fetchSignatureById(signatureId, cb) {
     const email = getUserEmail();
-    if (!email) { cb(null); return; }
+    if (!email) { cb(null, "server"); return; }
 
     const encrypted = encryptEmail(email);
-    if (!encrypted) { cb(null); return; }
+    if (!encrypted) { cb(null, "server"); return; }
 
     const url = CONFIG.BASE_URL + "/rules-config/get/" + signatureId;
     const headers = { "username": encrypted, "X-Platform": getXPlatform() };
 
     _diag.info("fetchSignatureById: id=" + signatureId);
 
-    xhrGet(url, headers, function (raw) {
-        if (!raw) { cb(null); return; }
+    xhrGet(url, headers, function (raw, failure) {
+        if (!raw) { cb(null, _kindFor(failure)); return; }
 
         let parsed;
         try { parsed = JSON.parse(raw); }
@@ -7140,18 +7418,23 @@ function fetchSignatureById(signatureId, cb) {
         }
 
         const html = parsed && parsed.html;
-        if (!html) { _diag.warn("fetchSignatureById: no html for id=" + signatureId); cb(null); return; }
+        if (!html) {
+            _diag.warn("fetchSignatureById: no html for id=" + signatureId);
+            cb(null, "unassigned");
+            return;
+        }
 
         setSigById(signatureId, html, function () { });
-        cb(html);
+        cb(html, null);
     });
 }
 
+// cb(html, failKind)
 function getOrFetchSignatureById(signatureId, cb) {
     getSigById(signatureId, function (cached) {
         if (cached) {
             _diag.info("getOrFetchSignatureById: cache hit id=" + signatureId);
-            cb(cached);
+            cb(cached, null);
             return;
         }
         _diag.info("getOrFetchSignatureById: cache miss, fetching id=" + signatureId);
@@ -7344,10 +7627,11 @@ function findMatchingRule(item, rules, cb) {
 
 // ─── Signature injection ──────────────────────────────────────────────────────
 
+// Records instead of notifying — the caller reports once, at the end.
 function writeSignature(item, html, onDone) {
-    if (typeof item.body.setSignatureAsync !== "function") {
+    if (!item.body || typeof item.body.setSignatureAsync !== "function") {
         _diag.error("writeSignature: setSignatureAsync not available");
-        showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+        recordFailure("write_failed", "setSignatureAsync unavailable");
         onDone(false);
         return;
     }
@@ -7357,8 +7641,9 @@ function writeSignature(item, html, onDone) {
             _diag.info("setSignatureAsync: success");
             onDone(true);
         } else {
-            _diag.warn("setSignatureAsync failed: " + (r.error && r.error.message));
-            showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+            const m = (r.error && r.error.message) || "unknown";
+            _diag.warn("setSignatureAsync failed: " + m);
+            recordFailure("write_failed", m);
             onDone(false);
         }
     });
@@ -7371,58 +7656,61 @@ function writeDiagnostics(item, onDone) {
 
 // ─── Orchestration helpers ────────────────────────────────────────────────────
 
-function injectSignature(item, html, guarded) {
-    showNotification(item, "Applying signature...", "informationalMessage");
+// No progress notification: the bar stays empty until there is an outcome.
+function injectSignature(item, html, guarded, opts) {
     writeSignature(item, html, function (ok) {
-        if (ok) {
-            removeNotification(item);
-            setTimeout(function () { removeNotification(item); }, 3000);
-        } else {
-            setTimeout(function () { removeNotification(item); }, 6000);
-        }
-        if (guarded) guarded.completed();
+        finishRun(item, guarded, ok ? "applied" : "failed", opts);
     });
 }
 
-function injectDefaultSignature(item, guarded) {
-    showNotification(item, "Fetching signature...", "informationalMessage");
-
-    fetchDefaultSignature(function (html) {
+function injectDefaultSignature(item, guarded, opts) {
+    fetchDefaultSignature(function (html, failKind) {
         if (html) {
             setCachedSignature(html, function () {
                 _diag.info("injectDefaultSignature: fetched and cached");
-                injectSignature(item, html, guarded);
+                injectSignature(item, html, guarded, opts);
             });
             return;
         }
 
-        _diag.warn("injectDefaultSignature: fetch failed — checking cache");
+        _diag.warn("injectDefaultSignature: fetch failed (" + failKind + ") — checking cache");
         getCachedSignature(function (cached) {
             if (cached) {
-                _diag.info("injectDefaultSignature: using cached signature");
-                injectSignature(item, cached, guarded);
-            } else {
-                _diag.error("injectDefaultSignature: no signature available");
-                showNotification(item, "Signature not available. Please contact Admin.", "errorMessage");
-                if (guarded) guarded.completed();
+                // RECOVERED. The user has the right signature, so the failure
+                // is a log line and nothing more — this is exactly the case v3
+                // used to flash an error for.
+                _diag.info("injectDefaultSignature: cache served it — not reporting the fetch failure");
+                injectSignature(item, cached, guarded, opts);
+                return;
             }
+            _diag.error("injectDefaultSignature: no signature available");
+            recordFailure(failKind || "offline", "default signature unavailable");
+            finishRun(item, guarded, "failed", opts);
         });
     });
 }
 
-function injectRuleSignature(item, matched, guarded) {
+function injectRuleSignature(item, matched, guarded, opts) {
     _diag.info("injectRuleSignature: rule matched id=" + matched.signatureId);
-    getOrFetchSignatureById(matched.signatureId, function (html) {
+    getOrFetchSignatureById(matched.signatureId, function (html, failKind) {
         if (html) {
-            injectSignature(item, html, guarded);
-        } else {
-            _diag.warn("injectRuleSignature: rule html null — falling back to default");
-            injectDefaultSignature(item, guarded);
+            injectSignature(item, html, guarded, opts);
+            return;
         }
+        // The rule matched but its signature could not be loaded, so whatever we
+        // apply next is NOT what the rule asked for. Degradation, not silence.
+        _diag.warn("injectRuleSignature: rule html null (" + failKind + ") — falling back to default");
+        recordFailure("rule_sig_unavailable", "sigId=" + matched.signatureId + " " + (failKind || ""));
+        injectDefaultSignature(item, guarded, opts);
     });
 }
 
 // ─── Prefetch rule signatures ─────────────────────────────────────────────────
+//
+//  Speculative warm-up. Failures here are NOT recorded: nothing on the mail
+//  depends on it, and if the id is needed later it will be fetched again — that
+//  failure is the one worth showing.
+// ─────────────────────────────────────────────────────────────────────────────
 
 function prefetchAllRuleSignatures(rules) {
     const list = ((rules && rules.rulesList) || []).filter(function (r) {
@@ -7450,6 +7738,7 @@ function prefetchAllRuleSignatures(rules) {
 // =============================================================================
 
 function applySignature(event) {
+    _beginRun();
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
     _diag.info("=== applySignature START ===");
 
@@ -7460,6 +7749,7 @@ function applySignature(event) {
             guarded.completed();
             return;
         }
+        guarded.attach(item);
 
         // Get rules (cached or fresh)
         getCachedRules(function (rules) {
@@ -7468,11 +7758,14 @@ function applySignature(event) {
                 _evaluateAndInject(item, rules, guarded);
             } else {
                 _diag.info("applySignature: rules cache missing/expired — fetching");
-                fetchRulesConfig(function (freshRules) {
+                fetchRulesConfig(function (freshRules, failKind) {
                     if (freshRules) {
                         _evaluateAndInject(item, freshRules, guarded);
                     } else {
+                        // A signature still gets applied, so this is a
+                        // degradation: the rules were never consulted.
                         _diag.warn("applySignature: rules fetch failed — using default");
+                        recordFailure(failKind || rulesFailureKind(), "rules unavailable at compose");
                         injectDefaultSignature(item, guarded);
                     }
                 });
@@ -7485,24 +7778,24 @@ function applySignature(event) {
  * Evaluates rules with current recipients, injects rule signature if matched,
  * otherwise injects default. Then prefetches rule signatures in background.
  */
-function _evaluateAndInject(item, rules, guarded) {
-    // Prefetch rule signatures (fire-and-forget, no callback needed)
+function _evaluateAndInject(item, rules, guarded, opts) {
+    // Prefetch rule signatures (fire-and-forget, silent by design)
     prefetchAllRuleSignatures(rules);
 
     getAllRecipientEmails(item, function (emails) {
         if (emails.length === 0) {
             _diag.info("applySignature: no recipients yet — applying default");
-            injectDefaultSignature(item, guarded);
+            injectDefaultSignature(item, guarded, opts);
             return;
         }
 
         findMatchingRule(item, rules, function (matched) {
             if (matched) {
                 _diag.info("applySignature: rule matched on open");
-                injectRuleSignature(item, matched, guarded);
+                injectRuleSignature(item, matched, guarded, opts);
             } else {
                 _diag.info("applySignature: no rule matched — applying default");
-                injectDefaultSignature(item, guarded);
+                injectDefaultSignature(item, guarded, opts);
             }
         });
     });
@@ -7515,6 +7808,7 @@ function _evaluateAndInject(item, rules, guarded) {
 // =============================================================================
 
 function onRecipientsChangedHandler(event) {
+    _beginRun();
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
     _diag.info("=== onRecipientsChangedHandler START ===");
 
@@ -7524,9 +7818,12 @@ function onRecipientsChangedHandler(event) {
         guarded.completed();
         return;
     }
+    guarded.attach(item);
 
     getManualOverride(item, function (overrideId) {
         if (overrideId) {
+            // The user picked this signature themselves. No news, no complaint —
+            // leave the bar exactly as it is.
             _diag.info("onRecipientsChangedHandler: manual override active (id=" + overrideId + ") — skipping rule re-eval");
             guarded.completed();
             return;
@@ -7535,12 +7832,17 @@ function onRecipientsChangedHandler(event) {
         getCachedRules(function (rules) {
             if (!rules) {
                 _diag.warn("onRecipientsChangedHandler: no rules cached — fetching");
-                fetchRulesConfig(function (freshRules) {
+                fetchRulesConfig(function (freshRules, failKind) {
                     if (freshRules) {
                         _evaluateAndInject(item, freshRules, guarded);
                     } else {
+                        // Nothing is re-injected here, so whatever is already on
+                        // the body stays. Still worth saying the rules were not
+                        // checked — "quiet" surfaces the recorded degradation and
+                        // nothing else.
                         _diag.error("onRecipientsChangedHandler: rules unavailable");
-                        guarded.completed();
+                        recordFailure(failKind || rulesFailureKind(), "rules unavailable on recipient change");
+                        finishRun(item, guarded, "quiet");
                     }
                 });
                 return;
@@ -7553,12 +7855,17 @@ function onRecipientsChangedHandler(event) {
 // =============================================================================
 //  onSendHandler (OnMessageSend)
 //  Re-evaluates rules and injects correct signature before send.
+//  Failures only: the item is closing, and the send is never blocked.
 // =============================================================================
 
+const SEND_OPTS = { isSendTime: true };
+
 function onSendHandler(event) {
+    _beginRun();
     const guarded = makeGuardedEvent(
         event || { completed: function () { } },
-        CONFIG.SEND_HANDLER_TIMEOUT_MS
+        CONFIG.SEND_HANDLER_TIMEOUT_MS,
+        SEND_OPTS
     );
     _diag.info("=== onSendHandler START ===");
 
@@ -7568,19 +7875,19 @@ function onSendHandler(event) {
         guarded.completed({ allowEvent: true });
         return;
     }
+    guarded.attach(item);
 
     // Manual taskpane selection wins at send time.
     getManualOverride(item, function (overrideId) {
         if (overrideId) {
             _diag.info("onSendHandler: manual override active id=" + overrideId);
-            resolveOverrideHtml(overrideId, function (html) {
+            resolveOverrideHtml(overrideId, function (html, failKind) {
                 if (html) {
                     _diag.info("onSendHandler: injecting manual override sig");
-                    writeSignature(item, html, function () {
-                        guarded.completed({ allowEvent: true });
-                    });
+                    injectSignature(item, html, guarded, SEND_OPTS);
                 } else {
                     _diag.warn("onSendHandler: override id set but html unavailable — falling back to rules");
+                    recordFailure("rule_sig_unavailable", "override id=" + overrideId + " " + (failKind || ""));
                     _onSendRuleFlow(item, guarded);
                 }
             });
@@ -7590,11 +7897,12 @@ function onSendHandler(event) {
     });
 }
 
-// Extracted rule/default flow (unchanged from the previous onSendHandler body).
+// Rule/default flow, unchanged in behaviour apart from reporting.
 function _onSendRuleFlow(item, guarded) {
     getCachedRules(function (rules) {
         if (!rules) {
             _diag.warn("onSendHandler: no rules in cache — injecting default");
+            recordFailure(rulesFailureKind(), "no rules cached at send");
             _injectDefaultAtSend(item, guarded);
             return;
         }
@@ -7607,14 +7915,13 @@ function _onSendRuleFlow(item, guarded) {
             }
 
             _diag.info("onSendHandler: rule matched id=" + matched.signatureId);
-            getOrFetchSignatureById(matched.signatureId, function (html) {
+            getOrFetchSignatureById(matched.signatureId, function (html, failKind) {
                 if (html) {
                     _diag.info("onSendHandler: injecting rule sig");
-                    writeSignature(item, html, function () {
-                        guarded.completed({ allowEvent: true });
-                    });
+                    injectSignature(item, html, guarded, SEND_OPTS);
                 } else {
                     _diag.warn("onSendHandler: rule sig unavailable — fallback");
+                    recordFailure("rule_sig_unavailable", "sigId=" + matched.signatureId + " " + (failKind || ""));
                     _injectDefaultAtSend(item, guarded);
                 }
             });
@@ -7622,17 +7929,19 @@ function _onSendRuleFlow(item, guarded) {
     });
 }
 
+// Cache-only on purpose: the send budget (SEND_HANDLER_TIMEOUT_MS) has no room
+// for a round trip. If the cache is empty there is nothing to apply, and that IS
+// worth reporting even though the send proceeds.
 function _injectDefaultAtSend(item, guarded) {
     getCachedSignature(function (cached) {
         if (!cached) {
             _diag.warn("_injectDefaultAtSend: no cached default");
-            guarded.completed({ allowEvent: true });
+            recordFailure("offline", "no cached default signature at send");
+            finishRun(item, guarded, "failed", SEND_OPTS);
             return;
         }
         _diag.info("_injectDefaultAtSend: injecting default sig");
-        writeSignature(item, cached, function () {
-            guarded.completed({ allowEvent: true });
-        });
+        injectSignature(item, cached, guarded, SEND_OPTS);
     });
 }
 
@@ -7642,10 +7951,12 @@ function _injectDefaultAtSend(item, guarded) {
 // =============================================================================
 
 function onFromChangedHandler(event) {
+    _beginRun();
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
 
     const item = _safeGetItem();
     if (!item) { guarded.completed(); return; }
+    guarded.attach(item);
 
     _diag.info("onFromChangedHandler: account changed — clearing caches");
 
@@ -7653,7 +7964,13 @@ function onFromChangedHandler(event) {
     _memRules = null;
     clearCachedSignature(function () {
         _storageRemove(CONFIG.RULES_CACHE_KEY, function () {
-            fetchRulesConfig(function (rules) {
+            fetchRulesConfig(function (rules, failKind) {
+                if (!rules) {
+                    _diag.warn("onFromChangedHandler: rules unavailable for the new account");
+                    recordFailure(failKind || rulesFailureKind(), "rules unavailable after account switch");
+                    injectDefaultSignature(item, guarded);
+                    return;
+                }
                 _evaluateAndInject(item, rules, guarded);
             });
         });
