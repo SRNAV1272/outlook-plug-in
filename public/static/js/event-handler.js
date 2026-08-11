@@ -1,7 +1,7 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v7.3)
+//  CardByte Outlook Add-in — event-handler.js (v7.4)
 //
 //  ARCHITECTURE: THE SIGNATURE ID IS THE STATE. THE HTML IS A DISPOSABLE CACHE.
 //
@@ -23,6 +23,57 @@
 //  awaits. Each entry point takes a seq from beginWrite(); a write is dropped
 //  if seq is no longer current. Last decision wins deterministically instead of
 //  by network luck.
+//
+// -----------------------------------------------------------------------------
+//  CHANGES IN v7.4.0 — THE NOTIFICATION BAR IS TWO MESSAGES, NOT SIX
+//
+//  M. ONLY TWO THINGS ARE WORTH INTERRUPTING THE USER WITH: "the signature is
+//     on the mail", and "it is not / may be wrong, and here is why".
+//     "Preparing your signature...", "Loading your signature...",
+//     "Verifying signature..." and the per-phase timings are gone, along with
+//     NOTIFY_LEVEL — there is no longer anything to set a level on. Timings
+//     still go to the console via timed(), which is where QA reads them.
+//
+//  N. FAILURES ARE REPORTED FROM ONE PLACE, AT THE END OF THE RUN. Previously
+//     every notifyError call site fired the instant it was reached, which had
+//     two bad consequences: a failure that was subsequently recovered from
+//     still flashed at the user, and — because notificationMessages is
+//     last-write-wins on one key — a later "Signature applied" could silently
+//     overwrite a real error.
+//
+//     Every step that can fail now RECORDS the failure (recordFailure) in a
+//     per-run ledger, and reportOutcome() emits exactly one message once the
+//     outcome is actually known:
+//
+//       fatal failure recorded -> that failure's message (persistent)
+//       degraded (rules)       -> rules could not be consulted, so the applied
+//                                 signature may not be the one a rule wanted
+//       applied, nothing wrong -> "Signature applied", auto-cleared
+//       nothing to say         -> silence: manual override, a deferred mobile
+//                                 compose (L), or a stale write dropped by the
+//                                 write token
+//
+//     The ledger is reset by beginWrite(), i.e. exactly once per decision, so
+//     an error from a superseded evaluation cannot be reported against a newer
+//     one.
+//
+//  O. EVERY API STEP FEEDS THE LEDGER, NOT JUST THE FINAL BODY WRITE. Covered:
+//     /rules-config/get-active, /html/outlook/get-active,
+//     /rules-config/get/{id}, each of their timeouts, the MAX_SIG_BYTES
+//     ceiling, and both setSignatureAsync and appendOnSendAsync. An HTTP
+//     status and a transport failure stay distinct all the way to the message,
+//     because "check your connection" and "contact Admin" are different
+//     instructions to give someone — see prereq (a) for why the distinction is
+//     load-bearing on Mac/mobile.
+//
+//     BACKGROUND WORK IS SILENT BY DESIGN. prefetchSignatures (J) and
+//     revalidateSigHtml never record: neither has any bearing on what is on
+//     the mail right now, and a warm-up failure is not the user's problem.
+//
+//  P. SEND TIME RAISES FAILURES ONLY. The send is still never blocked
+//     (allowEvent: true), and a success message at send has nothing to land on
+//     because the item is already closing — so onSendCore reports a failure if
+//     there is one and otherwise clears the bar.
 //
 // -----------------------------------------------------------------------------
 //  CHANGES IN v7.3.0 — THE EMPTY-RECIPIENT DEFAULT NOW WORKS ON MOBILE
@@ -192,7 +243,8 @@
 //      and this file's URL, and the API must send CORS headers. Otherwise every
 //      fetch from the Mac event runtime rejects with "TypeError: Load failed".
 //      Note the shape of the failure: an HTTP status in the log is (D) above,
-//      a "Load failed" TypeError is this.
+//      a "Load failed" TypeError is this. The two now also reach the user as
+//      different notifications — see (O).
 //   b) XML (add-in only) manifest with LaunchEvents: OnNewMessageCompose,
 //      OnMessageRecipientsChanged, OnMessageFromChanged, OnMessageSend.
 //      Mobile honours only a subset — confirm which ones your build actually
@@ -201,7 +253,7 @@
 //      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v7.3.0";
+const CB_VERSION = "v7.4.0";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -289,12 +341,14 @@ const INTERNAL_REQUIRES_NO_EXTERNAL = false;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
-// How chatty the in-mail notification bar is.
-//   "errors"  — failures only (quietest; recommended for production)
-//   "status"  — start / applied / failures
-//   "verbose" — status plus per-phase timings (QA builds)
-const NOTIFY_LEVEL = "verbose";
+// FIX (M). The bar carries exactly two kinds of message:
+//   • "Signature applied" — success, auto-cleared after NOTIFY_CLEAR_MS
+//   • a failure reason    — raised only once the outcome is known, and left up
+//                           (errorMessage is dismissed by the user, not by us)
+// There is no progress chatter and no NOTIFY_LEVEL any more; per-phase timings
+// are console-only via timed().
 const NOTIFY_CLEAR_MS = 3000;
+const MSG_APPLIED = "Signature applied";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  LOGGING
@@ -421,10 +475,16 @@ function officeAsync(fn, { ms = COMPOSE_TYPE_TIMEOUT_MS, fallback = null, label 
 // ─────────────────────────────────────────────────────────────────────────────
 //  WRITE TOKEN
 //  Guards every body/state write against a newer decision made during an await.
+//
+//  FIX (N): taking a new seq also RESETS THE FAILURE LEDGER. A decision and the
+//  failures reported against it are the same unit of work — an error from an
+//  evaluation that has since been superseded must never surface against the new
+//  one. beginWrite() is called at the top of every entry point, before any
+//  fetch, which is exactly the boundary we want.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let _writeSeq = 0;
-const beginWrite = () => ++_writeSeq;
+const beginWrite = () => { clearFailures(); return ++_writeSeq; };
 const isCurrent = (seq) => seq === _writeSeq;
 
 // Recipient snapshot of the last evaluation in THIS runtime. Declared up here
@@ -437,6 +497,10 @@ let _lastSnapshot = "";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  NOTIFICATIONS
+//
+//  Two messages, one key, one writer (reportOutcome). Nothing in this file
+//  should call showNotification/notifyError directly except reportOutcome —
+//  everything else records a failure and lets the outcome be decided once.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // `icon` is documented as required for type "informationalMessage" and is meant
@@ -450,7 +514,7 @@ const NOTIF_ICON = "none";
 // so a later error can never be wiped by an earlier success's timeout.
 let _notifSeq = 0;
 
-function showNotification(item, message, type = "informationalMessage", startMs = null) {
+function showNotification(item, message, type = "informationalMessage") {
     try {
         const nm = item?.notificationMessages;
         if (typeof nm?.replaceAsync !== "function") {
@@ -458,7 +522,8 @@ function showNotification(item, message, type = "informationalMessage", startMs 
             return;
         }
 
-        let msg = startMs ? `${message} (${since(startMs)})` : message;
+        let msg = String(message || "");
+        if (!msg) return;
         if (msg.length > 150) msg = `${msg.slice(0, 147)}...`; // host hard limit
 
         const details = { type, message: msg };
@@ -498,15 +563,110 @@ function clearNotificationSoon(item, ms = NOTIFY_CLEAR_MS) {
     }, ms);
 }
 
-// Progress/status messages, suppressed unless NOTIFY_LEVEL allows them.
-// Timings are attached only at "verbose" — they are QA instrumentation, not
-// something an end user should read.
-function notifyStatus(item, message, startMs = null) {
-    if (NOTIFY_LEVEL === "errors") return;
-    showNotification(item, message, "informationalMessage", NOTIFY_LEVEL === "verbose" ? startMs : null);
+// ─────────────────────────────────────────────────────────────────────────────
+//  FAILURE LEDGER (N) / (O)
+//
+//  Any step may fail: the rules call, either signature call, their timeouts,
+//  the size ceiling, or the body write itself. None of them notify at the point
+//  of failure — they record here, and reportOutcome() raises ONE message when
+//  the outcome is known. That is what makes "recovered from a failure" silent
+//  and "applied, but the rules were unreachable" honest.
+//
+//  RANK breaks ties when several things go wrong in one run: the most specific
+//  and most actionable message wins, and a fatal failure always outranks a
+//  degradation. First writer wins within a rank, since the earliest failure is
+//  usually the cause of the later ones.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FAILURES = {
+    // ── FATAL: nothing was written to the body ────────────────────────────────
+    offline: {
+        rank: 3, fatal: true,
+        msg: "Couldn't reach the signature service. Check your connection and try again, or contact Admin.",
+    },
+    server: {
+        rank: 3, fatal: true,
+        msg: "The signature service returned an error. Please contact Admin.",
+    },
+    unassigned: {
+        rank: 4, fatal: true,
+        msg: "No signature is assigned to your account. Please contact Admin.",
+    },
+    too_large: {
+        rank: 4, fatal: true,
+        msg: "Signature exceeds the allowed size. Please contact Admin.",
+    },
+    write_failed: {
+        rank: 4, fatal: true,
+        msg: "Signature could not be applied. Please contact Admin.",
+    },
+    // ── DEGRADED: something WAS applied, but the rules could not be consulted,
+    //    so it may be the default where a rule should have won. Worth saying;
+    //    not worth the fatal wording. Deliberately outcome-neutral, because
+    //    this is reported both when the default was applied and when a
+    //    previously applied signature was left in place.
+    rules_offline: {
+        rank: 2, fatal: false,
+        msg: "Couldn't reach the signature service, so your signature rules weren't checked. Check your connection.",
+    },
+    rules_error: {
+        rank: 2, fatal: false,
+        msg: "Couldn't load your signature rules. Please contact Admin.",
+    },
+};
+
+let _failure = null;          // { kind, rank, fatal, msg }
+let _rulesFetchError = null;  // "offline" | "server" | null
+let _reported = false;        // has a message actually been raised this run?
+
+function clearFailures() {
+    _failure = null;
+    _rulesFetchError = null;
+    _reported = false;
 }
 
-const notifyError = (item, msg) => showNotification(item, msg, "errorMessage");
+const hasFailure = () => _failure !== null;
+const wasReported = () => _reported;
+
+function recordFailure(kind, detail = "") {
+    const f = FAILURES[kind];
+    if (!f) { warn("recordFailure: unknown kind", kind); return; }
+    warn(`failure recorded: ${kind}${detail ? ` — ${detail}` : ""}`);
+    if (!_failure || f.rank > _failure.rank) _failure = { kind, ...f };
+}
+
+// A null/absent HTTP status means the request never got an answer (transport,
+// CORS, timeout — prereq (a)); anything else is the server answering badly.
+const failureKindFor = (status) => (status == null ? "offline" : "server");
+
+// The rules call records its own outcome separately: whether it MATTERS depends
+// on whether a cached ruleset covered for it, which only findMatchingRule knows.
+const noteRulesFetchError = (kind) => { _rulesFetchError = kind; };
+const rulesFailureKind = () => (_rulesFetchError === "offline" ? "rules_offline" : "rules_error");
+
+/**
+ * THE ONLY PLACE A NOTIFICATION IS RAISED.
+ *
+ * @param {"applied"|"failed"|"quiet"} outcome
+ *   applied — the signature is on the body
+ *   failed  — it is not, and no more specific failure was recorded
+ *   quiet   — there was nothing to do (manual override, deferred mobile
+ *             compose, blocked evaluation that kept a good signature)
+ */
+function reportOutcome(item, outcome) {
+    // _reported is set only when something is actually put on the bar, so the
+    // entry-point catch blocks can tell "nothing was said" from "already said".
+    const show = (msg, type) => { _reported = true; showNotification(item, msg, type); };
+
+    if (_failure) return show(_failure.msg, "errorMessage");
+    if (outcome === "applied") {
+        show(MSG_APPLIED, "informationalMessage");
+        clearNotificationSoon(item);
+        return;
+    }
+    if (outcome === "failed") return show(FAILURES.write_failed.msg, "errorMessage");
+    removeNotification(item);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CRYPTO — AES-CBC via Web Crypto
@@ -850,6 +1010,11 @@ async function getActiveSignatureId(item = null, { allowRoam = true } = {}) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  API
+//
+//  FIX (O). No fetch function notifies. Each one reports WHAT went wrong to its
+//  caller — `failure` for the signature calls, noteRulesFetchError for the
+//  rules call — and resolveSigHtml / findMatchingRule decide whether it is
+//  worth telling the user about.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function apiHeaders(encryptedMail, extra = {}) {
@@ -869,10 +1034,15 @@ async function fetchRules(encryptedMail) {
             let body = "";
             try { body = (await res.text()).slice(0, 200); } catch (_) { }
             warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, body);
+            noteRulesFetchError(failureKindFor(res.status));
             return null;
         }
         const rulesJson = JSON.parse(await res.text())?.rulesJson;
-        if (!rulesJson) { warn("rules response had no rulesJson"); return null; }
+        if (!rulesJson) {
+            warn("rules response had no rulesJson");
+            noteRulesFetchError("server");
+            return null;
+        }
         setCachedRules(rulesJson);
         log(`rulesJson fetched and cached (${(rulesJson.rulesList || []).length} rule(s), X-Platform=${xp})`);
         return rulesJson;
@@ -880,12 +1050,17 @@ async function fetchRules(encryptedMail) {
         // "TypeError: Load failed" in a cold runtime means the well-known
         // allowlist / CORS setup is wrong. See header prereq (a).
         err(`fetchRules failed (X-Platform=${xp}):`, e);
+        noteRulesFetchError("offline");
         return null;
     }
 }
 
-// Default signature. Returns { html, explicit } — explicit means the server
-// gave a definitive answer, so an empty result is "unassigned", not "unknown".
+// Default signature. Returns { html, explicit, failure }:
+//   explicit — the server gave a definitive answer, so an empty result means
+//              "unassigned", not "unknown".
+//   failure  — ledger kind for a genuine failure, or null. A 404 is NOT a
+//              failure here: it is the definitive "nothing assigned" answer,
+//              and resolveSigHtml turns that into the unassigned message.
 async function fetchDefaultSignature(encryptedMail) {
     const xp = getXPlatform();
     try {
@@ -898,18 +1073,29 @@ async function fetchDefaultSignature(encryptedMail) {
             try { const b = JSON.parse(await res.text()); msg = String(b?.message || b?.error || ""); } catch (_) { }
             warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, msg);
             const notFound = res.status === 404 || /not\s*found/i.test(msg);
-            return { html: null, explicit: notFound };
+            return {
+                html: null,
+                explicit: notFound,
+                failure: notFound ? null : failureKindFor(res.status),
+            };
         }
-        const html = JSON.parse(await aesDecrypt(await res.text()))?.html;
-        return { html, explicit: true };
+        let html = null;
+        try {
+            html = JSON.parse(await aesDecrypt(await res.text()))?.html;
+        } catch (e) {
+            // 2xx that we cannot read is a server-side problem, not a network one.
+            warn("default signature response unreadable:", e.message);
+            return { html: null, explicit: false, failure: "server" };
+        }
+        return { html, explicit: true, failure: null };
     } catch (e) {
         warn(`fetchDefaultSignature crashed (X-Platform=${xp}):`, e);
-        return { html: null, explicit: false };
+        return { html: null, explicit: false, failure: "offline" };
     }
 }
 
-// Same { html, explicit } shape as fetchDefaultSignature so resolveSigHtml can
-// treat both uniformly.
+// Same { html, explicit, failure } shape as fetchDefaultSignature so
+// resolveSigHtml can treat both uniformly.
 async function fetchSignatureById(id, encryptedMail) {
     try {
         const res = await fetch(`${BASE_URL}/rules-config/get/${encodeURIComponent(id)}`, {
@@ -918,14 +1104,25 @@ async function fetchSignatureById(id, encryptedMail) {
         });
         if (!res.ok) {
             err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`);
-            return { html: null, explicit: res.status === 404 };
+            const notFound = res.status === 404;
+            return {
+                html: null,
+                explicit: notFound,
+                failure: notFound ? null : failureKindFor(res.status),
+            };
         }
-        const html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
+        let html = null;
+        try {
+            html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
+        } catch (e) {
+            warn(`signature response unreadable id=${id}:`, e.message);
+            return { html: null, explicit: false, failure: "server" };
+        }
         if (!html) warn("signature HTML empty for id:", id);
-        return { html, explicit: true };
+        return { html, explicit: true, failure: null };
     } catch (e) {
         err(`fetchSignatureById crashed id=${id}:`, e);
-        return { html: null, explicit: false };
+        return { html: null, explicit: false, failure: "offline" };
     }
 }
 
@@ -937,27 +1134,38 @@ async function fetchSignatureById(id, encryptedMail) {
  * the server" (a transient problem). The two need different messages — without
  * the distinction a misconfiguration is indistinguishable from flaky network.
  *
+ * FIX (O). This is where an API failure becomes a user-facing failure, via the
+ * ledger. `silent` exists for background callers (prefetch): a warm-up that
+ * fails has not affected the mail in front of the user and must not notify.
+ *
  * @returns {Promise<{ html: string|null, source: "cache"|"network"|"none", unassigned: boolean }>}
  */
-async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = null } = {}) {
+async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = null, silent = false } = {}) {
     const key = String(id);
     const budget = budgetMs ?? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
+    const fail = (kind, detail) => { if (!silent) recordFailure(kind, detail); };
 
     // FIX (C) belt-and-braces: a rule that slipped through with no signatureId
     // would otherwise be requested as the literal "null" / "undefined".
     if (!key || key === "null" || key === "undefined") {
         warn("resolveSigHtml called with a non-id — refusing to fetch:", key);
+        // A configuration fault, not a transport one: nothing the user can retry.
+        fail("server", `non-id "${key}"`);
         return { html: null, source: "none", unassigned: false };
     }
 
     const cached = sigCache.get(key, { skipTtl: true });
     if (cached) return { html: cached, source: "cache", unassigned: false };
 
-    if (!allowNetwork || !userEmail) return { html: null, source: "none", unassigned: false };
+    if (!allowNetwork || !userEmail) {
+        warn(`cannot resolve id=${key} (allowNetwork=${allowNetwork}, user=${!!userEmail})`);
+        fail("offline", "no network permitted or no user email");
+        return { html: null, source: "none", unassigned: false };
+    }
 
     try {
         const enc = await encryptEmail(userEmail);
-        const { html, explicit } = key === DEFAULT_ID
+        const { html, explicit, failure } = key === DEFAULT_ID
             ? await withTimeout(fetchDefaultSignature(enc), budget, "default fetch")
             : await withTimeout(fetchSignatureById(key, enc), budget, `sig fetch ${key}`);
         if (html) {
@@ -965,15 +1173,25 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
             return { html, source: "network", unassigned: false };
         }
         // Definitive empty answer = nothing is assigned server-side.
-        return { html: null, source: "none", unassigned: !!explicit };
+        if (explicit) {
+            fail("unassigned", `id=${key}`);
+            return { html: null, source: "none", unassigned: true };
+        }
+        fail(failure || "server", `id=${key}`);
+        return { html: null, source: "none", unassigned: false };
     } catch (e) {
+        // withTimeout rejected: the call never came back inside the budget.
         warn(`resolveSigHtml failed id=${key}:`, e.message);
+        fail("offline", `id=${key} ${e.message}`);
         return { html: null, source: "none", unassigned: false };
     }
 }
 
 // Revalidate in the background and refresh the cache. Returns fresh HTML only
 // when it actually differs from what we already applied.
+//
+// Silent on purpose (O): the user already has a signature on the mail, and a
+// failed revalidation does not change that. Failures are logged, not reported.
 async function revalidateSigHtml(id, userEmail, appliedHtml) {
     const key = String(id);
     try {
@@ -998,6 +1216,9 @@ async function revalidateSigHtml(id, userEmail, appliedHtml) {
  * clears the To line, and the correct answer flips to the one id nobody
  * fetched — on a cold runtime, inside the send budget. Rule signatures stay off
  * mobile for bandwidth; the single default is worth it.
+ *
+ * Silent (O): this is speculative warm-up. If it fails, the id will be fetched
+ * again when it is actually needed, and THAT failure is the one worth showing.
  */
 async function prefetchSignatures(userEmail, { includeRules = true } = {}) {
     const ids = [];
@@ -1014,7 +1235,7 @@ async function prefetchSignatures(userEmail, { includeRules = true } = {}) {
     const missing = ids.filter((id) => !sigCache.get(id, { skipTtl: true }));
     if (!missing.length) return;
     log(`prefetching ${missing.length} signature(s):`, missing.join(", "));
-    await Promise.allSettled(missing.map((id) => resolveSigHtml(id, userEmail)));
+    await Promise.allSettled(missing.map((id) => resolveSigHtml(id, userEmail, { silent: true })));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1030,6 +1251,10 @@ async function prefetchSignatures(userEmail, { includeRules = true } = {}) {
 //  v7.1 collapsed the first two into [] and then treated any empty list as
 //  "cannot evaluate", which pinned a rule signature to the body forever once
 //  the user cleared the To line. Keep the three states distinct.
+//
+//  NOTE: a failed recipient read is a HOST failure, not an API failure, and it
+//  is not reported on its own — it surfaces as the rules/blocked path deciding
+//  to keep whatever is already on the body.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function getRecipients(field) {
@@ -1233,6 +1458,12 @@ function senderMatches(rule, senderEmail) {
  *   makes mobile work — getComposeTypeAsync does not exist there, and the old
  *   unconditional bail-out sent every send-time evaluation down the "reuse the
  *   persisted rule id" path, which is precisely the reported bug.
+ *
+ *   FIX (O): "no rules available at all" is the one rules failure worth
+ *   reporting, and it is recorded HERE rather than in fetchRules — a failed
+ *   fetch that a cached ruleset covered for changed nothing the user can see.
+ *   It is recorded as a DEGRADATION, not a fatal error: a signature still gets
+ *   applied, it just may not be the one a rule wanted.
  */
 async function findMatchingRule(item, senderEmail, {
     allowNetwork = false,
@@ -1248,10 +1479,15 @@ async function findMatchingRule(item, senderEmail, {
     if (!rulesJson && allowNetwork && senderEmail) {
         warn("rules not cached — live fetch");
         const enc = await encryptEmail(senderEmail);
-        rulesJson = await withTimeout(fetchRules(enc), budget, "rules fetch").catch(() => null);
+        rulesJson = await withTimeout(fetchRules(enc), budget, "rules fetch")
+            .catch((e) => { warn("rules fetch timed out:", e.message); noteRulesFetchError("offline"); return null; });
         source = rulesJson ? "network" : "none";
     }
-    if (!rulesJson) { warn("no rules available"); return { rule: null, blocked: true }; }
+    if (!rulesJson) {
+        warn("no rules available");
+        recordFailure(rulesFailureKind(), "rule evaluation could not run");
+        return { rule: null, blocked: true };
+    }
 
     const emails = await readRecipientEmails(item);
 
@@ -1355,11 +1591,17 @@ async function findMatchingRule(item, senderEmail, {
 // matters — see (L).
 const hostCanSetSignature = (item) => typeof item?.body?.setSignatureAsync === "function";
 
-async function writeSignature(item, html, { isSendTime = false } = {}) {
+/**
+ * FIX (N). Records failures instead of notifying. `silent` is for the
+ * background revalidation rewrite, which happens after the outcome has already
+ * been reported and must not retroactively colour it.
+ */
+async function writeSignature(item, html, { isSendTime = false, silent = false } = {}) {
+    const fail = (kind, detail) => { if (!silent) recordFailure(kind, detail); };
     const bytes = new Blob([html]).size;
     if (bytes > MAX_SIG_BYTES) {
         warn(`signature ${bytes}B exceeds ${MAX_SIG_BYTES}B — not applying`);
-        notifyError(item, "Signature exceeds the allowed size. Please contact Admin.");
+        fail("too_large", `${bytes}B > ${MAX_SIG_BYTES}B`);
         return false;
     }
 
@@ -1371,8 +1613,8 @@ async function writeSignature(item, html, { isSendTime = false } = {}) {
         if (res) { log(`signature written (${bytes}B)`); return true; }
     } else if (!isSendTime) {
         // FIX (L). Not an error, and not the user's problem: this host defers
-        // all signature writing to send. Stay quiet and let the decision be
-        // persisted so the send runtime can act on it.
+        // all signature writing to send. Record NOTHING, notify NOTHING, and let
+        // the decision be persisted so the send runtime can act on it.
         log("setSignatureAsync unavailable at compose on this host — deferring the write to send");
         return false;
     } else {
@@ -1387,7 +1629,7 @@ async function writeSignature(item, html, { isSendTime = false } = {}) {
         if (res) { log("signature appended via appendOnSendAsync"); return true; }
     }
 
-    notifyError(item, "Signature could not be applied. Please contact Admin.");
+    fail("write_failed", isSendTime ? "setSignatureAsync/appendOnSendAsync" : "setSignatureAsync");
     return false;
 }
 
@@ -1395,21 +1637,20 @@ async function writeSignature(item, html, { isSendTime = false } = {}) {
  * Apply the signature for `id`, guarded by the write token.
  * Fast path applies a cached copy immediately; revalidation rewrites only if
  * the server copy differs AND no newer decision has been made meanwhile.
+ *
+ * FIX (M)/(N). No notifications here at all — not the old "Loading your
+ * signature...", not the success, not the errors. It returns a boolean and
+ * leaves the ledger populated; the caller reports once.
  */
 async function applyById(item, id, userEmail, seq, { revalidate = false, isSendTime = false } = {}) {
     const key = String(id);
     const t0 = Date.now();
 
     // Nothing can be written at compose on this host — do not fetch, do not
-    // notify. evaluateAndApply still persists the id for the send runtime.
+    // record. evaluateAndApply still persists the id for the send runtime (L).
     if (!isSendTime && !hostCanSetSignature(item)) {
         log(`host cannot write at compose — id=${key} decided but not applied yet`);
         return false;
-    }
-
-    // Only announce a wait if there is one: a cache hit writes in ~300ms.
-    if (!isSendTime && !sigCache.get(key, { skipTtl: true })) {
-        notifyStatus(item, "Loading your signature...", t0);
     }
 
     const { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
@@ -1418,34 +1659,25 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
 
     if (!html) {
         // Never blank the body or substitute a guess: whatever is there already
-        // is better than nothing.
+        // is better than nothing. resolveSigHtml has already recorded WHY —
+        // unassigned / offline / server — so the message is specific.
         warn(`could not resolve id=${key} (unassigned=${unassigned}) — leaving body as-is`);
-        if (!isSendTime) {
-            notifyError(item, unassigned
-                ? "No signature is assigned to your account. Please contact Admin."
-                : "Couldn't load your signature. Check your connection, or contact Admin.");
-        }
+        if (!hasFailure()) recordFailure("offline", `unresolved id=${key}`);
         return false;
     }
     if (!isCurrent(seq)) { log(`stale write dropped (seq=${seq}, current=${_writeSeq})`); return false; }
 
     const ok = await writeSignature(item, html, { isSendTime });
     if (!ok) return false;
-    log(`applied id=${key} from ${source}`);
-
-    if (!isSendTime) {
-        notifyStatus(item, "Signature applied", t0);
-        clearNotificationSoon(item);
-    } else {
-        removeNotification(item);
-    }
+    log(`applied id=${key} from ${source} in ${since(t0)}`);
 
     if (revalidate && source === "cache" && userEmail && !isSendTime) {
-        // Background only — never blocks the user, never races the token.
+        // Background only — never blocks the user, never races the token, and
+        // never touches the notification bar or the ledger.
         revalidateSigHtml(key, userEmail, html).then(async (fresh) => {
             if (!fresh || !isCurrent(seq)) return;
             log(`id=${key} changed on server — rewriting`);
-            await writeSignature(item, fresh);
+            await writeSignature(item, fresh, { silent: true });
         }).catch(() => { });
     }
     return true;
@@ -1454,8 +1686,8 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
 // ─────────────────────────────────────────────────────────────────────────────
 //  THE SINGLE DECISION PATH
 //  Everything at compose time funnels through here: pick an id, apply it once,
-//  persist it. Replaces v6's applySignatureCore + onRecipientsChanged pair,
-//  which each wrote the body independently.
+//  persist it, and report ONCE. Replaces v6's applySignatureCore +
+//  onRecipientsChanged pair, which each wrote the body independently.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}) {
@@ -1464,6 +1696,8 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 
     const override = await getManualOverride(item);
     if (override) {
+        // The user chose this signature themselves; we have neither news nor a
+        // complaint. Leave the bar exactly as it is.
         log("manual override active — leaving signature untouched:", override);
         return;
     }
@@ -1480,7 +1714,14 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
         // longer lands here, and neither does an unknown compose type on its
         // own; see (E) and (F).
         const active = await getItemProp(item, P_ACTIVE_SIG);
-        if (active) { log("evaluation blocked — keeping active id:", active); return; }
+        if (active) {
+            log("evaluation blocked — keeping active id:", active);
+            // Nothing changed on the body, but if the reason we are blocked is
+            // that the API is unreachable, the user should know the rules were
+            // never checked. reportOutcome stays silent when the ledger is empty.
+            if (isCurrent(seq)) reportOutcome(item, "quiet");
+            return;
+        }
         log("evaluation blocked and nothing applied yet — applying default");
     }
 
@@ -1500,6 +1741,12 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
         const snapshot = serializeRecipients(await readRecipientEmails(item));
         await markActiveSignature(item, targetId, snapshot);
         if (deferred) log(`id=${targetId} persisted for the send runtime to apply`);
+    }
+
+    // ONE message for the whole evaluation (N). A deferred compose is "quiet":
+    // nothing is wrong, the write simply happens at send.
+    if (isCurrent(seq)) {
+        reportOutcome(item, applied ? "applied" : deferred ? "quiet" : "failed");
     }
     timed(`evaluateAndApply (${targetId})`, t0);
 }
@@ -1579,7 +1826,12 @@ async function onSendCore(item, mailbox) {
     const applied = await applyById(item, id, userEmail, seq, { isSendTime: true });
     if (applied && persist) await markActiveSignature(item, id, snapshot);
 
-    removeNotification(item);
+    // FIX (P). The mail is already on its way out, so "Signature applied" has
+    // nothing to land on — only a failure is worth raising here. The send is
+    // never blocked either way (onSendHandler always allows the event).
+    if (applied && !hasFailure()) removeNotification(item);
+    else reportOutcome(item, applied ? "applied" : "failed");
+
     timed(`onSendCore (${applied ? "applied" : "left as-is"})`, t0);
 }
 
@@ -1607,8 +1859,10 @@ const applySignature = async function (event = { completed: () => { } }) {
     try {
         if (!item) return complete();
         log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()})`);
-        notifyStatus(item, "Preparing your signature...", t0);
 
+        // FIX (M): no "Preparing your signature..." — the bar stays empty until
+        // there is an outcome. FIX (N): beginWrite() also clears the ledger, so
+        // everything below is attributed to this decision only.
         const seq = beginWrite();
         const userEmail = mailbox?.userProfile?.emailAddress;
 
@@ -1623,6 +1877,9 @@ const applySignature = async function (event = { completed: () => { } }) {
         // Warm the rules cache before evaluating. With fix (A) getCachedRules()
         // genuinely returns null once the TTL lapses, so this actually refetches
         // — in v7.0 an immortal roamed copy made it a permanent no-op.
+        //
+        // A failure here is NOT reported directly: fetchRules only notes the
+        // reason, and findMatchingRule decides whether it mattered (O).
         const rulesP = (async () => {
             if (!userEmail) return;
             if (getCachedRules()) { log("rules cache warm:", describeRulesSource()); return; }
@@ -1639,12 +1896,16 @@ const applySignature = async function (event = { completed: () => { } }) {
         await evaluateAndApply(item, mailbox, seq);
 
         // FIX (J). Mobile gets the default warmed, but not every rule signature.
+        // Silent by design — see prefetchSignatures.
         if (userEmail) {
             prefetchSignatures(userEmail, { includeRules: !isMobile() })
                 .catch((e) => warn("prefetch failed:", e));
         }
     } catch (e) {
         err("applySignature error:", e);
+        // An exception escaped the flow. Only speak if nothing has been said
+        // yet — never overwrite a message this run already raised.
+        if (item && !wasReported()) reportOutcome(item, "failed");
     } finally {
         complete();
     }
@@ -1690,6 +1951,7 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
         await evaluateAndApply(item, mailbox, beginWrite());
     } catch (e) {
         err("onRecipientsChangedHandler error:", e);
+        if (item && !wasReported()) reportOutcome(item, "failed");
     } finally {
         complete();
     }
@@ -1724,6 +1986,7 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         await evaluateAndApply(item, mailbox, seq);
     } catch (e) {
         err("onFromChangedHandler error:", e);
+        if (item && !wasReported()) reportOutcome(item, "failed");
     } finally {
         complete();
     }
@@ -1739,14 +2002,17 @@ const onSendHandler = async function (event = { completed: () => { } }) {
     try {
         if (!item) return complete();
         log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
-        showNotification(item, "Verifying signature...");
+        // FIX (M): no "Verifying signature..." — onSendCore reports failures only.
 
         // FIX (K): mobile is a cold runtime too and needs the same headroom.
         const budget = isColdRuntime() ? SEND_BUDGET_MS_COLD : SEND_BUDGET_MS;
         await withTimeout(onSendCore(item, mailbox), budget, "onSendCore");
     } catch (e) {
+        // Ran out of budget or threw: the signature probably did not make it, so
+        // report rather than silently clearing the bar as v7.3 did.
         warn("onSend timeout/error:", e.message);
-        removeNotification(item);
+        if (!hasFailure()) recordFailure("offline", `onSendCore: ${e.message}`);
+        if (!wasReported()) reportOutcome(item, "failed");
     } finally {
         complete();
     }
