@@ -303,10 +303,15 @@ const MAX_SIG_BYTES = 100 * 1024;
 
 // Send budgets. FIX (K): "cold" is Mac AND mobile — both get a fresh runtime
 // with empty localStorage per event, so both may have to fetch inside the send.
-const SEND_BUDGET_MS_COLD = 12_000;
-const SEND_BUDGET_MS = 5_000;
-const FETCH_BUDGET_MS = 2_500;
-const FETCH_BUDGET_MS_COLD = 5_000;
+// const SEND_BUDGET_MS_COLD = 12_000;
+// const SEND_BUDGET_MS = 5_000;
+// const FETCH_BUDGET_MS = 2_500;
+// const FETCH_BUDGET_MS_COLD = 5_000;
+const SEND_BUDGET_MS_COLD = 20_000;
+const SEND_BUDGET_MS = 10_000;
+
+const FETCH_BUDGET_MS_COLD = 8_000;
+const FETCH_BUDGET_MS = 5_000;
 const COMPOSE_TYPE_TIMEOUT_MS = 1_500;
 
 // Let OWA's recipient events settle before reading; avoids a burst of
