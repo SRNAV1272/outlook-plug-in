@@ -1377,6 +1377,11 @@ const MAX_SIG_BYTES = 100 * 1024;
 // wrappers already sitting in open drafts; those degrade to the unmarked
 // token-run path, so it is safe, just less precise for one compose session.
 const SIG_MARK_ATTR = "data-cb-sig";
+// Prepended to the signature when send-time verification found the draft's copy
+// altered and re-inserted it.
+const TAMPER_TAG =
+    `<div style="margin:0 0 6px 0;font:italic 11px Arial,Helvetica,sans-serif;color:#7a6134;">` +
+    `Signature re-inserted</div>`;
 
 // Master switch. false = v7.4 behaviour: always rewrite at send. Turn this off
 // first if a signature ever fails to appear on a sent mail — it isolates the
@@ -2886,7 +2891,7 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
         return nothing("deferred");
     }
 
-    const { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
+    let { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
         budgetMs: isSendTime ? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS) : 10_000,
     });
 
@@ -2927,6 +2932,7 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
             timed(`applyById (${key}, detected-only)`, t0);
             return { applied: true, status: "detected", verdict: v.verdict, digest };
         }
+        if (somethingIsThere) html = TAMPER_TAG + html;   // ← new
         if (!isCurrent(seq)) { log("stale write dropped after verification"); return nothing("stale"); }
     }
 
