@@ -1323,7 +1323,7 @@ const CB_VERSION = "v7.5.1";
 
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-const BASE_URL = "https://ns-enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://enterprise.cardbyte.ai/email-signature";
 
 // The id standing for "the user's default (non-rule) signature".
 // Replace with a real backend id when /html/outlook/get-active returns one;
@@ -1454,6 +1454,9 @@ const NOTIF_KEY = "cardbyte_sig_status";
 // are console-only via timed().
 const NOTIFY_CLEAR_MS = 3000;
 const MSG_APPLIED = "Signature applied";
+// Shown while the signature is being decided and fetched. Raised only by
+// showLoading(), and always superseded or removed by reportOutcome().
+const MSG_LOADING = "Applying your signature...";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  LOGGING
@@ -1608,12 +1611,15 @@ let _lastSnapshot = "";
 //  everything else records a failure and lets the outcome be decided once.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// `icon` is documented as required for type "informationalMessage" and is meant
-// to be an image resource id from the manifest's <Resources><bt:Images>. OWA
-// tolerates an unknown id and renders the message without an icon; Windows
-// desktop is stricter. "none" is what shipped and works — to be robust across
-// hosts, declare an image resource and put its id here.
-const NOTIF_ICON = "none";
+// `icon` must be an image resource id declared in the manifest's
+// <Resources><bt:Images>, and it is resolved against the VersionOverrides in
+// effect — event handlers run under V1_1, so the v11.* ids are the right ones.
+// "none" is not a declared id: OWA tolerates that and renders no icon, while
+// Windows desktop falls back to its generic information glyph, which is why
+// the CardByte icon never appeared. Change this if your manifest names the
+// 16x16 image differently (the classic manifest declares v10.icon16 for
+// VersionOverrides 1.0 and v11.icon16 for V1_1).
+const NOTIF_ICON = "v11.icon16";
 
 // Guards the auto-clear timer: it only clears the message it was scheduled for,
 // so a later error can never be wiped by an earlier success's timeout.
@@ -1758,6 +1764,21 @@ const rulesFailureKind = () => (_rulesFetchError === "offline" ? "rules_offline"
  *   quiet   — there was nothing to do (manual override, deferred mobile
  *             compose, blocked evaluation that kept a good signature)
  */
+/**
+ * The progress message. v7.4 removed it (FIX (M)) because six messages flashed
+ * at the user; with only two messages left, a compose that takes a cold-runtime
+ * fetch otherwise shows an empty bar until "Signature applied" appears.
+ *
+ * Deliberately NOT recorded in _reported: this is progress, not an outcome, so
+ * an entry-point catch block must still treat "only the loading message was
+ * shown" as nothing having been said. Every path that raises it ends in
+ * reportOutcome(), which replaces it on success/failure and removes it on
+ * "quiet" — so it cannot get stranded on the bar.
+ */
+function showLoading(item) {
+    showNotification(item, MSG_LOADING, "informationalMessage");
+}
+
 function reportOutcome(item, outcome) {
     // _reported is set only when something is actually put on the bar, so the
     // entry-point catch blocks can tell "nothing was said" from "already said".
@@ -3039,6 +3060,10 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
         log("manual override active — leaving signature untouched:", override);
         return;
     }
+
+    // Progress goes up only after the override check, so a user-chosen
+    // signature never flashes a message about work that is not happening.
+    showLoading(item);
 
     const { rule, blocked } = await findMatchingRule(item, userEmail, {
         allowNetwork,
