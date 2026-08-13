@@ -6791,7 +6791,7 @@ const CONFIG = {
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
-    BASE_URL: "https://ns-enterprise.cardbyte.ai/email-signature",
+    BASE_URL: "https://enterprise.cardbyte.ai/email-signature",
 
     // Network
     XHR_TIMEOUT_MS: 8000,
@@ -7608,15 +7608,65 @@ function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     return true;
 }
 
-function senderMatches(rule) {
-    const senders = (rule && Array.isArray(rule.Senders)) ? rule.Senders : null;
-    if (!senders || senders.length === 0) return true;
-    if (senders.indexOf("*") !== -1) return true;
-    const me = getUserEmail().toLowerCase();
-    if (!me) return false;
-    for (let i = 0; i < senders.length; i++) {
-        if ((senders[i] || "").trim().toLowerCase() === me) return true;
+// Rule sender lists have appeared under several property names and entry
+// shapes. Read all of them rather than silently treating an unrecognised
+// shape as "no restriction".
+function _ruleSenders(rule) {
+    if (!rule) return null;
+    const candidates = ["Senders", "senders", "SenderEmails", "senderEmails",
+        "senderList", "SenderList", "Sender", "sender"];
+    for (let i = 0; i < candidates.length; i++) {
+        const v = rule[candidates[i]];
+        if (Array.isArray(v)) return { key: candidates[i], list: v };
+        if (typeof v === "string" && v.trim() !== "") return { key: candidates[i], list: [v] };
     }
+    return null;
+}
+
+// Accepts "a@b.com", {email|emailAddress|address|smtpAddress|userPrincipalName},
+// "*", "*@b.com", "@b.com" and a bare "b.com".
+function _senderEntryMatches(entry, me, myDomain) {
+    let s = "";
+    if (typeof entry === "string") s = entry;
+    else if (entry && typeof entry === "object") {
+        s = entry.email || entry.emailAddress || entry.address ||
+            entry.smtpAddress || entry.userPrincipalName || entry.upn || "";
+    }
+    s = String(s || "").trim().toLowerCase();
+    if (!s) return false;
+
+    if (s === "*" || s === "all") return true;
+    if (s === me) return true;
+
+    if (s.indexOf("*@") === 0) return myDomain && s.slice(2) === myDomain;
+    if (s.indexOf("@") === 0) return myDomain && s.slice(1) === myDomain;
+    if (s.indexOf("@") === -1) return myDomain && s === myDomain;
+
+    return false;
+}
+
+function senderMatches(rule) {
+    const found = _ruleSenders(rule);
+    const me = getUserEmail().toLowerCase();
+    const myDomain = getDomain(me);
+
+    if (!found || found.list.length === 0) {
+        _diag.step("senderMatches:no-sender-list",
+            "priority=" + (rule && rule.priority) +
+            " ruleKeys=[" + (rule ? Object.keys(rule).join(",") : "") + "] \u2192 unrestricted");
+        return true;
+    }
+
+    for (let i = 0; i < found.list.length; i++) {
+        if (_senderEntryMatches(found.list[i], me, myDomain)) return true;
+    }
+
+    // The decisive line: shows exactly what the rule wanted vs who we are.
+    _diag.step("senderMatches:NO-MATCH",
+        "priority=" + (rule && rule.priority) +
+        " via=" + found.key +
+        " me=" + me +
+        " list=" + _diag.truncate(JSON.stringify(found.list), 300));
     return false;
 }
 
@@ -7646,6 +7696,27 @@ function contextMatches(ruleContext, composeType) {
 // Returns "compose" | "reply" | "forward". Forward used to be collapsed into
 // "reply" here, which meant a rule with context "forward" could never match
 // and quietly fell through to the default signature.
+
+// A rule with no signatureId is not usable: it would match, resolve to
+// nothing, and — worse — shadow the lower-priority rule that should have
+// applied. Priority is coerced because a missing one yields NaN, and a
+// comparator that returns NaN lets Array#sort order however it likes, i.e.
+// an arbitrary "highest priority" match.
+function enabledRulesWithSignatures(rules) {
+    const all = ((rules && rules.rulesList) || []).filter(function (r) { return r && r.enabled; });
+    const usable = all.filter(function (r) {
+        return r.signatureId !== null && r.signatureId !== undefined &&
+            String(r.signatureId).trim() !== "";
+    });
+    const dropped = all.length - usable.length;
+    if (dropped) {
+        _diag.step("enabledRulesWithSignatures:dropped",
+            dropped + " enabled rule(s) have no signatureId \u2014 ignored");
+    }
+    return usable.sort(function (a, b) {
+        return (Number(a.priority) || 0) - (Number(b.priority) || 0);
+    });
+}
 
 function normalizeContext(v) {
     const s = (v || "").trim().toLowerCase();
@@ -7679,17 +7750,22 @@ function detectComposeType(item, cb) {
     _trySubjectFallback(item, cb);
 }
 
+// Multi-letter reply/forward prefixes across locales. Bare "R:"/"I:" are
+// deliberately absent — a false positive misclassifies a new mail as a reply.
+const REPLY_PREFIX_RE = /^\s*(re|aw|sv|vs|antw|res|ref|odp|回复)\s*(\[\d+\])?\s*:/i;
+const FORWARD_PREFIX_RE = /^\s*(fw|fwd|wg|tr|vb|rv|enc|转发)\s*(\[\d+\])?\s*:/i;
+
 function _trySubjectFallback(item, cb) {
     if (item.subject && typeof item.subject.getAsync === "function") {
         item.subject.getAsync(function (res) {
             if (res.status === Office.AsyncResultStatus.Succeeded) {
-                const subj = (res.value || "").toLowerCase().trim();
-                if (subj.indexOf("fw:") === 0 || subj.indexOf("fwd:") === 0) {
+                const subj = String(res.value || "");
+                if (FORWARD_PREFIX_RE.test(subj)) {
                     _diag.step("detectComposeType:forward-via-subject-prefix");
                     cb("forward");
                     return;
                 }
-                if (subj.indexOf("re:") === 0) {
+                if (REPLY_PREFIX_RE.test(subj)) {
                     _diag.step("detectComposeType:reply-via-subject-prefix");
                     cb("reply");
                     return;
@@ -7702,6 +7778,11 @@ function _trySubjectFallback(item, cb) {
     _tryInReplyToFallback(item, cb);
 }
 
+// Returning "compose" here was a guess, and it is the wrong guess to make: on
+// a reply where getComposeTypeAsync returns "" and the subject is not yet
+// populated, guessing "compose" lets compose-scoped rules win a reply and
+// skips every context:"reply" rule. null means "unknown" — context-agnostic
+// rules still match, context-scoped ones cannot.
 function _tryInReplyToFallback(item, cb) {
     try {
         if (item.inReplyToId) {
@@ -7710,8 +7791,8 @@ function _tryInReplyToFallback(item, cb) {
             return;
         }
     } catch (_) { }
-    _diag.step("detectComposeType:defaulting-to-compose");
-    cb("compose");
+    _diag.step("detectComposeType:UNDETERMINED", "\u2192 context-scoped rules cannot match");
+    cb(null);
 }
 
 function getComposeType(item, cb) { detectComposeType(item, cb); }
@@ -7733,17 +7814,26 @@ function findMatchingRule(item, rules, cb) {
         let hasExternal = false;
         const recipientDomains = [];
 
+        if (!senderDomain) {
+            _diag.step("findMatchingRule:NO-SENDER-DOMAIN",
+                "cannot classify internal/external \u2014 recipient-scoped rules will not match");
+        }
+
         emails.forEach(function (e) {
             const d = getDomain(e);
-            if (d && recipientDomains.indexOf(d) === -1) recipientDomains.push(d);
+            if (!d) return;   // unparseable address classifies as neither
+            if (recipientDomains.indexOf(d) === -1) recipientDomains.push(d);
             if (senderDomain && d === senderDomain) hasInternal = true;
-            else hasExternal = true;
+            else if (senderDomain) hasExternal = true;
         });
 
         getComposeType(item, function (composeType) {
-            const ruleList = ((rules && rules.rulesList) || [])
-                .filter(function (r) { return r && r.enabled; })
-                .sort(function (a, b) { return a.priority - b.priority; });
+            try {
+                _diag.step("findMatchingRule:raw-rules",
+                    _diag.truncate(JSON.stringify(rules), 2000));
+            } catch (e) { _diag.step("findMatchingRule:raw-rules-unserializable", e.message); }
+
+            const ruleList = enabledRulesWithSignatures(rules);
 
             _diag.step("findMatchingRule:context",
                 "sender=" + senderEmail +
