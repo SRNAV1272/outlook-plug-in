@@ -6809,6 +6809,9 @@ const CONFIG = {
     ITEM_RETRY_ATTEMPTS: 6,
     ITEM_RETRY_DELAY_MS: 250,
 
+    // Ceiling for a single Office.js callback on the critical path
+    ASYNC_STEP_TIMEOUT_MS: 3000,
+
     // Cache keys
     CACHE_KEY: "cardbyte_sig_html",
     RULES_CACHE_KEY: "cardbyte_rules",
@@ -6889,6 +6892,25 @@ const _diag = (function () {
     };
 })();
 
+// Wraps a callback so it always fires exactly once, within ms. Office.js
+// callbacks on the critical path occasionally never return in the classic
+// runtime; without this the whole pipeline stalls until the guard expires.
+function once(ms, label, cb) {
+    let fired = false;
+    const timer = setTimeout(function () {
+        if (fired) return;
+        fired = true;
+        _diag.step("once:TIMEOUT", label + " after " + ms + "ms \u2014 continuing");
+        cb(undefined, true);
+    }, ms);
+    return function (value) {
+        if (fired) { _diag.step("once:late-callback-ignored", label); return; }
+        fired = true;
+        clearTimeout(timer);
+        cb(value, false);
+    };
+}
+
 // ─── Account scoping (multiple accounts in one Outlook profile) ──────────────
 //
 // The sending account is read from item.from — the account actually selected
@@ -6908,17 +6930,19 @@ function _profileEmail() {
  */
 function resolveSender(item, cb) {
     const fallback = _profileEmail();
-
-    function settle(email, how) {
+    const done = once(CONFIG.ASYNC_STEP_TIMEOUT_MS, "resolveSender", function (email, timedOut) {
         _senderEmail = (email || fallback || "").toLowerCase();
         _senderResolvedFor = _itemKey(item);
-        _diag.step("resolveSender:" + how, "sender=" + _senderEmail + " profile=" + fallback +
+        _diag.step("resolveSender:settled",
+            "sender=" + _senderEmail + " profile=" + fallback +
+            (timedOut ? " (TIMED OUT \u2014 profile fallback)" : "") +
             (_senderEmail && fallback && _senderEmail !== fallback ? " (DIFFER \u2014 from wins)" : ""));
         cb(_senderEmail);
-    }
+    });
 
     if (!item || !item.from || typeof item.from.getAsync !== "function") {
-        settle(fallback, "no-from-api");
+        _diag.step("resolveSender:no-from-api");
+        done(fallback);
         return;
     }
 
@@ -6931,10 +6955,11 @@ function resolveSender(item, cb) {
                 _diag.step("resolveSender:from-getAsync-failed",
                     (res.error && res.error.message) || "?");
             }
-            settle(email || fallback, email ? "ok" : "from-empty");
+            done(email || fallback);
         });
     } catch (e) {
-        settle(fallback, "threw-" + e.message);
+        _diag.step("resolveSender:threw", e.message);
+        done(fallback);
     }
 }
 
@@ -7320,11 +7345,14 @@ function removeNotification(item) {
 
 function loadCustomProps(item, cb) {
     if (!item || typeof item.loadCustomPropertiesAsync !== "function") { cb(null); return; }
+    const done = once(CONFIG.ASYNC_STEP_TIMEOUT_MS, "loadCustomProps", function (props) {
+        cb(props || null);
+    });
     try {
         item.loadCustomPropertiesAsync(function (res) {
-            cb(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null);
+            done(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null);
         });
-    } catch (e) { _diag.step("loadCustomProps:threw", e.message); cb(null); }
+    } catch (e) { _diag.step("loadCustomProps:threw", e.message); done(null); }
 }
 
 function getManualOverride(item, cb) {
@@ -8010,24 +8038,24 @@ function onRecipientsChangedHandler(event) {
         }
 
         resolveSender(item, function () {
-            getManualOverride(item, function (overrideId) {
-                if (overrideId) {
-                    _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
-                    guarded.completed();
-                    return;
-                }
+        getManualOverride(item, function (overrideId) {
+            if (overrideId) {
+                _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
+                guarded.completed();
+                return;
+            }
 
-                getCachedSignature(function (cachedDefault) {
-                    applyRuleSignature(item, cachedDefault || null, function (finalHtml) {
-                        if (!finalHtml) {
-                            _diag.step("onRecipientsChangedHandler:nothing-applied", "\u2192 running full sequence");
-                            _defaultThenRules(item, guarded, {});
-                            return;
-                        }
-                        guarded.completed();
-                    });
+            getCachedSignature(function (cachedDefault) {
+                applyRuleSignature(item, cachedDefault || null, function (finalHtml) {
+                    if (!finalHtml) {
+                        _diag.step("onRecipientsChangedHandler:nothing-applied", "\u2192 running full sequence");
+                        _defaultThenRules(item, guarded, {});
+                        return;
+                    }
+                    guarded.completed();
                 });
             });
+        });
         });
     });
 }
