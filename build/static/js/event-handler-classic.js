@@ -6724,10 +6724,16 @@
 //    - onFromChangedHandler refreshes rules for new sender
 //    - To + Cc recipient reading
 //
-//  ⚠ TURN CONFIG.DIAG_ENABLED BACK TO false BEFORE SHIPPING.
-//  ⚠ CONFIG.DIAG_ON_SEND=true means the diagnostic block is prepended during
-//    OnMessageSend and WILL BE EMAILED TO THE RECIPIENT. Keep it true only
-//    while debugging send-time failures, and test against your own address.
+//  DIAGNOSTICS ARE ACCOUNT-SCOPED (see CONFIG.DIAG_ACCOUNTS).
+//    Only the listed mailbox gets the block written into the body or the step
+//    shown in the info bar. Every other account runs completely clean — no body
+//    write, no notification, and no flush budget taken off the handler guard —
+//    so this build is safe to deploy tenant-wide while debugging one user.
+//
+//  ⚠ CONFIG.DIAG_ON_SEND=true means the block is prepended during
+//    OnMessageSend and WILL BE EMAILED TO THE RECIPIENT — but only from the
+//    allow-listed mailbox. Send test mail to yourself while this is on.
+//  ⚠ Clear CONFIG.DIAG_ACCOUNTS (or set DIAG_ENABLED=false) when done.
 // =============================================================================
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -6736,7 +6742,7 @@ const CONFIG = {
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
-    BASE_URL: "https://ns-enterprise.cardbyte.ai/email-signature",
+    BASE_URL: "https://enterprise.cardbyte.ai/email-signature",
 
     XHR_TIMEOUT_MS: 6000,
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
@@ -6760,6 +6766,14 @@ const CONFIG = {
     DIAG_ON_SEND: true,          // also write the trace during OnMessageSend
     DIAG_IN_NOTIFICATION: true,  // surface last step in the info bar too
     DIAG_FLUSH_BUDGET_MS: 1200,  // time reserved for prependAsync to land
+
+    // Only these mailboxes ever get the diagnostic block written into the body
+    // or the step shown in the info bar. Everyone else runs completely clean —
+    // no body write, no notification, and no flush budget deducted from the
+    // handler guard. Compared case-insensitively against
+    // Office.context.mailbox.userProfile.emailAddress.
+    // Empty array = nobody (safe default). Set to ["*"] to allow all accounts.
+    DIAG_ACCOUNTS: ["sunil.ks@pierianservices.com", "MiriamG@8yxhrd.onmicrosoft.com"],
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
@@ -6817,11 +6831,42 @@ const _diag = (function () {
 
 let _diagFlushed = false;
 let _diagSendContext = false;   // set true by onSendHandler
+let _diagAccountAllowedCache = null;
+
+// True only for the mailboxes listed in CONFIG.DIAG_ACCOUNTS.
+// Fails closed: if the account can't be read, diagnostics stay off.
+function isDiagAccount() {
+    if (_diagAccountAllowedCache !== null) return _diagAccountAllowedCache;
+
+    let allowed = false;
+    try {
+        const list = CONFIG.DIAG_ACCOUNTS || [];
+        if (list.indexOf("*") !== -1) {
+            allowed = true;
+        } else {
+            const me = getUserEmail().toLowerCase();
+            if (me) {
+                for (let i = 0; i < list.length; i++) {
+                    if ((list[i] || "").trim().toLowerCase() === me) { allowed = true; break; }
+                }
+            }
+        }
+    } catch (_) { allowed = false; }
+
+    _diagAccountAllowedCache = allowed;
+    return allowed;
+}
+
+// Master gate: diagnostics require both the switch AND an allow-listed account.
+function diagActive() {
+    return CONFIG.DIAG_ENABLED && isDiagAccount();
+}
 
 function flushDiagnostics(item, onDone) {
     const done = onDone || function () { };
 
     if (!CONFIG.DIAG_ENABLED) { done(); return; }
+    if (!isDiagAccount()) { done(); return; }   // not the debug mailbox — stay clean
     if (_diagSendContext && !CONFIG.DIAG_ON_SEND) {
         _diag.info("flushDiagnostics: skipped (send context, DIAG_ON_SEND=false)");
         done();
@@ -6867,7 +6912,8 @@ function writeDiagnostics(item, onDone) {
 // Optional: mirror the last step into the info bar (survives even if the body
 // write is rejected, e.g. on a read-only or protected item).
 function notifyLastStep(item) {
-    if (!CONFIG.DIAG_ENABLED || !CONFIG.DIAG_IN_NOTIFICATION) return;
+    if (!diagActive() || !CONFIG.DIAG_IN_NOTIFICATION) return;
+    if (_diagSendContext && !CONFIG.DIAG_ON_SEND) return;
     showNotification(item, "DIAG " + _diag.lastStep(), "informationalMessage");
 }
 
@@ -7190,7 +7236,8 @@ function resolveOverrideHtml(overrideId, cb) {
 
 function makeGuardedEvent(event, timeoutMs, itemForDiag) {
     let done = false;
-    const budget = CONFIG.DIAG_ENABLED ? CONFIG.DIAG_FLUSH_BUDGET_MS : 0;
+    // Non-debug accounts keep their full guard window — no budget deducted.
+    const budget = diagActive() ? CONFIG.DIAG_FLUSH_BUDGET_MS : 0;
     const fireAt = Math.max(500, timeoutMs - budget);
 
     _diag.step("makeGuardedEvent:armed", "timeoutMs=" + timeoutMs + " fireAt=" + fireAt);
@@ -7906,7 +7953,11 @@ function onFromChangedHandler(event) {
         return;
     }
 
-    _diag.step("onFromChangedHandler:clearing-caches");
+    // The account changed, so the allow-list verdict must be re-resolved.
+    _diagAccountAllowedCache = null;
+
+    _diag.step("onFromChangedHandler:clearing-caches",
+        "diagAccount=" + isDiagAccount());
 
     _memSig = null;
     _memRules = null;
