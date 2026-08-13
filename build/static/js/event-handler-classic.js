@@ -7817,7 +7817,7 @@ const CONFIG = {
     // block can be found again in a draft — setSignatureAsync does NOT always
     // place it at the end (on a reply it sits above the quoted thread).
     // At send the live area is compared against what we expect to be there.
-    VERIFY_AT_SEND: true,
+    VERIFY_BEFORE_WRITE: true,
     SIG_MARK_ATTR: "data-cb-sig",
     BODY_READ_TIMEOUT_MS: 6000,
     // When no forward-specific rule exists, let reply rules cover forwards.
@@ -8941,7 +8941,7 @@ function readBodyHtml(item, cb) {
  *   unknown    — could not tell. Treated as "write it".
  */
 function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
-    if (!CONFIG.VERIFY_AT_SEND) { cb({ verdict: "unknown", reason: "verification disabled", note: "" }); return; }
+    if (!CONFIG.VERIFY_BEFORE_WRITE) { cb({ verdict: "unknown", reason: "verification disabled", note: "" }); return; }
     if (!HCS) {
         _diag.step("verifySignatureOnBody:HCS-NOT-LOADED",
             "html-content-signature module missing from the bundle");
@@ -8962,13 +8962,36 @@ function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
             }
 
             let r;
+            const opt = {};
+            for (const k in SIG_PROFILE) {
+                if (Object.prototype.hasOwnProperty.call(SIG_PROFILE, k)) opt[k] = SIG_PROFILE[k];
+            }
+            opt.markAttr = CONFIG.SIG_MARK_ATTR;
+            opt.sigId = sigKey;
+
             try {
-                const opt = {};
-                for (const k in SIG_PROFILE) {
-                    if (Object.prototype.hasOwnProperty.call(SIG_PROFILE, k)) opt[k] = SIG_PROFILE[k];
+                // Classic writes through Word's HTML engine, which rewrites the
+                // markup on insertion and routinely DROPS unknown attributes —
+                // so data-cb-sig is often gone from the draft even though the
+                // signature is untouched. With no marked region, verifyInDraft
+                // can only say "absent", and every send would rewrite.
+                //
+                // Fall back to a marker-free token search of the live area:
+                // verifyRegion looks for the expected token run inside the
+                // container, which is what the marker was only ever an
+                // optimisation for. A genuinely deleted signature still comes
+                // back absent, so the safe direction is preserved.
+                const marked = HCS.extractMarkedRegions(body, CONFIG.SIG_MARK_ATTR);
+                if (!marked.length) {
+                    const split = HCS.splitDraftAtQuote(body);
+                    const scope = split.boundary < body.length ? "live-of-reply" : "whole-body";
+                    const rr = HCS.verifyRegion(expectedHtml, split.live, opt);
+                    _diag.step("verifySignatureOnBody:marker-absent-fallback",
+                        "verdict=" + rr.verdict + " scope=" + scope +
+                        " overlap=" + rr.overlap + " (Word likely stripped " + CONFIG.SIG_MARK_ATTR + ")");
+                    cb({ verdict: rr.verdict, reason: scope + ": marker-free token match", note: note });
+                    return;
                 }
-                opt.markAttr = CONFIG.SIG_MARK_ATTR;
-                opt.sigId = sigKey;
                 r = HCS.verifyInDraft(expectedHtml, body, opt);
             } catch (e) {
                 // The comparison must never take the send down with it.
@@ -9034,45 +9057,44 @@ function writeSignature(item, html, sigKey, onDone) {
     }
 }
 
-// Set for the duration of an OnMessageSend activation. Only one activation
-// runs in a runtime at a time, so a module flag avoids threading an option
-// through every layer of the pipeline.
-let _sendTimeVerify = false;
-
-// Skips the write when the same signature is already on the item and was
-// applied moments ago — this is what stops recipient-change storms from
-// firing overlapping identical writes in the inline reply surface.
+// Decides whether a write is needed at all.
 //
-// At SEND it does more: it reads the draft and compares. An untouched draft is
-// not written to; a tampered, deleted, duplicated or id-swapped block is
-// repaired. Compose still writes unconditionally (subject to the redundancy
-// window) — it is the runtime that PUTS the signature there, and
-// setSignatureAsync is idempotent anyway.
+//   1. Same key written moments ago  → skip, no body read (recipient storms).
+//   2. Otherwise VERIFY: read the draft and compare. Identical → skip.
+//
+// Verification now runs at COMPOSE too, not only at send. Two reasons: the
+// draft is the only reliable record of what is actually on the message (the
+// last-applied key is stored per conversation, so a second reply in the same
+// thread inherits a key describing a signature that is not on THIS draft), and
+// it is what stops the repeated insert-and-replace cycle — an untouched draft
+// carrying the right signature is left alone instead of being rewritten on
+// every activation.
 function writeSignatureIfChanged(item, html, sigKey, onDone) {
     if (!html) { _diag.step("writeSignatureIfChanged:no-html", "sigKey=" + sigKey); onDone(false); return; }
 
     getLastApplied(item, function (last) {
-        if (!_sendTimeVerify &&
-            last && last.sigKey === String(sigKey) &&
+        if (last && last.sigKey === String(sigKey) &&
             last.htmlLen === html.length &&
             Date.now() - last.ts < CONFIG.REDUNDANT_WRITE_WINDOW_MS) {
-            _diag.step("writeSignatureIfChanged:suppressed-redundant", "sigKey=" + sigKey);
+            _diag.step("writeSignatureIfChanged:suppressed-redundant", "sigKey=" + sigKey + " (no body read)");
             onDone(true);
             return;
         }
 
-        if (!_sendTimeVerify) {
+        if (!CONFIG.VERIFY_BEFORE_WRITE) {
             writeSignature(item, html, sigKey, onDone);
             return;
         }
 
         verifySignatureOnBody(item, html, sigKey, function (v) {
             if (v.verdict === "identical") {
-                _diag.step("writeSignatureIfChanged:draft-verified-clean", "\u2192 body untouched");
-                onDone(true);
+                _diag.step("writeSignatureIfChanged:draft-verified-clean",
+                    "sigKey=" + sigKey + " \u2192 body untouched");
+                // Refresh the record so the fast path can suppress next time.
+                setLastApplied(item, sigKey, html.length, function () { onDone(true); }, sigDigest(html));
                 return;
             }
-            _diag.step("writeSignatureIfChanged:repairing", "verdict=" + v.verdict + " \u2014 rewriting");
+            _diag.step("writeSignatureIfChanged:writing", "verdict=" + v.verdict);
             writeSignature(item, html, sigKey, onDone);
         });
     });
@@ -9207,13 +9229,14 @@ function reconcileSignature(item, onDone) {
     determineTarget(item, function (target) {
         getLastApplied(item, function (last) {
             const current = last ? last.sigKey : "(nothing)";
-            _diag.step("PHASE2:compare", "current=" + current + " target=" + target.key);
+            _diag.step("PHASE2:compare", "lastRecorded=" + current + " target=" + target.key);
 
-            if (last && last.sigKey === target.key) {
-                _diag.step("PHASE2:already-correct", "\u2192 no write");
-                onDone(target.key);
-                return;
-            }
+            // No early return on lastRecorded === target: that record is keyed
+            // per conversation, so a second reply in the same thread inherits a
+            // key describing a signature that is not on THIS draft, and the
+            // message would go out unsigned. writeSignatureIfChanged verifies
+            // against the actual body and skips the write if it is already
+            // correct, which is both safer and just as cheap.
 
             function writeDefault(reason) {
                 resolveDefaultHtml(function (html) {
@@ -9296,7 +9319,7 @@ function runPipeline(item, guarded, opts) {
 }
 
 function _defaultThenRules(item, guarded, options) {
-    applyDefaultSignature(item, function (appliedHtml) {
+    function thenReconcile(appliedHtml) {
         reconcileSignature(item, function (finalKey) {
             if (finalKey) {
                 _diag.step("PIPELINE:settled", "sigKey=" + finalKey);
@@ -9307,9 +9330,7 @@ function _defaultThenRules(item, guarded, options) {
 
             // Prefetch BEFORE completing. Code after event.completed() is not
             // guaranteed to run — the runtime can be torn down immediately —
-            // so warming the cache there was unreliable. The signature is
-            // already written at this point, so the extra time is invisible
-            // to the user and sits well inside the platform budget.
+            // so warming the cache there was unreliable.
             getCachedRules(function (rules) {
                 if (rules) prefetchAllRuleSignatures(rules, function () {
                     guarded.completed(options.completeOpts);
@@ -9317,6 +9338,27 @@ function _defaultThenRules(item, guarded, options) {
                 else guarded.completed(options.completeOpts);
             });
         });
+    }
+
+    // Phase 1 exists to put SOMETHING on a cold draft fast while the rules
+    // resolve. It must not run when a signature has already been decided for
+    // this item, and it must never run at send: doing so wrote the default and
+    // then let Phase 2 replace it with the rule signature — two writes in
+    // sequence, which is the insert-and-replace cycle. When Phase 1 is skipped,
+    // reconcileSignature still applies the default if that is the right target.
+    if (options.skipDefaultPhase) {
+        _diag.step("PHASE1:skipped", "send-time \u2014 reconcile decides in one write");
+        thenReconcile(null);
+        return;
+    }
+
+    getLastApplied(item, function (last) {
+        if (last) {
+            _diag.step("PHASE1:skipped", "already decided for this item (sigKey=" + last.sigKey + ")");
+            thenReconcile(null);
+            return;
+        }
+        applyDefaultSignature(item, thenReconcile);
     });
 }
 
@@ -9423,12 +9465,11 @@ function onRecipientsChangedHandler(event) {
 
 function onSendHandler(event) {
     _diag.step("onSendHandler:ENTRY");
-    _sendTimeVerify = CONFIG.VERIFY_AT_SEND;
     const guarded = makeGuardedEvent(
         event || { completed: function () { } },
         CONFIG.SEND_HANDLER_TIMEOUT_MS
     );
-    const opts = { completeOpts: { allowEvent: true } };
+    const opts = { completeOpts: { allowEvent: true }, skipDefaultPhase: true };
 
     resolveComposeItem(function (item) {
         if (!item) {
