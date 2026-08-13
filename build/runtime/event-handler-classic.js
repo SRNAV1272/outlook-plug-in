@@ -7041,20 +7041,59 @@ function resolveOverrideHtml(overrideId, cb) {
 
 function makeGuardedEvent(event, timeoutMs) {
     let done = false;
+    let completedRequested = false;
+
     const timer = setTimeout(function () {
         if (done) return;
-        _diag.warn("Guard timeout (" + timeoutMs + "ms) — forcing complete");
+
+        _diag.warn(
+            "Guard timeout (" +
+            timeoutMs +
+            "ms) — forcing complete"
+        );
+
         complete();
     }, timeoutMs);
 
     function complete(opts) {
         if (done) return;
-        done = true;
-        clearTimeout(timer);
-        try { if (opts) event.completed(opts); else event.completed(); }
-        catch (e) { _diag.error("event.completed threw: " + e.message); }
+
+        if (completedRequested) return;
+
+        completedRequested = true;
+
+        const finish = function () {
+            if (done) return;
+
+            done = true;
+            clearTimeout(timer);
+
+            try {
+                if (opts) {
+                    event.completed(opts);
+                } else {
+                    event.completed();
+                }
+            } catch (e) {
+                _diag.error(
+                    "event.completed threw: " +
+                    e.message
+                );
+            }
+        };
+
+        const item = _safeGetItem();
+
+        if (CONFIG.DIAG_ENABLED && item) {
+            writeDiagnostics(item, finish);
+        } else {
+            finish();
+        }
     }
-    return { completed: complete };
+
+    return {
+        completed: complete
+    };
 }
 
 // ─── Backend fetchers ─────────────────────────────────────────────────────────
@@ -7345,41 +7384,140 @@ function findMatchingRule(item, rules, cb) {
 // ─── Signature injection ──────────────────────────────────────────────────────
 
 function writeSignature(item, html, onDone) {
-    if (typeof item.body.setSignatureAsync !== "function") {
-        _diag.error("writeSignature: setSignatureAsync not available");
-        showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+
+    _diag.info(
+        "writeSignature: starting setSignatureAsync, htmlLength=" +
+        (html ? html.length : 0)
+    );
+
+    if (!item || !item.body) {
+        _diag.error("writeSignature: item.body unavailable");
         onDone(false);
         return;
     }
 
-    item.body.setSignatureAsync(
-        html,
-        { coercionType: Office.CoercionType.Html },
-        function (r) {
-            if (r.status === Office.AsyncResultStatus.Succeeded) {
-                _diag.info("setSignatureAsync: success");
-                onDone(true);
-            } else {
-                _diag.warn(
-                    "setSignatureAsync failed: " +
-                    (r.error && r.error.message)
+    if (typeof item.body.setSignatureAsync !== "function") {
+        _diag.error(
+            "writeSignature: setSignatureAsync is NOT available"
+        );
+
+        showNotification(
+            item,
+            "Signature could not be applied. Please contact Admin.",
+            "errorMessage"
+        );
+
+        onDone(false);
+        return;
+    }
+
+    try {
+
+        item.body.setSignatureAsync(
+            html,
+            {
+                coercionType: Office.CoercionType.Html
+            },
+            function (r) {
+
+                _diag.info(
+                    "setSignatureAsync callback status=" +
+                    r.status
                 );
 
-                showNotification(
-                    item,
-                    "Signature could not be applied. Please contact Admin.",
-                    "errorMessage"
-                );
+                if (r.status === Office.AsyncResultStatus.Succeeded) {
 
-                onDone(false);
+                    _diag.info(
+                        "setSignatureAsync SUCCESS"
+                    );
+
+                    onDone(true);
+
+                } else {
+
+                    const errorCode =
+                        r.error && r.error.code
+                            ? r.error.code
+                            : "UNKNOWN";
+
+                    const errorMessage =
+                        r.error && r.error.message
+                            ? r.error.message
+                            : "Unknown Office error";
+
+                    _diag.error(
+                        "setSignatureAsync FAILED" +
+                        " | code=" + errorCode +
+                        " | message=" + errorMessage
+                    );
+
+                    showNotification(
+                        item,
+                        "Signature could not be applied. Please contact Admin.",
+                        "errorMessage"
+                    );
+
+                    onDone(false);
+                }
             }
-        }
-    );
+        );
+
+    } catch (e) {
+
+        _diag.error(
+            "setSignatureAsync THREW" +
+            " | name=" + e.name +
+            " | message=" + e.message +
+            " | stack=" + (e.stack || "")
+        );
+
+        onDone(false);
+    }
 }
 
 function writeDiagnostics(item, onDone) {
-    if (!CONFIG.DIAG_ENABLED || typeof item.body.prependAsync !== "function") { onDone(); return; }
-    item.body.prependAsync(_diag.html(), { coercionType: Office.CoercionType.Html }, function () { onDone(); });
+    if (!CONFIG.DIAG_ENABLED) {
+        onDone();
+        return;
+    }
+
+    if (!item || !item.body || typeof item.body.prependAsync !== "function") {
+        _diag.error("writeDiagnostics: prependAsync not available");
+        onDone();
+        return;
+    }
+
+    const diagnosticHtml = _diag.html();
+
+    if (!diagnosticHtml) {
+        onDone();
+        return;
+    }
+
+    try {
+        item.body.prependAsync(
+            diagnosticHtml,
+            {
+                coercionType: Office.CoercionType.Html
+            },
+            function (result) {
+
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    _diag.info("writeDiagnostics: diagnostic block inserted");
+                } else {
+                    _diag.error(
+                        "writeDiagnostics failed: " +
+                        ((result.error && result.error.message) || "Unknown error")
+                    );
+                }
+
+                onDone();
+            }
+        );
+    } catch (e) {
+        _diag.error("writeDiagnostics threw: " + e.message);
+        onDone();
+    }
 }
 
 // ─── Orchestration helpers ────────────────────────────────────────────────────
