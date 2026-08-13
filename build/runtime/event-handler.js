@@ -3022,7 +3022,7 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
             timed(`applyById (${key}, detected-only)`, t0);
             return { applied: true, status: "detected", verdict: v.verdict, digest };
         }
-        if (somethingIsThere) html = TAMPER_TAG + html;   // ← new
+        if (somethingIsThere) html = html;   // ← new
         if (!isCurrent(seq)) { log("stale write dropped after verification"); return nothing("stale"); }
     }
 
