@@ -6791,7 +6791,7 @@ const CONFIG = {
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
-    BASE_URL: "https://ns-enterprise.cardbyte.ai/email-signature",
+    BASE_URL: "https://enterprise.cardbyte.ai/email-signature",
 
     // Network
     XHR_TIMEOUT_MS: 8000,
@@ -6814,11 +6814,17 @@ const CONFIG = {
 
     // Cache keys
     CACHE_KEY: "cardbyte_sig_html",
+    LKG_KEY: "cardbyte_sig_lkg",
     RULES_CACHE_KEY: "cardbyte_rules",
     SIG_BY_ID_CACHE_KEY: "cardbyte_sig_by_id",
     LAST_APPLIED_KEY: "cardbyte_last_applied",
 
     CACHE_TTL_MS: 5 * 60 * 1000,
+    // Last-known-good survives far longer than the freshness window. It is
+    // only ever read when the fresh cache has expired AND the backend has
+    // failed, so a 409 or an outage degrades to a slightly stale signature
+    // rather than to no signature at all.
+    LKG_TTL_MS: 7 * 24 * 60 * 60 * 1000,
     RULES_CACHE_TTL_MS: 5 * 60 * 1000,
     SIG_BY_ID_TTL_MS: 5 * 60 * 1000,
     LAST_APPLIED_TTL_MS: 30 * 60 * 1000,
@@ -6972,6 +6978,7 @@ function accountKey() {
 // Namespaced key builders — always use these, never CONFIG.*_KEY directly.
 const K = {
     sig: function () { return CONFIG.CACHE_KEY + ":" + accountKey(); },
+    lkg: function () { return CONFIG.LKG_KEY + ":" + accountKey(); },
     rules: function () { return CONFIG.RULES_CACHE_KEY + ":" + accountKey(); },
     sigById: function () { return CONFIG.SIG_BY_ID_CACHE_KEY + ":" + accountKey(); },
     lastApplied: function () { return CONFIG.LAST_APPLIED_KEY + ":" + accountKey(); }
@@ -7090,7 +7097,23 @@ function getCachedSignature(cb) {
 function setCachedSignature(html, cb) {
     _memSig = html;
     _memSigOwner = accountKey();
-    _storageSet(K.sig(), html, cb || function () { });
+    _storageSet(K.sig(), html, function () {
+        // Same payload, long expiry. Written second so a failure here never
+        // costs us the fresh entry.
+        _storageSet(K.lkg(), html, cb || function () { });
+    });
+}
+
+/**
+ * Read only when the fresh cache has expired and the backend has failed.
+ */
+function getLastKnownGoodSignature(cb) {
+    _diag.step("getLastKnownGoodSignature:enter", "account=" + accountKey());
+    _storageGet(K.lkg(), CONFIG.LKG_TTL_MS, function (html) {
+        if (html) _diag.step("getLastKnownGoodSignature:hit", "len=" + html.length + " (STALE but usable)");
+        else _diag.step("getLastKnownGoodSignature:miss");
+        cb(html);
+    });
 }
 
 function clearCachedSignature(cb) {
@@ -7830,9 +7853,20 @@ function applyDefaultSignature(item, onDone) {
 
         fetchDefaultSignature(function (html) {
             if (!html) {
-                _diag.step("PHASE1:NO-DEFAULT-AVAILABLE", "backend returned nothing usable");
-                showNotification(item, "Signature not available. Please contact Admin.", "errorMessage");
-                onDone(null);
+                _diag.step("PHASE1:fetch-failed", "\u2192 trying last-known-good");
+                getLastKnownGoodSignature(function (stale) {
+                    if (!stale) {
+                        _diag.step("PHASE1:NO-DEFAULT-AVAILABLE", "no cache, no LKG, backend returned nothing");
+                        showNotification(item, "Signature not available. Please contact Admin.", "errorMessage");
+                        onDone(null);
+                        return;
+                    }
+                    writeSignatureIfChanged(item, stale, "default", function (ok) {
+                        if (ok) removeNotification(item);
+                        _diag.step("PHASE1:done", "source=last-known-good ok=" + ok);
+                        onDone(ok ? stale : null);
+                    });
+                });
                 return;
             }
             writeSignatureIfChanged(item, html, "default", function (ok) {
@@ -7845,58 +7879,104 @@ function applyDefaultSignature(item, onDone) {
 }
 
 /**
- * Phase 2: evaluate rules and overwrite Phase 1's output only if a rule
- * matches and resolves to different HTML.
- * onDone(finalHtmlOrNull)
+ * Resolves the default signature HTML: cache first, network on miss.
  */
-function applyRuleSignature(item, appliedHtml, onDone) {
-    _diag.step("PHASE2:applyRuleSignature:enter", "defaultApplied=" + (appliedHtml ? "yes" : "no"));
+function resolveDefaultHtml(cb) {
+    getCachedSignature(function (cached) {
+        if (cached) { cb(cached); return; }
+        fetchDefaultSignature(function (fetched) {
+            if (fetched) { cb(fetched); return; }
+            _diag.step("resolveDefaultHtml:fetch-failed", "\u2192 trying last-known-good");
+            getLastKnownGoodSignature(cb);
+        });
+    });
+}
 
+/**
+ * Decides which signature SHOULD be on the item right now, given the current
+ * recipients. Returns { key, ruleId } where key is "default" or "rule:<id>".
+ */
+function determineTarget(item, cb) {
     function withRules(rules) {
-        if (!rules) {
-            _diag.step("PHASE2:no-rules-available", "\u2192 keeping default");
-            onDone(appliedHtml);
+        const count = ((rules && rules.rulesList) || []).length;
+        if (!rules || count === 0) {
+            _diag.step("determineTarget:no-rules", "\u2192 target=default");
+            cb({ key: "default", ruleId: null });
             return;
         }
-
-        const count = ((rules.rulesList) || []).length;
-        if (count === 0) {
-            _diag.step("PHASE2:zero-rules-configured", "\u2192 keeping default");
-            onDone(appliedHtml);
-            return;
-        }
-
         findMatchingRule(item, rules, function (matched) {
             if (!matched) {
-                _diag.step("PHASE2:no-match", "\u2192 keeping default");
-                onDone(appliedHtml);
+                _diag.step("determineTarget:no-match", "\u2192 target=default");
+                cb({ key: "default", ruleId: null });
                 return;
             }
-
-            getOrFetchSignatureById(matched.signatureId, function (ruleHtml) {
-                if (!ruleHtml) {
-                    _diag.step("PHASE2:rule-html-unavailable", "id=" + matched.signatureId + " \u2192 keeping default");
-                    onDone(appliedHtml);
-                    return;
-                }
-                if (appliedHtml && ruleHtml === appliedHtml) {
-                    _diag.step("PHASE2:rule-html-identical-to-default", "\u2192 no rewrite");
-                    onDone(appliedHtml);
-                    return;
-                }
-
-                _diag.step("PHASE2:overwriting-with-rule-sig", "id=" + matched.signatureId);
-                writeSignatureIfChanged(item, ruleHtml, "rule:" + matched.signatureId, function (ok) {
-                    _diag.step("PHASE2:done", "ok=" + ok);
-                    onDone(ok ? ruleHtml : appliedHtml);
-                });
-            });
+            _diag.step("determineTarget:matched", "\u2192 target=rule:" + matched.signatureId);
+            cb({ key: "rule:" + matched.signatureId, ruleId: matched.signatureId });
         });
     }
 
     getCachedRules(function (rules) {
         if (rules) { withRules(rules); return; }
-        fetchRulesConfig(function (fresh) { withRules(fresh); });
+        fetchRulesConfig(withRules);
+    });
+}
+
+/**
+ * Phase 2: reconcile what IS on the item with what SHOULD be on it.
+ *
+ * This replaces the old applyRuleSignature, which only ever escalated from
+ * default to rule. It compared against the HTML it was handed rather than
+ * against what was actually written, so clearing the recipients left the rule
+ * signature stranded on the message. Comparison is now against the recorded
+ * last-applied key, so default→rule, rule→rule and rule→default all work.
+ *
+ * onDone(finalKeyOrNull)
+ */
+function reconcileSignature(item, onDone) {
+    _diag.step("PHASE2:reconcileSignature:enter");
+
+    determineTarget(item, function (target) {
+        getLastApplied(item, function (last) {
+            const current = last ? last.sigKey : "(nothing)";
+            _diag.step("PHASE2:compare", "current=" + current + " target=" + target.key);
+
+            if (last && last.sigKey === target.key) {
+                _diag.step("PHASE2:already-correct", "\u2192 no write");
+                onDone(target.key);
+                return;
+            }
+
+            function writeDefault(reason) {
+                resolveDefaultHtml(function (html) {
+                    if (!html) {
+                        _diag.step("PHASE2:default-unavailable", reason + " \u2014 nothing to write");
+                        onDone(null);
+                        return;
+                    }
+                    _diag.step("PHASE2:reverting-to-default", reason);
+                    writeSignatureIfChanged(item, html, "default", function (ok) {
+                        onDone(ok ? "default" : null);
+                    });
+                });
+            }
+
+            if (target.ruleId === null) {
+                writeDefault("target=default");
+                return;
+            }
+
+            getOrFetchSignatureById(target.ruleId, function (ruleHtml) {
+                if (!ruleHtml) {
+                    _diag.step("PHASE2:rule-html-unavailable", "id=" + target.ruleId);
+                    writeDefault("rule html missing");
+                    return;
+                }
+                _diag.step("PHASE2:applying-rule-sig", "id=" + target.ruleId);
+                writeSignatureIfChanged(item, ruleHtml, target.key, function (ok) {
+                    onDone(ok ? target.key : null);
+                });
+            });
+        });
     });
 }
 
@@ -7904,16 +7984,17 @@ function applyRuleSignature(item, appliedHtml, onDone) {
  * Phase 3: warm the per-id cache for the next activation. Fire and forget,
  * strictly after event.completed().
  */
-function prefetchAllRuleSignatures(rules) {
+function prefetchAllRuleSignatures(rules, onDone) {
+    const done = onDone || function () { };
     const list = ((rules && rules.rulesList) || []).filter(function (r) {
         return r && r.enabled && r.signatureId !== null && r.signatureId !== undefined && senderMatches(r);
     });
-    if (list.length === 0) { _diag.step("prefetch:none-eligible"); return; }
+    if (list.length === 0) { _diag.step("prefetch:none-eligible"); done(); return; }
 
     _diag.step("prefetch:enter", list.length + " sender-eligible rule(s)");
     let i = 0;
     function next() {
-        if (i >= list.length) { _diag.step("prefetch:done"); return; }
+        if (i >= list.length) { _diag.step("prefetch:done"); done(); return; }
         const r = list[i++];
         getOrFetchSignatureById(r.signatureId, function () { next(); });
     }
@@ -7947,17 +8028,25 @@ function runPipeline(item, guarded, opts) {
 
 function _defaultThenRules(item, guarded, options) {
     applyDefaultSignature(item, function (appliedHtml) {
-        applyRuleSignature(item, appliedHtml, function (finalHtml) {
-            if (finalHtml) {
+        reconcileSignature(item, function (finalKey) {
+            if (finalKey) {
+                _diag.step("PIPELINE:settled", "sigKey=" + finalKey);
                 removeNotification(item);
-            } else {
+            } else if (!appliedHtml) {
                 _diag.step("PIPELINE:NO-SIGNATURE-APPLIED", "neither default nor rule produced HTML");
             }
 
-            guarded.completed(options.completeOpts);
-
-            // After completion — never on the critical path.
-            getCachedRules(function (rules) { if (rules) prefetchAllRuleSignatures(rules); });
+            // Prefetch BEFORE completing. Code after event.completed() is not
+            // guaranteed to run — the runtime can be torn down immediately —
+            // so warming the cache there was unreliable. The signature is
+            // already written at this point, so the extra time is invisible
+            // to the user and sits well inside the platform budget.
+            getCachedRules(function (rules) {
+                if (rules) prefetchAllRuleSignatures(rules, function () {
+                    guarded.completed(options.completeOpts);
+                });
+                else guarded.completed(options.completeOpts);
+            });
         });
     });
 }
@@ -8038,24 +8127,22 @@ function onRecipientsChangedHandler(event) {
         }
 
         resolveSender(item, function () {
-        getManualOverride(item, function (overrideId) {
-            if (overrideId) {
-                _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
-                guarded.completed();
-                return;
-            }
+            getManualOverride(item, function (overrideId) {
+                if (overrideId) {
+                    _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
+                    guarded.completed();
+                    return;
+                }
 
-            getCachedSignature(function (cachedDefault) {
-                applyRuleSignature(item, cachedDefault || null, function (finalHtml) {
-                    if (!finalHtml) {
-                        _diag.step("onRecipientsChangedHandler:nothing-applied", "\u2192 running full sequence");
-                        _defaultThenRules(item, guarded, {});
-                        return;
-                    }
+                // Pure reconcile. Adding recipients can promote default → rule,
+                // clearing them demotes rule → default, and swapping them moves
+                // rule → rule. No Phase 1 here: re-writing the default first
+                // would make the signature visibly flicker on every keystroke.
+                reconcileSignature(item, function (finalKey) {
+                    _diag.step("onRecipientsChangedHandler:done", "sigKey=" + (finalKey || "none"));
                     guarded.completed();
                 });
             });
-        });
         });
     });
 }
