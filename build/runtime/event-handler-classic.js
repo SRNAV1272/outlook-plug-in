@@ -6742,7 +6742,7 @@ const CONFIG = {
     NOTIF_KEY: "cardbyte_sig_status",
     MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",   // ← add this
 
-    DIAG_ENABLED: false,
+    DIAG_ENABLED: true,
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
