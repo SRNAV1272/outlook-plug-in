@@ -6839,7 +6839,7 @@ const CONFIG = {
     NOTIF_ICON: "v11.icon16",
     MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
 
-    DIAG_ENABLED: false,
+    DIAG_ENABLED: true,
 };
 
 // ─── Step-numbered diagnostic log ─────────────────────────────────────────────
