@@ -7352,16 +7352,29 @@ function writeSignature(item, html, onDone) {
         return;
     }
 
-    item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, function (r) {
-        if (r.status === Office.AsyncResultStatus.Succeeded) {
-            _diag.info("setSignatureAsync: success");
-            onDone(true);
-        } else {
-            _diag.warn("setSignatureAsync failed: " + (r.error && r.error.message));
-            showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
-            onDone(false);
+    item.body.setSignatureAsync(
+        html,
+        { coercionType: Office.CoercionType.Html },
+        function (r) {
+            if (r.status === Office.AsyncResultStatus.Succeeded) {
+                _diag.info("setSignatureAsync: success");
+                onDone(true);
+            } else {
+                _diag.warn(
+                    "setSignatureAsync failed: " +
+                    (r.error && r.error.message)
+                );
+
+                showNotification(
+                    item,
+                    "Signature could not be applied. Please contact Admin.",
+                    "errorMessage"
+                );
+
+                onDone(false);
+            }
         }
-    });
+    );
 }
 
 function writeDiagnostics(item, onDone) {
