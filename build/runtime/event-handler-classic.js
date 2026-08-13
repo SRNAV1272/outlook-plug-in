@@ -6760,6 +6760,20 @@
 //  8. IN-FLIGHT DEDUPE ON get-active. Prevents this runtime from issuing
 //     overlapping default-signature requests.
 //
+//  ─── Fixes in v5 (multi-account) ───────────────────────────────────────────
+//
+//  9. CACHE KEYS ARE NAMESPACED BY SENDING ACCOUNT. OfficeRuntime.storage is
+//     shared across every account in the Outlook profile, so the unscoped
+//     "cardbyte_sig_html" written by account A was served to account B for
+//     the full 5-minute TTL. That is why Mirang's signature kept landing on
+//     Joni's messages.
+//
+// 10. SENDER IS READ FROM item.from, NOT userProfile.emailAddress.
+//     userProfile reports the mailbox the add-in runs against, which is not
+//     necessarily the account selected in the From dropdown. The resolved
+//     sender now drives the encrypted username header, rule sender matching,
+//     and the cache namespace.
+//
 //  ─── REQUIRED, OUTSIDE THIS FILE ───────────────────────────────────────────
 //
 //  * CryptoJS MUST be concatenated INTO this file before deployment. Imports
@@ -6777,7 +6791,7 @@ const CONFIG = {
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
-    BASE_URL: "https://ns-enterprise.cardbyte.ai/email-signature",
+    BASE_URL: "https://enterprise.cardbyte.ai/email-signature",
 
     // Network
     XHR_TIMEOUT_MS: 8000,
@@ -6875,6 +6889,69 @@ const _diag = (function () {
     };
 })();
 
+// ─── Account scoping (multiple accounts in one Outlook profile) ──────────────
+//
+// The sending account is read from item.from — the account actually selected
+// in the From dropdown — and every cache key is namespaced by it. Without
+// this, storage written by one account is served to all the others.
+
+let _senderEmail = "";
+let _senderResolvedFor = null;
+
+function _profileEmail() {
+    try { return (Office.context.mailbox.userProfile.emailAddress || "").trim().toLowerCase(); }
+    catch (_) { return ""; }
+}
+
+/**
+ * Must run once per activation, before any cache read or backend call.
+ */
+function resolveSender(item, cb) {
+    const fallback = _profileEmail();
+
+    function settle(email, how) {
+        _senderEmail = (email || fallback || "").toLowerCase();
+        _senderResolvedFor = _itemKey(item);
+        _diag.step("resolveSender:" + how, "sender=" + _senderEmail + " profile=" + fallback +
+            (_senderEmail && fallback && _senderEmail !== fallback ? " (DIFFER \u2014 from wins)" : ""));
+        cb(_senderEmail);
+    }
+
+    if (!item || !item.from || typeof item.from.getAsync !== "function") {
+        settle(fallback, "no-from-api");
+        return;
+    }
+
+    try {
+        item.from.getAsync(function (res) {
+            let email = "";
+            if (res.status === Office.AsyncResultStatus.Succeeded && res.value) {
+                email = (res.value.emailAddress || "").trim().toLowerCase();
+            } else {
+                _diag.step("resolveSender:from-getAsync-failed",
+                    (res.error && res.error.message) || "?");
+            }
+            settle(email || fallback, email ? "ok" : "from-empty");
+        });
+    } catch (e) {
+        settle(fallback, "threw-" + e.message);
+    }
+}
+
+function accountKey() {
+    const e = _senderEmail || _profileEmail() || "unknown";
+    // Storage keys permit no whitespace, path separators or quotes.
+    return e.replace(/[\s/\\'"]/g, "_");
+}
+
+// Namespaced key builders — always use these, never CONFIG.*_KEY directly.
+const K = {
+    sig: function () { return CONFIG.CACHE_KEY + ":" + accountKey(); },
+    rules: function () { return CONFIG.RULES_CACHE_KEY + ":" + accountKey(); },
+    sigById: function () { return CONFIG.SIG_BY_ID_CACHE_KEY + ":" + accountKey(); },
+    lastApplied: function () { return CONFIG.LAST_APPLIED_KEY + ":" + accountKey(); }
+};
+
 // ─── CryptoJS helpers (synchronous) ──────────────────────────────────────────
 
 function encryptEmail(email) {
@@ -6965,36 +7042,53 @@ function _storageRemove(key, cb) {
 // ─── Default-signature cache ──────────────────────────────────────────────────
 
 let _memSig = null;
+let _memSigOwner = null;
 
 function getCachedSignature(cb) {
-    _diag.step("getCachedSignature:enter");
-    if (_memSig) { _diag.step("getCachedSignature:memory-hit"); cb(_memSig); return; }
-    _storageGet(CONFIG.CACHE_KEY, CONFIG.CACHE_TTL_MS, function (html) {
-        if (html) { _memSig = html; _diag.step("getCachedSignature:storage-hit", "len=" + html.length); }
-        else { _diag.step("getCachedSignature:miss"); }
+    _diag.step("getCachedSignature:enter", "account=" + accountKey());
+    if (_memSig && _memSigOwner === accountKey()) {
+        _diag.step("getCachedSignature:memory-hit");
+        cb(_memSig);
+        return;
+    }
+    if (_memSig) { _diag.step("getCachedSignature:memory-owned-by-other-account", "owner=" + _memSigOwner); }
+    _storageGet(K.sig(), CONFIG.CACHE_TTL_MS, function (html) {
+        if (html) {
+            _memSig = html;
+            _memSigOwner = accountKey();
+            _diag.step("getCachedSignature:storage-hit", "len=" + html.length);
+        } else { _diag.step("getCachedSignature:miss"); }
         cb(html);
     });
 }
 
 function setCachedSignature(html, cb) {
     _memSig = html;
-    _storageSet(CONFIG.CACHE_KEY, html, cb || function () { });
+    _memSigOwner = accountKey();
+    _storageSet(K.sig(), html, cb || function () { });
 }
 
 function clearCachedSignature(cb) {
     _memSig = null;
-    _storageRemove(CONFIG.CACHE_KEY, cb || function () { });
+    _memSigOwner = null;
+    _storageRemove(K.sig(), cb || function () { });
 }
 
 // ─── Rules cache ──────────────────────────────────────────────────────────────
 
 let _memRules = null;
+let _memRulesOwner = null;
 
 function getCachedRules(cb) {
-    _diag.step("getCachedRules:enter");
-    if (_memRules) { _diag.step("getCachedRules:memory-hit"); cb(_memRules); return; }
-    _storageGet(CONFIG.RULES_CACHE_KEY, CONFIG.RULES_CACHE_TTL_MS, function (rules) {
-        if (rules) { _memRules = rules; _diag.step("getCachedRules:hit"); }
+    _diag.step("getCachedRules:enter", "account=" + accountKey());
+    if (_memRules && _memRulesOwner === accountKey()) {
+        _diag.step("getCachedRules:memory-hit");
+        cb(_memRules);
+        return;
+    }
+    if (_memRules) { _diag.step("getCachedRules:memory-owned-by-other-account", "owner=" + _memRulesOwner); }
+    _storageGet(K.rules(), CONFIG.RULES_CACHE_TTL_MS, function (rules) {
+        if (rules) { _memRules = rules; _memRulesOwner = accountKey(); _diag.step("getCachedRules:hit"); }
         else { _diag.step("getCachedRules:miss"); }
         cb(rules);
     });
@@ -7002,15 +7096,16 @@ function getCachedRules(cb) {
 
 function setCachedRules(rules, cb) {
     _memRules = rules;
+    _memRulesOwner = accountKey();
     const count = ((rules && rules.rulesList) || []).length;
     _diag.step("setCachedRules:enter", "rules=" + count);
-    _storageSet(CONFIG.RULES_CACHE_KEY, rules, cb || function () { });
+    _storageSet(K.rules(), rules, cb || function () { });
 }
 
 // ─── Per-signatureId HTML cache ───────────────────────────────────────────────
 
 function getSigById(signatureId, cb) {
-    _storageGet(CONFIG.SIG_BY_ID_CACHE_KEY, null, function (map) {
+    _storageGet(K.sigById(), null, function (map) {
         if (!map) { cb(null); return; }
         const entry = map[String(signatureId)];
         if (!entry) { cb(null); return; }
@@ -7024,10 +7119,10 @@ function getSigById(signatureId, cb) {
 }
 
 function setSigById(signatureId, html, cb) {
-    _storageGet(CONFIG.SIG_BY_ID_CACHE_KEY, null, function (map) {
+    _storageGet(K.sigById(), null, function (map) {
         const m = map || {};
         m[String(signatureId)] = { html: html, ts: Date.now() };
-        _storageSet(CONFIG.SIG_BY_ID_CACHE_KEY, m, cb || function () { });
+        _storageSet(K.sigById(), m, cb || function () { });
         _diag.step("setSigById:cached", "id=" + signatureId);
     });
 }
@@ -7047,18 +7142,28 @@ function _itemKey(item) {
 
 function getLastApplied(item, cb) {
     const key = _itemKey(item);
-    if (_memLastApplied && _memLastApplied.itemKey === key) { cb(_memLastApplied); return; }
-    _storageGet(CONFIG.LAST_APPLIED_KEY, CONFIG.LAST_APPLIED_TTL_MS, function (rec) {
-        if (rec && rec.itemKey === key) { _memLastApplied = rec; cb(rec); return; }
+    const owner = accountKey();
+    if (_memLastApplied && _memLastApplied.itemKey === key && _memLastApplied.owner === owner) {
+        cb(_memLastApplied);
+        return;
+    }
+    _storageGet(K.lastApplied(), CONFIG.LAST_APPLIED_TTL_MS, function (rec) {
+        if (rec && rec.itemKey === key && rec.owner === owner) { _memLastApplied = rec; cb(rec); return; }
         cb(null);
     });
 }
 
 function setLastApplied(item, sigKey, htmlLen, cb) {
-    const rec = { itemKey: _itemKey(item), sigKey: String(sigKey), htmlLen: htmlLen || 0, ts: Date.now() };
+    const rec = {
+        itemKey: _itemKey(item),
+        owner: accountKey(),
+        sigKey: String(sigKey),
+        htmlLen: htmlLen || 0,
+        ts: Date.now()
+    };
     _memLastApplied = rec;
-    _diag.step("setLastApplied", "sigKey=" + rec.sigKey + " len=" + rec.htmlLen);
-    _storageSet(CONFIG.LAST_APPLIED_KEY, rec, cb || function () { });
+    _diag.step("setLastApplied", "sigKey=" + rec.sigKey + " len=" + rec.htmlLen + " owner=" + rec.owner);
+    _storageSet(K.lastApplied(), rec, cb || function () { });
 }
 
 // ─── XHR helper (logs non-2xx bodies, retries once) ──────────────────────────
@@ -7142,9 +7247,11 @@ function getXPlatform() {
     return "WINDOWS";
 }
 
+// Returns the account selected in the From field once resolveSender() has run
+// for this activation; falls back to the profile mailbox otherwise.
 function getUserEmail() {
-    try { return (Office.context.mailbox.userProfile.emailAddress || "").trim(); }
-    catch (_) { return ""; }
+    if (_senderEmail) return _senderEmail;
+    return _profileEmail();
 }
 
 function authHeaders(extra) {
@@ -7880,7 +7987,7 @@ function applySignature(event) {
             guarded.completed();
             return;
         }
-        runPipeline(item, guarded, {});
+        resolveSender(item, function () { runPipeline(item, guarded, {}); });
     });
 }
 
@@ -7902,21 +8009,23 @@ function onRecipientsChangedHandler(event) {
             return;
         }
 
-        getManualOverride(item, function (overrideId) {
-            if (overrideId) {
-                _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
-                guarded.completed();
-                return;
-            }
-
-            getCachedSignature(function (cachedDefault) {
-                applyRuleSignature(item, cachedDefault || null, function (finalHtml) {
-                    if (!finalHtml) {
-                        _diag.step("onRecipientsChangedHandler:nothing-applied", "\u2192 running full sequence");
-                        _defaultThenRules(item, guarded, {});
-                        return;
-                    }
+        resolveSender(item, function () {
+            getManualOverride(item, function (overrideId) {
+                if (overrideId) {
+                    _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
                     guarded.completed();
+                    return;
+                }
+
+                getCachedSignature(function (cachedDefault) {
+                    applyRuleSignature(item, cachedDefault || null, function (finalHtml) {
+                        if (!finalHtml) {
+                            _diag.step("onRecipientsChangedHandler:nothing-applied", "\u2192 running full sequence");
+                            _defaultThenRules(item, guarded, {});
+                            return;
+                        }
+                        guarded.completed();
+                    });
                 });
             });
         });
@@ -7942,7 +8051,7 @@ function onSendHandler(event) {
             guarded.completed({ allowEvent: true });
             return;
         }
-        runPipeline(item, guarded, opts);
+        resolveSender(item, function () { runPipeline(item, guarded, opts); });
     });
 }
 
@@ -7963,19 +8072,21 @@ function onFromChangedHandler(event) {
             return;
         }
 
-        _diag.step("onFromChangedHandler:clearing-caches-for-new-account");
+        // Storage is namespaced per account, so there is nothing to purge —
+        // re-resolving the sender switches the whole pipeline to the new
+        // account's namespace. Only the in-memory copies, which belong to the
+        // previous account, have to be dropped.
+        _diag.step("onFromChangedHandler:dropping-in-memory-caches");
         _memSig = null;
+        _memSigOwner = null;
         _memRules = null;
+        _memRulesOwner = null;
         _memLastApplied = null;
+        _senderEmail = "";
 
-        clearCachedSignature(function () {
-            _storageRemove(CONFIG.RULES_CACHE_KEY, function () {
-                _storageRemove(CONFIG.SIG_BY_ID_CACHE_KEY, function () {
-                    _storageRemove(CONFIG.LAST_APPLIED_KEY, function () {
-                        runPipeline(item, guarded, {});
-                    });
-                });
-            });
+        resolveSender(item, function (email) {
+            _diag.step("onFromChangedHandler:new-sender", email);
+            runPipeline(item, guarded, {});
         });
     });
 }
