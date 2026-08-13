@@ -2497,12 +2497,22 @@ async function getComposeType(item, { strict = false, persist = false } = {}) {
         return fromProp;
     }
 
+    // Only a value that came from getComposeTypeAsync or a subject prefix is
+    // authoritative. The non-strict assumption below is a GUESS, and caching or
+    // persisting a guess poisons every later evaluation: line ~2493 short-
+    // circuits on the persisted property, so a reply guessed as "compose"
+    // (getComposeTypeAsync returns "" and the subject is not populated yet at
+    // OnNewMessageCompose) stays "compose" for the life of the draft, and every
+    // context:"reply" rule is skipped — including at send, where the API would
+    // by then have answered correctly.
     let t = await detectComposeType(item, strict);
+    const authoritative = t !== null;
+
     if (!t && !strict) {
-        warn("composeType undetermined — assuming 'compose' (non-strict caller)");
-        t = "compose";
+        warn("composeType undetermined — assuming 'compose' for this call only (not cached)");
+        return "compose";
     }
-    if (t) {
+    if (t && authoritative) {
         _composeTypeByItem.set(item, t);
         if (persist) await setItemProps(item, { [P_COMPOSE_TYPE]: t });
     }
@@ -2567,15 +2577,55 @@ function contextMatches(ruleContext, composeType) {
     return rc === composeType.toLowerCase();
 }
 
+// Pull the address out of whatever shape the backend used for an entry.
+function senderEntryAddress(entry) {
+    if (entry == null) return "";
+    if (typeof entry === "string") return entry.trim().toLowerCase();
+    if (typeof entry === "object") {
+        const v = entry.email ?? entry.emailAddress ?? entry.address ??
+            entry.smtpAddress ?? entry.userPrincipalName ?? entry.upn ?? "";
+        return String(v).trim().toLowerCase();
+    }
+    return String(entry).trim().toLowerCase();
+}
+
+/**
+ * `Senders` has arrived as an array of strings, as a bare string, and as an
+ * array of objects. The old version read `.length` (truthy on a string) and
+ * then called `.some` on it, which throws — and that rejection propagated out
+ * of the `.filter` in findMatchingRule, killing the whole evaluation. Object
+ * entries threw the same way inside `.toLowerCase()`.
+ *
+ * An unreadable list is NOT treated as "unrestricted": that silently widens a
+ * rule to every sender in the tenant. Only a genuinely absent or empty list is.
+ */
 function senderMatches(rule, senderEmail) {
-    if (!rule.Senders?.length) return true;
+    const raw = rule?.Senders;
+    let list = null;
+    if (Array.isArray(raw)) list = raw;
+    else if (typeof raw === "string" && raw.trim() !== "") list = [raw];
+    else if (raw != null && typeof raw === "object") list = [raw];
+
+    if (!list || list.length === 0) return true;
+
     const sender = (senderEmail || "").toLowerCase().trim();
-    return rule.Senders.some((raw) => {
-        const s = (raw || "").toLowerCase().trim();
+    const senderDomain = getDomain(sender);
+
+    const matched = list.some((entry) => {
+        const s = senderEntryAddress(entry);
+        if (!s) return false;
         if (s === "*" || s === "all") return true;
-        if (s.startsWith("*@")) return sender.endsWith(s.slice(1));
+        if (s.startsWith("*@")) return !!senderDomain && sender.endsWith(s.slice(1));
+        if (s.startsWith("@")) return !!senderDomain && sender.endsWith(s);
+        if (!s.includes("@")) return !!senderDomain && s === senderDomain;
         return s === sender;
     });
+
+    if (!matched) {
+        log(`senderMatches: no entry matched | priority=${rule?.priority}`,
+            `| sender=${sender} | Senders=${JSON.stringify(list).slice(0, 300)}`);
+    }
+    return matched;
 }
 
 /**
@@ -2889,6 +2939,25 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
     if (!isSendTime && !hostCanSetSignature(item)) {
         log(`host cannot write at compose — id=${key} decided but not applied yet`);
         return nothing("deferred");
+    }
+
+    // At compose, skip the write when this id is already the applied one.
+    // OnMessageRecipientsChanged fires repeatedly as a recipient is typed and
+    // resolved, and each pass previously re-resolved the HTML and rewrote the
+    // body even when the decision had not changed — the visible "signatures
+    // inserted one after another until the right rule wins". The send path has
+    // always short-circuited this way (decideSendId reuses P_ACTIVE_SIG when
+    // the recipient snapshot is unchanged, and applyById returns "unchanged"
+    // when verification says the body already carries this signature); compose
+    // now behaves the same. applySignature clears P_ACTIVE_SIG on entry, so the
+    // FIRST insertion on a new draft is unaffected.
+    if (!isSendTime) {
+        const activeNow = await getItemProp(item, P_ACTIVE_SIG);
+        if (activeNow && String(activeNow) === key) {
+            log(`compose: id=${key} already applied — no rewrite`);
+            timed(`applyById (${key}, already-applied)`, t0);
+            return { applied: true, status: "unchanged", verdict: null, digest: null };
+        }
     }
 
     let { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
