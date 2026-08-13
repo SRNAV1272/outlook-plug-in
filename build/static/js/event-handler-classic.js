@@ -7347,21 +7347,52 @@ function findMatchingRule(item, rules, cb) {
 function writeSignature(item, html, onDone) {
     if (typeof item.body.setSignatureAsync !== "function") {
         _diag.error("writeSignature: setSignatureAsync not available");
-        showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
-        onDone(false);
+
+        showNotification(
+            item,
+            "Signature could not be applied. Please contact Admin.",
+            "errorMessage"
+        );
+
+        writeDiagnostics(item, function () {
+            onDone(false);
+        });
+
         return;
     }
 
-    item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, function (r) {
-        if (r.status === Office.AsyncResultStatus.Succeeded) {
-            _diag.info("setSignatureAsync: success");
-            onDone(true);
-        } else {
-            _diag.warn("setSignatureAsync failed: " + (r.error && r.error.message));
-            showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
-            onDone(false);
+    item.body.setSignatureAsync(
+        html,
+        { coercionType: Office.CoercionType.Html },
+        function (r) {
+
+            if (r.status === Office.AsyncResultStatus.Succeeded) {
+                _diag.info("setSignatureAsync: success");
+
+                // DEBUG ONLY
+                writeDiagnostics(item, function () {
+                    onDone(true);
+                });
+
+            } else {
+                _diag.warn(
+                    "setSignatureAsync failed: " +
+                    (r.error && r.error.message)
+                );
+
+                showNotification(
+                    item,
+                    "Signature could not be applied. Please contact Admin.",
+                    "errorMessage"
+                );
+
+                // DEBUG ONLY
+                writeDiagnostics(item, function () {
+                    onDone(false);
+                });
+            }
         }
-    });
+    );
 }
 
 function writeDiagnostics(item, onDone) {
