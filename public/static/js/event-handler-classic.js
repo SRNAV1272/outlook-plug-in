@@ -6833,6 +6833,8 @@ const CONFIG = {
     REDUNDANT_WRITE_WINDOW_MS: 1500,
 
     SIGNATURE_SENTINEL: "cardbyte-sig",
+    // When no forward-specific rule exists, let reply rules cover forwards.
+    TREAT_FORWARD_AS_REPLY: true,
     NOTIF_KEY: "cardbyte_sig_status",
     NOTIF_ICON: "v11.icon16",
     MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
@@ -7619,17 +7621,40 @@ function senderMatches(rule) {
 }
 
 function contextMatches(ruleContext, composeType) {
-    if (!ruleContext || ruleContext.trim() === "") return true;
-    const rc = ruleContext.toLowerCase();
+    const rc = normalizeContext(ruleContext);
     if (rc === "all") return true;
+
     if (composeType === null || composeType === undefined) {
         _diag.step("contextMatches:null-composeType-conservative-fail");
         return false;
     }
-    return rc === composeType.toLowerCase();
+    const ct = normalizeContext(composeType);
+
+    if (rc === ct) return true;
+
+    // A rule written for replies covers forwards unless a forward-specific
+    // rule exists. Turn this off if your rule set distinguishes them strictly.
+    if (CONFIG.TREAT_FORWARD_AS_REPLY && rc === "reply" && ct === "forward") {
+        _diag.step("contextMatches:forward-accepted-by-reply-rule");
+        return true;
+    }
+    return false;
 }
 
 // ─── Compose type detection with fallbacks ───────────────────────────────────
+//
+// Returns "compose" | "reply" | "forward". Forward used to be collapsed into
+// "reply" here, which meant a rule with context "forward" could never match
+// and quietly fell through to the default signature.
+
+function normalizeContext(v) {
+    const s = (v || "").trim().toLowerCase();
+    if (s === "" || s === "all" || s === "any") return "all";
+    if (s === "compose" || s === "new" || s === "newmail" || s === "newmessage") return "compose";
+    if (s === "reply" || s === "replyall" || s === "reply-all") return "reply";
+    if (s === "forward" || s === "fwd") return "forward";
+    return s;
+}
 
 function detectComposeType(item, cb) {
     if (typeof item.getComposeTypeAsync === "function") {
@@ -7638,10 +7663,13 @@ function detectComposeType(item, cb) {
                 if (result.status === Office.AsyncResultStatus.Succeeded) {
                     const raw = ((result.value && result.value.composeType) || "").toLowerCase();
                     _diag.step("detectComposeType:getComposeTypeAsync", "raw=" + raw);
-                    if (raw === "reply" || raw === "forward") { cb("reply"); return; }
+                    if (raw === "forward") { cb("forward"); return; }
+                    if (raw === "reply") { cb("reply"); return; }
                     if (raw === "newmail") { cb("compose"); return; }
+                    _diag.step("detectComposeType:unrecognised-raw-value", raw);
                 } else {
-                    _diag.step("detectComposeType:getComposeTypeAsync-failed");
+                    _diag.step("detectComposeType:getComposeTypeAsync-failed",
+                        (result.error && result.error.message) || "?");
                 }
                 _trySubjectFallback(item, cb);
             });
@@ -7656,7 +7684,12 @@ function _trySubjectFallback(item, cb) {
         item.subject.getAsync(function (res) {
             if (res.status === Office.AsyncResultStatus.Succeeded) {
                 const subj = (res.value || "").toLowerCase().trim();
-                if (subj.indexOf("re:") === 0 || subj.indexOf("fw:") === 0 || subj.indexOf("fwd:") === 0) {
+                if (subj.indexOf("fw:") === 0 || subj.indexOf("fwd:") === 0) {
+                    _diag.step("detectComposeType:forward-via-subject-prefix");
+                    cb("forward");
+                    return;
+                }
+                if (subj.indexOf("re:") === 0) {
                     _diag.step("detectComposeType:reply-via-subject-prefix");
                     cb("reply");
                     return;
