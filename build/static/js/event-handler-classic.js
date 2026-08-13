@@ -6694,6 +6694,984 @@
  *          origin lists this file's absolute URL under "allowed".
  *     Without both, every XHR returns status 0 / onerror.
  */
+/*!
+ * html-content-signature v2
+ * ------------------------------------------------------------------
+ * Deterministic canonical signature of an HTML body's *rendered content*,
+ * for detecting tampering by comparing two signatures.
+ *
+ * Design goals (in priority order):
+ *   1. HOST INDEPENDENCE - the default path is a pure string tokenizer, so
+ *      New Outlook (Chromium/WebView2) and Classic Outlook (mshtml/IE11)
+ *      produce byte-identical signatures. No DOMParser required.
+ *   2. UNFORGEABLE ENCODING - tokens are JSON-encoded, so no text content
+ *      can imitate a structural token (the old "|"/":" scheme could).
+ *   3. NO BLIND SPOTS THAT CHANGE WHAT THE USER SEES OR CLICKS -
+ *      link targets, srcset, CSS urls, style/script bodies are covered.
+ *   4. NO FALSE POSITIVES on benign re-serialization - comments, inline
+ *      wrapper churn, entity form, whitespace form, NBSP, zero-width junk.
+ *
+ * Usage:
+ *   var sig = HtmlContentSignature.signature(html);        // canonical string
+ *   HtmlContentSignature.equal(a, b);                      // boolean
+ *   HtmlContentSignature.diff(a, b);                       // where they differ
+ *   HtmlContentSignature.digest(html);                     // short, NON-crypto
+ *
+ * NOTE ON TRUST: this is an integrity *diff*, not a MAC. If the baseline
+ * signature travels with the message or is stored client-side, an attacker
+ * who can edit the HTML can also edit the baseline. Sign/HMAC the canonical
+ * string server-side if you need authenticity, not just change detection.
+ */
+(function (root, factory) {
+    "use strict";
+    if (typeof module === "object" && module.exports) module.exports = factory();
+    else root.HtmlContentSignature = factory();
+})(
+    // Classic Outlook's JSRuntime is not a clean browser-or-node global: resolve
+    // through every known name, same trick as the patched CryptoJS UMD wrapper
+    // that ships alongside this file in the classic bundle.
+    (typeof self !== "undefined" && self) ||
+    (typeof window !== "undefined" && window) ||
+    (typeof globalThis !== "undefined" && globalThis) ||
+    this,
+    function () {
+        "use strict";
+
+        var VERSION = "hcs2";
+
+        /* ---------------------------------------------------------------- tables */
+
+        // Elements whose content is raw text, not markup.
+        var RAW_TEXT = {
+            script: 1, style: 1, title: 1, textarea: 1,
+            xmp: 1, noscript: 1, noframes: 1, plaintext: 1
+        };
+
+        // Elements that force a visual break between text runs.
+        var BLOCK = {
+            address: 1, article: 1, aside: 1, blockquote: 1, body: 1, br: 1,
+            caption: 1, center: 1, col: 1, colgroup: 1, dd: 1, details: 1, dialog: 1,
+            dir: 1, div: 1, dl: 1, dt: 1, fieldset: 1, figcaption: 1, figure: 1,
+            footer: 1, form: 1, h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1, header: 1,
+            hgroup: 1, hr: 1, html: 1, legend: 1, li: 1, main: 1, menu: 1, nav: 1,
+            ol: 1, optgroup: 1, option: 1, p: 1, pre: 1, section: 1, summary: 1,
+            table: 1, tbody: 1, td: 1, tfoot: 1, th: 1, thead: 1, tr: 1, ul: 1
+        };
+
+        // URL-bearing attributes, in FIXED order so emission is deterministic.
+        var URL_ATTRS = [
+            "src", "srcset", "poster", "background", "data",
+            "xlink:href", "formaction", "action", "dynsrc", "lowsrc"
+        ];
+
+        var NAMED = {
+            amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00A0",
+            ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", zwnj: "\u200C", zwj: "\u200D",
+            lrm: "\u200E", rlm: "\u200F", shy: "\u00AD",
+            ndash: "\u2013", mdash: "\u2014", lsquo: "\u2018", rsquo: "\u2019",
+            sbquo: "\u201A", ldquo: "\u201C", rdquo: "\u201D", bdquo: "\u201E",
+            dagger: "\u2020", Dagger: "\u2021", bull: "\u2022", hellip: "\u2026",
+            permil: "\u2030", prime: "\u2032", Prime: "\u2033", lsaquo: "\u2039",
+            rsaquo: "\u203A", oline: "\u203E", frasl: "\u2044", euro: "\u20AC",
+            trade: "\u2122", copy: "\u00A9", reg: "\u00AE", deg: "\u00B0",
+            plusmn: "\u00B1", middot: "\u00B7", laquo: "\u00AB", raquo: "\u00BB",
+            times: "\u00D7", divide: "\u00F7", frac12: "\u00BD", frac14: "\u00BC",
+            frac34: "\u00BE", pound: "\u00A3", yen: "\u00A5", cent: "\u00A2",
+            curren: "\u00A4", sect: "\u00A7", para: "\u00B6", micro: "\u00B5",
+            iexcl: "\u00A1", iquest: "\u00BF", brvbar: "\u00A6", uml: "\u00A8",
+            not: "\u00AC", macr: "\u00AF", acute: "\u00B4", cedil: "\u00B8",
+            sup1: "\u00B9", sup2: "\u00B2", sup3: "\u00B3", ordm: "\u00BA", ordf: "\u00AA",
+            agrave: "\u00E0", aacute: "\u00E1", acirc: "\u00E2", atilde: "\u00E3",
+            auml: "\u00E4", aring: "\u00E5", ccedil: "\u00E7", egrave: "\u00E8",
+            eacute: "\u00E9", ecirc: "\u00EA", euml: "\u00EB", igrave: "\u00EC",
+            iacute: "\u00ED", icirc: "\u00EE", iuml: "\u00EF", ntilde: "\u00F1",
+            ograve: "\u00F2", oacute: "\u00F3", ocirc: "\u00F4", otilde: "\u00F5",
+            ouml: "\u00F6", ugrave: "\u00F9", uacute: "\u00FA", ucirc: "\u00FB",
+            uuml: "\u00FC", yacute: "\u00FD", szlig: "\u00DF",
+            Agrave: "\u00C0", Aacute: "\u00C1", Auml: "\u00C4", Ccedil: "\u00C7",
+            Egrave: "\u00C8", Eacute: "\u00C9", Ouml: "\u00D6", Uuml: "\u00DC",
+            Ntilde: "\u00D1"
+        };
+
+        // Entities browsers decode even without a trailing semicolon.
+        var NO_SEMI = {
+            amp: 1, lt: 1, gt: 1, quot: 1, nbsp: 1, copy: 1, reg: 1, deg: 1, pound: 1,
+            yen: 1, cent: 1, sect: 1, middot: 1, times: 1, divide: 1, not: 1, shy: 1,
+            macr: 1, acute: 1, uml: 1, para: 1, micro: 1
+        };
+
+        // Invisible / formatting characters that cannot change what is rendered.
+        var ZERO_WIDTH = /[\u00AD\u200B\u200C\u200D\u200E\u200F\u2060\u2061\u2062\u2063\u2064\uFEFF]/g;
+        // Everything HTML treats as collapsible whitespace, incl. NBSP + Unicode spaces.
+        var WHITESPACE = /[\t\n\f\r \u000B\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g;
+
+        var DEFAULTS = {
+            links: true,        // capture <a href> / <area href> targets
+            media: true,        // capture src / srcset / poster / background / ...
+            css: true,          // capture <style> bodies and style="" url()s
+            scriptBodies: true, // capture <script> bodies
+            breaks: true,       // emit break tokens at block boundaries
+            normalizeUnicode: true, // NFC, so composed vs decomposed compare equal
+            lowercaseUrls: false,   // off: URL paths are case-sensitive
+            // Collapse cid:/blob:/data: URLs to one placeholder. REQUIRED when
+            // comparing against a live Outlook draft body: the host rewrites remote
+            // <img src> to cid: attachment references as soon as the signature is
+            // inserted, so a strict URL compare reports every desktop draft as tampered.
+            // http(s) URLs stay strict - those are the ones worth guarding.
+            hostRewrittenUrls: false
+        };
+
+        /* --------------------------------------------------------------- helpers */
+
+        function options(o) {
+            var out = {}, k;
+            for (k in DEFAULTS) if (DEFAULTS.hasOwnProperty(k)) out[k] = DEFAULTS[k];
+            if (o) for (k in o) if (o.hasOwnProperty(k) && out.hasOwnProperty(k)) out[k] = o[k];
+            return out;
+        }
+
+        function fromCodePoint(cp) {
+            if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "\uFFFD";
+            if (cp > 0xffff) {
+                cp -= 0x10000;
+                return String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+            }
+            return String.fromCharCode(cp);
+        }
+
+        var ENT_RE = /&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31})(;?)/g;
+
+        function decodeEntities(str) {
+            if (str.indexOf("&") === -1) return str;
+            return str.replace(ENT_RE, function (m, body, semi) {
+                if (body.charAt(0) === "#") {
+                    var cp = body.charAt(1) === "x" || body.charAt(1) === "X"
+                        ? parseInt(body.slice(2), 16)
+                        : parseInt(body.slice(1), 10);
+                    if (isNaN(cp)) return m;
+                    return fromCodePoint(cp);
+                }
+                if (NAMED.hasOwnProperty(body) && (semi || NO_SEMI[body])) return NAMED[body];
+                // Unknown entity: leave verbatim. Deterministic on every host.
+                return m;
+            });
+        }
+
+        function normalizeText(s, o) {
+            s = s.replace(ZERO_WIDTH, "");
+            if (o.normalizeUnicode && typeof s.normalize === "function") {
+                try { s = s.normalize("NFC"); } catch (e) { /* older hosts */ }
+            }
+            return s.replace(WHITESPACE, " ");
+        }
+
+        // Browsers strip tabs/newlines/CRs from URLs and trim surrounding whitespace.
+        function normalizeUrl(v, o) {
+            if (v == null) return "";
+            v = decodeEntities(String(v)).replace(/[\t\n\r]+/g, "").replace(ZERO_WIDTH, "");
+            v = v.replace(/^[\s\u00A0]+|[\s\u00A0]+$/g, "");
+            if (o.hostRewrittenUrls && /^(?:cid|blob|data):/i.test(v)) return "@embedded";
+            return o.lowercaseUrls ? v.toLowerCase() : v;
+        }
+
+        function normalizeSrcset(v, o) {
+            // "a.png 1x,  b.png 2x" -> "a.png 1x,b.png 2x" (order preserved, ws collapsed)
+            var parts = String(v == null ? "" : v).split(",");
+            var res = [], i, p, sp, url, desc;
+            for (i = 0; i < parts.length; i++) {
+                p = decodeEntities(parts[i]).replace(WHITESPACE, " ").replace(/^ | $/g, "");
+                if (!p) continue;
+                sp = p.indexOf(" ");
+                url = sp === -1 ? p : p.slice(0, sp);
+                desc = sp === -1 ? "" : " " + p.slice(sp + 1);
+                res.push(normalizeUrl(url, o) + desc);
+            }
+            return res.join(",");
+        }
+
+        var CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi;
+
+        function cssUrls(css, o) {
+            var found = [], m;
+            CSS_URL_RE.lastIndex = 0;
+            while ((m = CSS_URL_RE.exec(css)) !== null) {
+                var u = normalizeUrl(m[1] != null ? m[1] : (m[2] != null ? m[2] : m[3]), o);
+                if (u) found.push(u);
+                if (CSS_URL_RE.lastIndex === m.index) CSS_URL_RE.lastIndex++; // guard
+            }
+            return found;
+        }
+
+        /* ---------------------------------------------------------- token emitter */
+
+        function Emitter(o) {
+            this.o = o;
+            this.tokens = [];
+            this.buf = [];
+            this.pendingSpace = false;
+        }
+
+        Emitter.prototype.flush = function () {
+            if (this.buf.length) {
+                this.tokens.push(["t", this.buf.join("")]);
+                this.buf.length = 0;
+            }
+            this.pendingSpace = false;
+        };
+
+        Emitter.prototype.text = function (raw, alreadyDecoded) {
+            if (!raw) return;
+            var t = normalizeText(alreadyDecoded ? raw : decodeEntities(raw), this.o);
+            if (!t) return;
+            if (t === " ") { if (this.buf.length) this.pendingSpace = true; return; }
+            var lead = t.charAt(0) === " ";
+            var trail = t.charAt(t.length - 1) === " ";
+            var core = t.replace(/^ +| +$/g, "");
+            if (this.buf.length && (this.pendingSpace || lead)) this.buf.push(" ");
+            this.buf.push(core);
+            this.pendingSpace = trail;
+        };
+
+        Emitter.prototype.token = function (arr) {
+            this.flush();
+            this.tokens.push(arr);
+        };
+
+        Emitter.prototype.brk = function () {
+            if (!this.o.breaks) { if (this.buf.length) this.pendingSpace = true; return; }
+            this.flush();
+            var last = this.tokens[this.tokens.length - 1];
+            if (!this.tokens.length) return;                 // no leading break
+            if (last && last.length === 1 && last[0] === "b") return; // no doubles
+            this.tokens.push(["b"]);
+        };
+
+        // Shared per-element handling for both the tokenizer and the DOM walker.
+        Emitter.prototype.element = function (tag, getAttr) {
+            var o = this.o, i, a, v;
+
+            if (BLOCK[tag]) this.brk();
+
+            if (o.media) {
+                for (i = 0; i < URL_ATTRS.length; i++) {
+                    a = URL_ATTRS[i];
+                    v = getAttr(a);
+                    if (v == null) continue;
+                    this.token(["u", tag, a, a === "srcset" ? normalizeSrcset(v, o) : normalizeUrl(v, o)]);
+                }
+            }
+
+            if (o.links && (tag === "a" || tag === "area" || tag === "link")) {
+                v = getAttr("href");
+                if (v != null) this.token(["h", tag, normalizeUrl(v, o)]);
+            }
+
+            // <img> must always be visible in the signature, even with no src,
+            // because its mere presence is rendered content.
+            if (tag === "img" || tag === "image" || tag === "input" || tag === "object" ||
+                tag === "embed" || tag === "iframe" || tag === "video" || tag === "audio" ||
+                tag === "svg" || tag === "canvas") {
+                this.token(["e", tag]);
+                if (tag === "input") {
+                    v = getAttr("type");
+                    if (v != null) this.token(["a", "type", normalizeText(decodeEntities(String(v)), o)]);
+                    v = getAttr("value");
+                    if (v != null) this.token(["a", "value", normalizeText(decodeEntities(String(v)), o)]);
+                }
+            }
+
+            if (o.css) {
+                v = getAttr("style");
+                if (v != null) {
+                    var urls = cssUrls(decodeEntities(String(v)), o);
+                    for (i = 0; i < urls.length; i++) this.token(["c", urls[i]]);
+                }
+            }
+        };
+
+        Emitter.prototype.rawBody = function (tag, body) {
+            var o = this.o, i, urls;
+            if (tag === "style") {
+                if (!o.css) return;
+                body = normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "");
+                this.token(["s", "style", body]);
+                return;
+            }
+            if (tag === "script") {
+                if (!o.scriptBodies) return;
+                body = body.replace(WHITESPACE, " ").replace(/^ +| +$/g, "");
+                this.token(["s", "script", body]);
+                return;
+            }
+            if (tag === "textarea" || tag === "title") {
+                this.token(["s", tag, normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "")]);
+                return;
+            }
+            // noscript / noframes / xmp / plaintext: treat body as visible text
+            this.text(body);
+        };
+
+        Emitter.prototype.finish = function () {
+            this.flush();
+            var t = this.tokens;
+            while (t.length && t[t.length - 1].length === 1 && t[t.length - 1][0] === "b") t.pop();
+            return t;
+        };
+
+        /* --------------------------------------------------- tokenizer (default) */
+
+        function attrGetter(attrs) {
+            return function (name) {
+                return attrs.hasOwnProperty(name) ? attrs[name] : null;
+            };
+        }
+
+        var ATTR_RE = /([^\s=\/>"'][^\s=\/>]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*)))?/g;
+
+        function parseAttrs(src) {
+            var attrs = {}, m, name;
+            ATTR_RE.lastIndex = 0;
+            while ((m = ATTR_RE.exec(src)) !== null) {
+                if (ATTR_RE.lastIndex === m.index) { ATTR_RE.lastIndex++; continue; }
+                name = m[1].toLowerCase();
+                if (name === "/" || !name) continue;
+                var val = m[2] != null ? m[2] : (m[3] != null ? m[3] : (m[4] != null ? m[4] : ""));
+                // First occurrence wins, matching the HTML parser.
+                if (!attrs.hasOwnProperty(name)) attrs[name] = val;
+            }
+            return attrs;
+        }
+
+        function tokenize(html, o) {
+            var s = html == null ? "" : String(html);
+            var n = s.length, i = 0, em = new Emitter(o), guard = 0;
+
+            while (i < n) {
+                if (++guard > n * 4 + 16) break; // paranoia: never loop forever
+
+                var lt = s.indexOf("<", i);
+                if (lt < 0) { em.text(s.slice(i)); break; }
+                if (lt > i) em.text(s.slice(i, lt));
+
+                var next = s.charAt(lt + 1);
+
+                // Comments (incl. IE conditional comments) - skipped on every host.
+                if (s.substr(lt, 4) === "<!--") {
+                    var endC = s.indexOf("-->", lt + 4);
+                    if (endC < 0) { i = n; break; }
+                    i = endC + 3;
+                    continue;
+                }
+                // Doctype, CDATA, processing instructions, bogus comments.
+                if (next === "!" || next === "?") {
+                    var endB = s.indexOf(">", lt + 2);
+                    i = endB < 0 ? n : endB + 1;
+                    continue;
+                }
+
+                var isEnd = next === "/";
+                var nameStart = lt + (isEnd ? 2 : 1);
+                var ch = s.charAt(nameStart);
+                if (!/[a-zA-Z]/.test(ch)) {           // a literal "<" in text
+                    em.text("<");
+                    i = lt + 1;
+                    continue;
+                }
+
+                var p = nameStart;
+                while (p < n && /[^\s\/>]/.test(s.charAt(p))) p++;
+                var tag = s.slice(nameStart, p).toLowerCase();
+
+                // Find the tag's ">" while respecting quoted attribute values.
+                var q = p, quote = "";
+                while (q < n) {
+                    var c = s.charAt(q);
+                    if (quote) { if (c === quote) quote = ""; }
+                    else if (c === '"' || c === "'") quote = c;
+                    else if (c === ">") break;
+                    q++;
+                }
+                var attrSrc = s.slice(p, q);
+                i = (q < n ? q + 1 : n);
+
+                if (isEnd) {
+                    if (BLOCK[tag]) em.brk();
+                    if (o.links && tag === "a") em.token(["/h"]);
+                    continue;
+                }
+
+                var attrs = parseAttrs(attrSrc);
+                em.element(tag, attrGetter(attrs));
+
+                if (RAW_TEXT[tag]) {
+                    if (tag === "plaintext") { em.rawBody(tag, s.slice(i)); i = n; continue; }
+                    var close = -1, from = i;
+                    // case-insensitive search for "</tag"
+                    var lower = s.toLowerCase(), needle = "</" + tag;
+                    close = lower.indexOf(needle, from);
+                    if (close < 0) { em.rawBody(tag, s.slice(from)); i = n; continue; }
+                    em.rawBody(tag, s.slice(from, close));
+                    i = close; // end tag consumed on the next iteration
+                }
+            }
+
+            return em.finish();
+        }
+
+        /* ------------------------------------------------- DOM path (diagnostic) */
+
+        var TEXT_NODE = 3, ELEMENT_NODE = 1;
+
+        function domParserSupportsHtml() {
+            try {
+                if (typeof DOMParser === "undefined") return false;
+                var d = new DOMParser().parseFromString("<i>x</i>", "text/html");
+                return !!(d && d.body && d.body.textContent === "x");
+            } catch (e) { return false; }
+        }
+
+        function parseToBody(html) {
+            var str = html == null ? "" : String(html);
+            if (domParserSupportsHtml()) {
+                var d = new DOMParser().parseFromString(str, "text/html");
+                if (d && d.body) return d.body;
+            }
+            if (typeof document !== "undefined" && document.implementation &&
+                document.implementation.createHTMLDocument) {
+                var doc = document.implementation.createHTMLDocument("");
+                // Neutralise loading attributes so an inert parse cannot hit the network,
+                // then read them back from their data-* twins.
+                doc.body.innerHTML = str.replace(
+                    /\s(src|srcset|background|poster|lowsrc|dynsrc)\s*=/gi,
+                    " data-hcs-$1="
+                );
+                return doc.body;
+            }
+            return null;
+        }
+
+        function domAttrGetter(el) {
+            return function (name) {
+                if (el.hasAttribute && el.hasAttribute(name)) return el.getAttribute(name);
+                if (el.hasAttribute && el.hasAttribute("data-hcs-" + name)) {
+                    return el.getAttribute("data-hcs-" + name);
+                }
+                return null;
+            };
+        }
+
+        function tokenizeDom(html, o) {
+            var body = parseToBody(html);
+            var em = new Emitter(o);
+            if (!body) return null;
+
+            var stack = [{ node: body, i: 0, entered: false }];
+            while (stack.length) {
+                var top = stack[stack.length - 1];
+                var node = top.node;
+
+                if (!top.entered) {
+                    top.entered = true;
+                    if (node !== body && node.nodeType === ELEMENT_NODE) {
+                        var tag = String(node.tagName || "").toLowerCase();
+                        em.element(tag, domAttrGetter(node));
+                        if (RAW_TEXT[tag]) {
+                            em.rawBody(tag, node.textContent || "");
+                            stack.pop();
+                            continue;
+                        }
+                    }
+                }
+
+                var kids = node.childNodes;
+                if (kids && top.i < kids.length) {
+                    var child = kids[top.i++];
+                    if (child.nodeType === TEXT_NODE) em.text(child.nodeValue || "", true);
+                    else if (child.nodeType === ELEMENT_NODE) stack.push({ node: child, i: 0, entered: false });
+                    continue;
+                }
+
+                if (node !== body && node.nodeType === ELEMENT_NODE) {
+                    var t2 = String(node.tagName || "").toLowerCase();
+                    if (BLOCK[t2]) em.brk();
+                    if (o.links && t2 === "a") em.token(["/h"]);
+                }
+                stack.pop();
+            }
+            return em.finish();
+        }
+
+        /* ------------------------------------------------- marked region extraction
+      
+           Locating "the signature" inside a draft body needs an anchor, because
+           setSignatureAsync does NOT always put the block at the end (on a reply it
+           sits above the quoted original). Wrap what you write in a marked element
+           and pull it back out by that attribute.
+      
+           Void elements never open a depth level; raw-text elements are skipped so a
+           marker mentioned inside <style> or a comment cannot be mistaken for one.
+        ------------------------------------------------------------------------- */
+
+        var VOID = {
+            area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1,
+            link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1
+        };
+
+        function isAlpha(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }
+        function isTagNameEnd(c) {
+            return c === 32 || c === 9 || c === 10 || c === 13 || c === 12 || c === 47 || c === 62;
+        }
+
+        /**
+         * Every element carrying `attr`, with its inner HTML and the attribute value.
+         *
+         * PERFORMANCE NOTE: this is one flat loop over char codes on purpose. The
+         * first version walked tags through a callback and allocated a descriptor
+         * object per tag; V8 ran it at ~14ms for three calls and then, once the
+         * function was optimised, at ~575ms on the SAME 140KB input - a 40x deopt
+         * cliff that would land squarely inside the send budget. Do not reintroduce
+         * a per-tag callback or per-tag object here.
+         *
+         * @returns {Array<{value:string, inner:string, tag:string, start:number, end:number}>}
+         *   start/end bracket the whole element, so a caller can compare against a
+         *   quote boundary and discard copies sitting in the quoted thread.
+         */
+        function extractMarkedRegions(html, attr) {
+            var s = String(html == null ? "" : html);
+            var a = String(attr).toLowerCase();
+            var found = [];
+            if (!s || s.indexOf("<") === -1) return found;
+
+            var lower = s.toLowerCase();
+            if (lower.indexOf(a) === -1) return found;   // no marker anywhere: done
+
+            var n = s.length, i = 0;
+            var openTag = "", depth = 0, innerStart = 0, openValue = "", openStart = 0;
+
+            while (i < n) {
+                var lt = s.indexOf("<", i);
+                if (lt < 0) break;
+
+                // <!-- comment -->  (also swallows IE conditional comment blocks)
+                if (s.charCodeAt(lt + 1) === 33 && s.charCodeAt(lt + 2) === 45 && s.charCodeAt(lt + 3) === 45) {
+                    var ec = s.indexOf("-->", lt + 4);
+                    i = ec < 0 ? n : ec + 3;
+                    continue;
+                }
+                var nc = s.charCodeAt(lt + 1);
+                if (nc === 33 || nc === 63) {              // doctype / PI / bogus comment
+                    var eb = s.indexOf(">", lt + 2);
+                    i = eb < 0 ? n : eb + 1;
+                    continue;
+                }
+
+                var isEnd = nc === 47;
+                var ns = lt + (isEnd ? 2 : 1);
+                if (!isAlpha(s.charCodeAt(ns))) { i = lt + 1; continue; }
+
+                var p = ns;
+                while (p < n && !isTagNameEnd(s.charCodeAt(p))) p++;
+                var tag = lower.slice(ns, p);
+
+                var q = p, quote = 0;
+                while (q < n) {
+                    var c = s.charCodeAt(q);
+                    if (quote) { if (c === quote) quote = 0; }
+                    else if (c === 34 || c === 39) quote = c;
+                    else if (c === 62) break;
+                    q++;
+                }
+                var afterTag = (q < n ? q + 1 : n);
+                // "/>" or a void element never opens a depth level.
+                var selfClosing = !!VOID[tag] || (function () {
+                    var k = q - 1;
+                    while (k > p && isTagNameEnd(s.charCodeAt(k)) && s.charCodeAt(k) !== 47) k--;
+                    return s.charCodeAt(k) === 47;
+                })();
+
+                if (depth > 0) {
+                    if (tag === openTag) {
+                        if (isEnd) {
+                            if (--depth === 0) {
+                                found.push({
+                                    value: openValue, tag: openTag, inner: s.slice(innerStart, lt),
+                                    start: openStart, end: afterTag
+                                });
+                            }
+                        } else if (!selfClosing) depth++;
+                    }
+                } else if (!isEnd && !selfClosing && q - p > a.length) {
+                    // Search WITHIN this tag only. `lower.indexOf(a, p)` would scan to the
+                    // end of the document for every tag that lacks the marker - O(n^2), and
+                    // ~155ms on a 140KB reply thread.
+                    var attrSrc = lower.slice(p, q);
+                    var attrs = attrSrc.indexOf(a) === -1 ? null : parseAttrs(s.slice(p, q));
+                    if (attrs && attrs.hasOwnProperty(a)) {
+                        openTag = tag;
+                        depth = 1;
+                        innerStart = afterTag;
+                        openStart = lt;
+                        openValue = decodeEntities(attrs[a] || "");
+                    }
+                }
+
+                i = afterTag;
+                // Never look for markers inside <style>/<script>/<textarea>/<title>.
+                if (!isEnd && RAW_TEXT[tag]) {
+                    var close = lower.indexOf("</" + tag, i);
+                    i = close < 0 ? n : close;
+                }
+            }
+
+            // Unclosed marker (truncated body, or the host mangled the wrapper): take
+            // everything after it rather than reporting nothing.
+            if (depth > 0) {
+                found.push({
+                    value: openValue, tag: openTag, inner: s.slice(innerStart),
+                    start: openStart, end: s.length
+                });
+            }
+            return found;
+        }
+
+        /* ------------------------------------------------- draft / quote splitting
+      
+           A reply or forward body is NOT just the signature and the user's text: it
+           also carries the quoted thread, which very often contains an intact copy of
+           the same signature (any earlier mail in the thread that we signed). Search
+           the whole body and that copy answers "is the signature intact?" on behalf
+           of the live one — so an edited or deleted live signature reads as
+           identical. Verification must be scoped to the live part.
+      
+           These markers are the separators Outlook and other clients put in front of
+           the quoted section. They are deliberately high-signal: the EARLIEST match
+           wins, so a false positive would truncate too early, report the signature as
+           absent, and cause a rewrite - the safe direction. A bare <hr> is not in the
+           list precisely because signatures contain them.
+        ------------------------------------------------------------------------- */
+
+        var QUOTE_MARKERS = [
+            "appendonsend",                                 // OWA / New Outlook anchor
+            "divrplyfwdmsg",                                // Outlook desktop (and x_ prefixed)
+            "mail-editor-reference-message-container",       // OWA
+            "-----original message-----",                    // Outlook plain separator
+            "-------- original message --------",            // mobile / other clients
+            "id=\"stopspelling\"", "id='stopspelling'",      // Outlook Windows separator
+            "blockquote type=\"cite\"", "blockquote type='cite'", // Mac Outlook, Apple Mail
+            "gmail_quote",                                   // Gmail
+            "yahoo_quoted",                                  // Yahoo
+            "ms-outlook-mobile-reference-message",            // Outlook mobile
+            "border-top:solid #e1e1e1 1.0pt"                 // Word's reply separator
+        ];
+
+        /**
+         * Split a draft body into the live compose area and the quoted thread.
+         * @returns {{live:string, quoted:string, boundary:number}}
+         *   boundary === html.length when no quoted section was found.
+         */
+        function splitDraftAtQuote(html) {
+            var s = String(html == null ? "" : html);
+            var lower = s.toLowerCase();
+            var at = -1;
+            for (var i = 0; i < QUOTE_MARKERS.length; i++) {
+                var hit = lower.indexOf(QUOTE_MARKERS[i]);
+                if (hit !== -1 && (at === -1 || hit < at)) at = hit;
+            }
+            if (at === -1) return { live: s, quoted: "", boundary: s.length };
+            // Rewind to the start of the tag the marker sits in, so a marked signature
+            // ending right before the separator is not clipped mid-element.
+            var lt = s.lastIndexOf("<", at);
+            if (lt !== -1) at = lt;
+            return { live: s.slice(0, at), quoted: s.slice(at), boundary: at };
+        }
+
+        // Ready-made option sets. `body` is the one to use against a draft body.
+        var PROFILES = {
+            // Byte-for-byte content equality. For comparing two stored copies.
+            strict: {},
+            // For comparing a stored signature against what is in an Outlook draft.
+            // CSS and script bodies are excluded because the Word and OWA editors
+            // rewrite style blocks and inline CSS wholesale - keeping them guarantees a
+            // mismatch on every desktop draft. What remains is what tampering has to
+            // touch to be harmful: visible text, link targets, image identity, order.
+            body: { css: false, scriptBodies: false, hostRewrittenUrls: true }
+        };
+
+        function keyOf(tok) { return JSON.stringify(tok); }
+
+        /**
+         * Token equality with ONE asymmetric allowance: when hostRewrittenUrls is on,
+         * "@embedded" in the URL slot of a ["u", tag, attr, url] token matches any
+         * URL on the other side. The cached copy says
+         * src="https://cdn.example/logo.png"; the draft says src="cid:image001.png"
+         * because Outlook attached and rewrote it. Both describe the same image.
+         *
+         * KNOWN LIMIT: this means an attacker who replaces the logo with ANOTHER
+         * cid: attachment is not caught by URL. Image count, position, and every
+         * text and href token are still compared strictly, which is what makes a
+         * misleading signature hard to build.
+         */
+        function tokEq(x, y, wild) {
+            if (x.length !== y.length) return false;
+            for (var i = 0; i < x.length; i++) {
+                if (x[i] === y[i]) continue;
+                if (wild && x[0] === "u" && i === 3 && (x[3] === "@embedded" || y[3] === "@embedded")) continue;
+                return false;
+            }
+            return true;
+        }
+
+        function runsEqual(a, b, wild) {
+            if (a.length !== b.length) return false;
+            for (var i = 0; i < a.length; i++) if (!tokEq(a[i], b[i], wild)) return false;
+            return true;
+        }
+
+        function stripEdgeBreaks(toks) {
+            var a = 0, b = toks.length;
+            while (a < b && toks[a].length === 1 && toks[a][0] === "b") a++;
+            while (b > a && toks[b - 1].length === 1 && toks[b - 1][0] === "b") b--;
+            return toks.slice(a, b);
+        }
+
+        // Index of the first contiguous occurrence of `needle` in `hay`, or -1.
+        // Exact string-key pass first (fast); only retried with the URL wildcard if
+        // that misses and the caller asked for host tolerance.
+        function indexOfTokenRun(hay, needle, wild) {
+            if (!needle.length) return -1;
+            var hk = hay.map(keyOf), nk = needle.map(keyOf);
+            var limit = hk.length - nk.length, i, j, ok;
+            for (i = 0; i <= limit; i++) {
+                ok = true;
+                for (j = 0; j < nk.length; j++) if (hk[i + j] !== nk[j]) { ok = false; break; }
+                if (ok) return i;
+            }
+            if (!wild) return -1;
+            for (i = 0; i <= limit; i++) {
+                ok = true;
+                for (j = 0; j < needle.length; j++) if (!tokEq(hay[i + j], needle[j], true)) { ok = false; break; }
+                if (ok) return i;
+            }
+            return -1;
+        }
+
+        // Fraction of the expected tokens present anywhere in the body (multiset).
+        // Diagnostic only: it separates "edited" from "not there at all".
+        function overlap(expected, actual) {
+            var want = stripEdgeBreaks(expected).filter(function (t) { return t[0] !== "b"; });
+            if (!want.length) return 1;
+            var bag = {}, i, k;
+            for (i = 0; i < actual.length; i++) {
+                k = keyOf(actual[i]);
+                bag[k] = (bag[k] || 0) + 1;
+            }
+            var hit = 0;
+            for (i = 0; i < want.length; i++) {
+                k = keyOf(want[i]);
+                if (bag[k] > 0) { bag[k]--; hit++; }
+            }
+            return hit / want.length;
+        }
+
+        /**
+         * Is `expectedHtml` present, unmodified, inside `containerHtml`?
+         *
+         * @returns {{verdict:"identical"|"modified"|"absent", at:number, overlap:number}}
+         *   identical - found as an intact contiguous run
+         *   modified  - much of it is there but not intact
+         *   absent    - not meaningfully there at all
+         */
+        function verifyRegion(expectedHtml, containerHtml, o) {
+            var opt = options(o);
+            var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
+            var act = tokenize(containerHtml, opt);
+            if (!exp.length) return { verdict: "absent", at: -1, overlap: 0 };
+            var at = indexOfTokenRun(act, exp, opt.hostRewrittenUrls);
+            if (at >= 0) return { verdict: "identical", at: at, overlap: 1 };
+            var ov = overlap(exp, act);
+            return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
+        }
+
+        /** Direct equality of two HTML fragments under a profile. */
+        function verifyExact(expectedHtml, actualHtml, o) {
+            var opt = options(o);
+            var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
+            var act = stripEdgeBreaks(tokenize(actualHtml, opt));
+            if (runsEqual(exp, act, opt.hostRewrittenUrls)) return { verdict: "identical", at: 0, overlap: 1 };
+            var ov = overlap(exp, act);
+            return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
+        }
+
+        /**
+         * THE POLICY BOTH BUILDS SHARE. Is our signature still intact on this DRAFT?
+         *
+         * Everything here exists because a draft is not a fragment. On a reply or
+         * forward it contains the quoted thread, and that thread routinely holds an
+         * intact copy of the very signature being checked. So:
+         *
+         *   1. The body is split at the quoted-thread boundary; only the LIVE part is
+         *      ever searched. A pristine copy sitting in the quote can no longer
+         *      answer for an edited live one.
+         *   2. Marked regions inside the quote are discarded rather than counted as
+         *      duplicates - otherwise every reply in a thread we have signed before
+         *      reports "duplicate" and gets rewritten for nothing.
+         *   3. If the live part has no copy at all, the verdict is absent/modified and
+         *      the caller rewrites, even when the quote holds a perfect copy. That is
+         *      the point: what matters is what the recipient will read at the top.
+         *
+         * DELIBERATE COST: with Outlook configured to place the signature BELOW the
+         * quoted text, the live block falls outside the live slice, so the verdict is
+         * always "absent" and every send rewrites. That is exactly the pre-
+         * verification behaviour, and it is preferred over the alternative - trusting
+         * a trailing marked block, which on a reply-to-our-own-mail is indistinguish-
+         * able from the oldest quoted signature at the bottom of the thread.
+         *
+         * @param {string} expectedHtml  the signature as resolved from cache
+         * @param {string} bodyHtml      the whole draft body
+         * @param {object} o             { markAttr, sigId, ...profile options }
+         * @returns {{verdict:string, reason:string, scope:string, quotedCopy:boolean}}
+         *   verdict: identical | modified | absent | duplicate | id-changed
+         */
+        function verifyInDraft(expectedHtml, bodyHtml, o) {
+            var opt = options(o);
+            var attr = (o && o.markAttr) || "data-cb-sig";
+            var sigId = o && o.sigId != null ? String(o.sigId) : null;
+
+            var split = splitDraftAtQuote(bodyHtml);
+            var hasQuote = split.boundary < String(bodyHtml == null ? "" : bodyHtml).length;
+            var scope = hasQuote ? "live-of-reply" : "whole-body";
+
+            var all = extractMarkedRegions(bodyHtml, attr);
+            var live = [], quoted = 0;
+            for (var i = 0; i < all.length; i++) {
+                if (all[i].start < split.boundary) live.push(all[i]);
+                else quoted++;
+            }
+
+            // Is there an intact copy in the quoted thread? Diagnostic only - it never
+            // changes the verdict, but it is the single most useful fact in a log when
+            // someone asks why a reply was rewritten. Computed LAZILY: tokenising a long
+            // quoted thread costs ~12ms on a 137KB reply, and it is pointless when the
+            // live block already verified clean.
+            var quotedCopy = null;
+            function describe(extra) {
+                if (quotedCopy === null) {
+                    quotedCopy = !!split.quoted &&
+                        verifyRegion(expectedHtml, split.quoted, opt).verdict === "identical";
+                }
+                return extra +
+                    (quoted ? ", " + quoted + " marked copy/copies in the quote" : "") +
+                    (quotedCopy ? ", intact copy in the quote (ignored)" : "");
+            }
+
+            if (live.length > 1) {
+                return {
+                    verdict: "duplicate", scope: scope, quotedCopy: quotedCopy,
+                    reason: describe(live.length + " signature blocks in the live area")
+                };
+            }
+
+            if (live.length === 1) {
+                if (sigId !== null && String(live[0].value) !== sigId) {
+                    return {
+                        verdict: "id-changed", scope: scope, quotedCopy: quotedCopy,
+                        reason: describe("live block has id=" + live[0].value + ", target=" + sigId)
+                    };
+                }
+                var r = verifyExact(expectedHtml, live[0].inner, opt);
+                // Clean live block: skip the quoted-thread scan entirely.
+                if (r.verdict === "identical") {
+                    return {
+                        verdict: "identical", scope: scope, quotedCopy: false,
+                        reason: "marked live block, overlap=1.00" +
+                            (quoted ? ", " + quoted + " marked copy/copies in the quote (ignored)" : "")
+                    };
+                }
+                return {
+                    verdict: r.verdict, scope: scope, quotedCopy: quotedCopy,
+                    reason: describe("marked live block, overlap=" + r.overlap.toFixed(2))
+                };
+            }
+
+            // No marked block in the live area: a pre-wrapper draft, a stripped
+            // attribute, or a signature that was never written here. Search the LIVE
+            // slice only - never the quote.
+            var r2 = verifyRegion(expectedHtml, split.live, opt);
+            if (r2.verdict === "identical") {
+                return {
+                    verdict: "identical", scope: scope, quotedCopy: false,
+                    reason: "unmarked live area, overlap=1.00"
+                };
+            }
+            return {
+                verdict: r2.verdict, scope: scope, quotedCopy: quotedCopy,
+                reason: describe("unmarked live area, overlap=" + r2.overlap.toFixed(2))
+            };
+        }
+
+        /* -------------------------------------------------------------- public API */
+
+        function tokensOf(html, o) { return tokenize(html, options(o)); }
+
+        function serialize(tokens) {
+            return VERSION + ":" + tokens.length + ":" + JSON.stringify(tokens);
+        }
+
+        function signature(html, o) { return serialize(tokensOf(html, o)); }
+
+        function signatureFromDom(html, o) {
+            var t = tokenizeDom(html, options(o));
+            return t ? serialize(t) : null;
+        }
+
+        function equal(a, b, o) {
+            var sa = signature(a, o), sb = signature(b, o);
+            return sa.length === sb.length && sa === sb;
+        }
+
+        function diff(a, b, o) {
+            var ta = tokensOf(a, o), tb = tokensOf(b, o);
+            var n = Math.max(ta.length, tb.length);
+            for (var i = 0; i < n; i++) {
+                var x = ta[i] ? JSON.stringify(ta[i]) : "(missing)";
+                var y = tb[i] ? JSON.stringify(tb[i]) : "(missing)";
+                if (x !== y) return { equal: false, index: i, left: x, right: y };
+            }
+            return { equal: true, index: -1, left: null, right: null };
+        }
+
+        // FNV-1a 32-bit + length. Short, stable, NOT cryptographic - do not use it
+        // as the sole tamper check against a motivated attacker.
+        function digest(html, o) {
+            var s = signature(html, o), h = 0x811c9dc5;
+            for (var i = 0; i < s.length; i++) {
+                h ^= s.charCodeAt(i);
+                h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+            }
+            return ("0000000" + h.toString(16)).slice(-8) + "-" + s.length.toString(36);
+        }
+
+        return {
+            VERSION: VERSION,
+            DEFAULTS: DEFAULTS,
+            PROFILES: PROFILES,
+            extractMarkedRegions: extractMarkedRegions,
+            splitDraftAtQuote: splitDraftAtQuote,
+            verifyInDraft: verifyInDraft,
+            verifyRegion: verifyRegion,
+            verifyExact: verifyExact,
+            indexOfTokenRun: indexOfTokenRun,
+            signature: signature,
+            signatureFromDom: signatureFromDom,
+            tokens: tokensOf,
+            equal: equal,
+            diff: diff,
+            digest: digest,
+            domParserSupportsHtml: domParserSupportsHtml,
+            _internals: { decodeEntities: decodeEntities, normalizeUrl: normalizeUrl }
+        };
+    });
+
 "use strict";
 
 // =============================================================================
@@ -6833,6 +7811,15 @@ const CONFIG = {
     REDUNDANT_WRITE_WINDOW_MS: 1500,
 
     SIGNATURE_SENTINEL: "cardbyte-sig",
+
+    // ─── Tamper detection (ported from event-handler.js v7.5) ───────────────
+    // Every write is wrapped in <div data-cb-sig="<sigKey>">…</div> so the
+    // block can be found again in a draft — setSignatureAsync does NOT always
+    // place it at the end (on a reply it sits above the quoted thread).
+    // At send the live area is compared against what we expect to be there.
+    VERIFY_AT_SEND: true,
+    SIG_MARK_ATTR: "data-cb-sig",
+    BODY_READ_TIMEOUT_MS: 6000,
     // When no forward-specific rule exists, let reply rules cover forwards.
     TREAT_FORWARD_AS_REPLY: true,
     NOTIF_KEY: "cardbyte_sig_status",
@@ -7203,12 +8190,15 @@ function getLastApplied(item, cb) {
     });
 }
 
-function setLastApplied(item, sigKey, htmlLen, cb) {
+function setLastApplied(item, sigKey, htmlLen, cb, digest) {
     const rec = {
         itemKey: _itemKey(item),
         owner: accountKey(),
         sigKey: String(sigKey),
         htmlLen: htmlLen || 0,
+        // v7.5 parity: the digest travels with the key, so send time can tell a
+        // server-side signature update from a user edit.
+        digest: digest || null,
         ts: Date.now()
     };
     _memLastApplied = rec;
@@ -7870,6 +8860,131 @@ function findMatchingRule(item, rules, cb) {
     });
 }
 
+// ─── Signature verification (tamper detection) ────────────────────────────────
+//
+// Ported from event-handler.js v7.5. The comparison itself is the shared
+// html-content-signature module prepended to this file — it is a pure string
+// tokenizer with no DOMParser dependency, so classic (mshtml) and new Outlook
+// (WebView2) produce byte-identical signatures for the same HTML.
+//
+// WHY A WRAPPER IS NEEDED: there is no Office API for "give me the signature
+// block". body.getAsync returns the whole draft, so the block has to be found
+// by an anchor we put there ourselves.
+//
+// WHY THE LIVE AREA ONLY: a reply or forward carries the quoted thread, which
+// very often holds an intact copy of the same signature from an earlier mail
+// we signed. Searching the whole body lets that copy answer "is it intact?" on
+// behalf of the live one, so an edited or deleted live signature reads as
+// identical and never gets repaired. verifyInDraft splits at the quote
+// boundary and only inspects the live part.
+
+const HCS = typeof HtmlContentSignature !== "undefined" ? HtmlContentSignature : null;
+const SIG_PROFILE = HCS ? HCS.PROFILES.body : null;
+
+function escAttr(v) {
+    return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+// A bare <div> with one data attribute: no id (would collide if a mail somehow
+// carried two), no class, no styling that could alter layout.
+function wrapSignature(html, sigKey) {
+    return "<div " + CONFIG.SIG_MARK_ATTR + "=\"" + escAttr(sigKey) + "\">" + html + "</div>";
+}
+
+function sigDigest(html) {
+    if (!HCS || html == null) return null;
+    try { return HCS.digest(html, SIG_PROFILE); }
+    catch (e) { _diag.step("sigDigest:threw", e.message); return null; }
+}
+
+// cb(htmlOrNull). null = could not read; "" is a legitimate empty draft body.
+function readBodyHtml(item, cb) {
+    if (!item || !item.body || typeof item.body.getAsync !== "function") {
+        _diag.step("readBodyHtml:getAsync-unavailable");
+        cb(null);
+        return;
+    }
+    const done = once(CONFIG.BODY_READ_TIMEOUT_MS, "readBodyHtml", function (value, timedOut) {
+        if (timedOut) { cb(null); return; }
+        cb(value === undefined ? null : value);
+    });
+    try {
+        item.body.getAsync(Office.CoercionType.Html, function (res) {
+            if (res.status === Office.AsyncResultStatus.Succeeded) {
+                const s = String(res.value == null ? "" : res.value);
+                _diag.step("readBodyHtml:ok", "len=" + s.length);
+                done(s);
+            } else {
+                _diag.step("readBodyHtml:failed", (res.error && res.error.message) || "?");
+                done(undefined);
+            }
+        });
+    } catch (e) {
+        _diag.step("readBodyHtml:threw", e.message);
+        done(undefined);
+    }
+}
+
+/**
+ * Is `expectedHtml` still intact on the draft?
+ *
+ * cb({ verdict, reason, note })
+ *   identical  — untouched. The ONLY verdict that suppresses a write.
+ *   modified   — recognisably our signature, edited.
+ *   absent     — not in the live area (deleted, or never written).
+ *   duplicate  — more than one signature block in the live area.
+ *   id-changed — the live block belongs to a different signature key.
+ *   unknown    — could not tell. Treated as "write it".
+ */
+function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
+    if (!CONFIG.VERIFY_AT_SEND) { cb({ verdict: "unknown", reason: "verification disabled", note: "" }); return; }
+    if (!HCS) {
+        _diag.step("verifySignatureOnBody:HCS-NOT-LOADED",
+            "html-content-signature module missing from the bundle");
+        cb({ verdict: "unknown", reason: "signature module not loaded", note: "" });
+        return;
+    }
+
+    readBodyHtml(item, function (body) {
+        if (body === null) { cb({ verdict: "unknown", reason: "body unreadable on this host", note: "" }); return; }
+
+        // Did the expected copy itself change since we applied it? If so, a
+        // mismatch below is an admin edit propagating, not a user tampering.
+        getLastApplied(item, function (last) {
+            let note = "";
+            const nowDigest = sigDigest(expectedHtml);
+            if (last && last.digest && nowDigest && last.digest !== nowDigest) {
+                note = "expected copy changed since compose (server-side update, not an edit)";
+            }
+
+            let r;
+            try {
+                const opt = {};
+                for (const k in SIG_PROFILE) {
+                    if (Object.prototype.hasOwnProperty.call(SIG_PROFILE, k)) opt[k] = SIG_PROFILE[k];
+                }
+                opt.markAttr = CONFIG.SIG_MARK_ATTR;
+                opt.sigId = sigKey;
+                r = HCS.verifyInDraft(expectedHtml, body, opt);
+            } catch (e) {
+                // The comparison must never take the send down with it.
+                _diag.step("verifyInDraft:threw", e.message);
+                cb({ verdict: "unknown", reason: "comparison failed: " + e.message, note: note });
+                return;
+            }
+
+            _diag.step("verifySignatureOnBody:" + r.verdict,
+                "sigKey=" + sigKey + " scope=" + r.scope + " reason=" + r.reason +
+                (r.quotedCopy ? " quotedCopy=yes" : "") + (note ? " note=" + note : ""));
+            cb({ verdict: r.verdict, reason: r.scope + ": " + r.reason, note: note });
+        });
+    });
+}
+
 // ─── Signature write ──────────────────────────────────────────────────────────
 
 function writeSignature(item, html, sigKey, onDone) {
@@ -7881,7 +8996,11 @@ function writeSignature(item, html, sigKey, onDone) {
     }
 
     _injecting = true;
-    _diag.step("writeSignature:begin", "sigKey=" + sigKey + " len=" + (html ? html.length : 0));
+    // Wrap so send time can find this block again. The RAW html length is what
+    // gets recorded, so the redundant-write comparison stays consistent.
+    const payload = wrapSignature(html, sigKey);
+    _diag.step("writeSignature:begin",
+        "sigKey=" + sigKey + " len=" + (html ? html.length : 0) + " payload=" + payload.length);
 
     let settled = false;
     function settle(ok, why) {
@@ -7894,12 +9013,13 @@ function writeSignature(item, html, sigKey, onDone) {
 
     try {
         item.body.setSignatureAsync(
-            html,
+            payload,
             { coercionType: Office.CoercionType.Html },
             function (r) {
                 if (r.status === Office.AsyncResultStatus.Succeeded) {
                     _diag.step("setSignatureAsync:success", "sigKey=" + sigKey);
-                    setLastApplied(item, sigKey, html ? html.length : 0, function () { settle(true); });
+                    setLastApplied(item, sigKey, html ? html.length : 0, function () { settle(true); },
+                        sigDigest(html));
                 } else {
                     const msg = (r.error && r.error.message) || "?";
                     _diag.step("setSignatureAsync:failed", msg);
@@ -7914,21 +9034,47 @@ function writeSignature(item, html, sigKey, onDone) {
     }
 }
 
+// Set for the duration of an OnMessageSend activation. Only one activation
+// runs in a runtime at a time, so a module flag avoids threading an option
+// through every layer of the pipeline.
+let _sendTimeVerify = false;
+
 // Skips the write when the same signature is already on the item and was
 // applied moments ago — this is what stops recipient-change storms from
 // firing overlapping identical writes in the inline reply surface.
+//
+// At SEND it does more: it reads the draft and compares. An untouched draft is
+// not written to; a tampered, deleted, duplicated or id-swapped block is
+// repaired. Compose still writes unconditionally (subject to the redundancy
+// window) — it is the runtime that PUTS the signature there, and
+// setSignatureAsync is idempotent anyway.
 function writeSignatureIfChanged(item, html, sigKey, onDone) {
     if (!html) { _diag.step("writeSignatureIfChanged:no-html", "sigKey=" + sigKey); onDone(false); return; }
 
     getLastApplied(item, function (last) {
-        if (last && last.sigKey === String(sigKey) &&
+        if (!_sendTimeVerify &&
+            last && last.sigKey === String(sigKey) &&
             last.htmlLen === html.length &&
             Date.now() - last.ts < CONFIG.REDUNDANT_WRITE_WINDOW_MS) {
             _diag.step("writeSignatureIfChanged:suppressed-redundant", "sigKey=" + sigKey);
             onDone(true);
             return;
         }
-        writeSignature(item, html, sigKey, onDone);
+
+        if (!_sendTimeVerify) {
+            writeSignature(item, html, sigKey, onDone);
+            return;
+        }
+
+        verifySignatureOnBody(item, html, sigKey, function (v) {
+            if (v.verdict === "identical") {
+                _diag.step("writeSignatureIfChanged:draft-verified-clean", "\u2192 body untouched");
+                onDone(true);
+                return;
+            }
+            _diag.step("writeSignatureIfChanged:repairing", "verdict=" + v.verdict + " \u2014 rewriting");
+            writeSignature(item, html, sigKey, onDone);
+        });
     });
 }
 
@@ -8277,6 +9423,7 @@ function onRecipientsChangedHandler(event) {
 
 function onSendHandler(event) {
     _diag.step("onSendHandler:ENTRY");
+    _sendTimeVerify = CONFIG.VERIFY_AT_SEND;
     const guarded = makeGuardedEvent(
         event || { completed: function () { } },
         CONFIG.SEND_HANDLER_TIMEOUT_MS
