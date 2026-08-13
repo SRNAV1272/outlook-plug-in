@@ -6697,24 +6697,37 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler-classic.js (FIXED v3)
-//  
-//  CRITICAL FIX: Removed polling entirely. Classic Outlook JSRuntime is
-//  ephemeral — setInterval is unreliable across event boundaries.
-//  
-//  Instead, we rely on the OnMessageRecipientsChanged LaunchEvent registered
-//  in the manifest. Each event creates a fresh JSRuntime, reads rules from
-//  OfficeRuntime.storage cache, evaluates, injects, and completes.
-//  
-//  This eliminates the "5 times works, 5 times stops" intermittent behavior.
+//  CardByte Outlook Add-in — event-handler-classic.js (FIXED v4 — INSTRUMENTED)
+//
+//  WHAT CHANGED IN v4 (diagnostics only — no behavioural changes to the
+//  signature logic itself):
+//
+//    1. _diag.step(name, extra) — numbered checkpoint at every stage of every
+//       flow. The buffer records the exact ordered path the runtime took.
+//    2. flushDiagnostics(item, cb) — writes the whole trace into the body ONCE
+//       per JSRuntime invocation, and is idempotent.
+//    3. makeGuardedEvent() now flushes diagnostics BEFORE event.completed(),
+//       on EVERY exit path — including the guard-timeout path. This is the
+//       important one: if a handler hangs, you still get the trace showing the
+//       last step reached.
+//    4. The guard timer reserves DIAG_FLUSH_BUDGET_MS so the prepend has time
+//       to land before Outlook kills the runtime.
+//    5. The diagnostic block header shows LAST STEP up front, so you can read
+//       the failure point without scrolling.
 //
 //  Previous fixes preserved:
+//    - No polling; relies on OnMessageRecipientsChanged LaunchEvent
 //    - Sequential flow (no race between default and rule injection)
 //    - Compose type detection with fallbacks
 //    - contextMatches no longer treats null as pass-through
 //    - Rules cache shares session lifecycle with signature cache
 //    - onFromChangedHandler refreshes rules for new sender
 //    - To + Cc recipient reading
+//
+//  ⚠ TURN CONFIG.DIAG_ENABLED BACK TO false BEFORE SHIPPING.
+//  ⚠ CONFIG.DIAG_ON_SEND=true means the diagnostic block is prepended during
+//    OnMessageSend and WILL BE EMAILED TO THE RECIPIENT. Keep it true only
+//    while debugging send-time failures, and test against your own address.
 // =============================================================================
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -6723,7 +6736,7 @@ const CONFIG = {
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
-    BASE_URL: "https://ns-enterprise.cardbyte.ai/email-signature",
+    BASE_URL: "https://enterprise.cardbyte.ai/email-signature",
 
     XHR_TIMEOUT_MS: 6000,
     COMPOSE_HANDLER_TIMEOUT_MS: 10000,
@@ -6740,33 +6753,52 @@ const CONFIG = {
 
     SIGNATURE_SENTINEL: "cardbyte-sig",
     NOTIF_KEY: "cardbyte_sig_status",
-    MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",   // ← add this
+    MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
 
-    DIAG_ENABLED: true,
+    // ── Diagnostics ──────────────────────────────────────────────────────────
+    DIAG_ENABLED: true,          // master switch for the step trace
+    DIAG_ON_SEND: true,          // also write the trace during OnMessageSend
+    DIAG_IN_NOTIFICATION: true,  // surface last step in the info bar too
+    DIAG_FLUSH_BUDGET_MS: 1200,  // time reserved for prependAsync to land
 };
 
 // ─── Diagnostic log ───────────────────────────────────────────────────────────
 
 const _diag = (function () {
     const buf = [];
+    let stepNo = 0;
+    let lastStep = "(none)";
+    const t0 = Date.now();
 
     function push(level, msg) {
-        buf.push("[" + new Date().toISOString() + "] [" + level + "] " + msg);
+        const dt = ("     " + (Date.now() - t0)).slice(-6);
+        buf.push("+" + dt + "ms [" + level + "] " + msg);
         try { if (typeof console !== "undefined") console.log("[CardByte]", level, msg); } catch (_) { }
     }
 
+    function step(name, extra) {
+        stepNo++;
+        lastStep = "#" + stepNo + " " + name;
+        push("STEP", "#" + (stepNo < 10 ? "0" + stepNo : stepNo) + " ▸ " + name +
+            (extra !== undefined && extra !== null && extra !== "" ? "   :: " + extra : ""));
+    }
+
+    function esc(s) {
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
     function buildHtmlBlock() {
-        const escaped = buf.join("\n")
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
         return [
             "<div style='margin:0 0 16px 0;padding:12px 16px;border:2px solid #d9534f;",
             "border-radius:4px;background-color:#fff3cd;font-family:Consolas,monospace;",
             "font-size:11px;color:#333;white-space:pre-wrap;'>",
             "<strong style='color:#d9534f;font-size:13px;'>",
-            "[CardByte DIAGNOSTIC — DELETE BEFORE SENDING]</strong><br/><br/>",
-            escaped, "</div>"
+            "[CardByte DIAGNOSTIC — DELETE BEFORE SENDING]</strong><br/>",
+            "<strong>LAST STEP REACHED: ", esc(lastStep), "</strong><br/>",
+            "<strong>TOTAL STEPS: ", String(stepNo), " | ELAPSED: ", String(Date.now() - t0), "ms</strong>",
+            "<br/><br/>",
+            esc(buf.join("\n")),
+            "</div>"
         ].join("");
     }
 
@@ -6774,72 +6806,144 @@ const _diag = (function () {
         info: (m) => push("INFO", m),
         warn: (m) => push("WARN", m),
         error: (m) => push("ERROR", m),
+        step: step,
+        lastStep: () => lastStep,
+        stepCount: () => stepNo,
         html: buildHtmlBlock,
     };
 })();
 
+// ─── Diagnostic flush (writes the trace into the body, once per runtime) ─────
+
+let _diagFlushed = false;
+let _diagSendContext = false;   // set true by onSendHandler
+
+function flushDiagnostics(item, onDone) {
+    const done = onDone || function () { };
+
+    if (!CONFIG.DIAG_ENABLED) { done(); return; }
+    if (_diagSendContext && !CONFIG.DIAG_ON_SEND) {
+        _diag.info("flushDiagnostics: skipped (send context, DIAG_ON_SEND=false)");
+        done();
+        return;
+    }
+    if (_diagFlushed) { done(); return; }
+    _diagFlushed = true;
+
+    _diag.step("flushDiagnostics:begin", "lastStep=" + _diag.lastStep());
+
+    // Hard cap: never let the prepend stall event.completed().
+    let called = false;
+    const finish = function (why) {
+        if (called) return;
+        called = true;
+        _diag.info("flushDiagnostics:end (" + why + ")");
+        done();
+    };
+    setTimeout(function () { finish("budget-expired"); }, CONFIG.DIAG_FLUSH_BUDGET_MS);
+
+    try {
+        if (!item || !item.body || typeof item.body.prependAsync !== "function") {
+            finish("no-prependAsync");
+            return;
+        }
+        item.body.prependAsync(
+            _diag.html(),
+            { coercionType: Office.CoercionType.Html },
+            function (r) {
+                finish("prependAsync:" + (r && r.status ? r.status : "unknown"));
+            }
+        );
+    } catch (e) {
+        finish("threw:" + e.message);
+    }
+}
+
+// Back-compat alias — older call sites used this name.
+function writeDiagnostics(item, onDone) {
+    flushDiagnostics(item, onDone);
+}
+
+// Optional: mirror the last step into the info bar (survives even if the body
+// write is rejected, e.g. on a read-only or protected item).
+function notifyLastStep(item) {
+    if (!CONFIG.DIAG_ENABLED || !CONFIG.DIAG_IN_NOTIFICATION) return;
+    showNotification(item, "DIAG " + _diag.lastStep(), "informationalMessage");
+}
+
 // ─── CryptoJS helpers (synchronous) ──────────────────────────────────────────
 
 function encryptEmail(email) {
+    _diag.step("encryptEmail:enter", "len=" + ((email || "").length));
     if (!email || !email.trim()) { _diag.warn("encryptEmail: empty email"); return ""; }
     if (typeof CryptoJS === "undefined") { _diag.error("CryptoJS not loaded"); return ""; }
     try {
         const key = CryptoJS.enc.Base64.parse(CONFIG.AES_KEY_B64);
         const iv = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
-        return CryptoJS.AES.encrypt(email, key, { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString();
+        const out = CryptoJS.AES.encrypt(email, key, { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString();
+        _diag.step("encryptEmail:ok", "cipherLen=" + out.length);
+        return out;
     } catch (e) { _diag.error("encryptEmail threw: " + e.message); return ""; }
 }
 
 function decryptResponse(cipherB64) {
+    _diag.step("decryptResponse:enter", "len=" + ((cipherB64 || "").length));
     if (!cipherB64) { _diag.warn("decryptResponse: empty input"); return ""; }
     if (typeof CryptoJS === "undefined") { _diag.error("CryptoJS not loaded"); return ""; }
     try {
         const key = CryptoJS.enc.Base64.parse(CONFIG.AES_KEY_B64);
         const iv = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
-        return CryptoJS.AES.decrypt(cipherB64, key, { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString(CryptoJS.enc.Utf8);
+        const out = CryptoJS.AES.decrypt(cipherB64, key, { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString(CryptoJS.enc.Utf8);
+        _diag.step("decryptResponse:ok", "plainLen=" + out.length);
+        return out;
     } catch (e) { _diag.error("decryptResponse threw: " + e.message); return ""; }
 }
 
 // ─── OfficeRuntime.storage cache ─────────────────────────────────────────────
 
 function _storageGet(key, ttlMs, cb) {
+    _diag.step("_storageGet:enter", key);
     try {
         OfficeRuntime.storage.getItem(key).then(
             function (raw) {
-                if (!raw) { cb(null); return; }
+                if (!raw) { _diag.step("_storageGet:empty", key); cb(null); return; }
                 let entry;
-                try { entry = JSON.parse(raw); } catch (_) { cb(null); return; }
-                if (!entry || entry.data == null) { cb(null); return; }
+                try { entry = JSON.parse(raw); }
+                catch (_) { _diag.step("_storageGet:parse-fail", key); cb(null); return; }
+                if (!entry || entry.data == null) { _diag.step("_storageGet:no-data", key); cb(null); return; }
                 if (ttlMs && Date.now() - entry.ts > ttlMs) {
-                    _diag.warn("_storageGet: TTL expired for " + key);
+                    _diag.step("_storageGet:ttl-expired", key + " age=" + (Date.now() - entry.ts) + "ms");
                     OfficeRuntime.storage.removeItem(key).then(function () { }, function () { });
                     cb(null);
                     return;
                 }
+                _diag.step("_storageGet:hit", key);
                 cb(entry.data);
             },
-            function (err) { _diag.warn("_storageGet failed: " + err); cb(null); }
+            function (err) { _diag.step("_storageGet:rejected", key + " err=" + err); cb(null); }
         );
-    } catch (e) { _diag.warn("_storageGet threw: " + e.message); cb(null); }
+    } catch (e) { _diag.step("_storageGet:threw", key + " " + e.message); cb(null); }
 }
 
 function _storageSet(key, data, cb) {
+    _diag.step("_storageSet:enter", key);
     const raw = JSON.stringify({ data: data, ts: Date.now() });
     try {
         OfficeRuntime.storage.setItem(key, raw).then(
-            function () { if (cb) cb(true); },
-            function (err) { _diag.warn("_storageSet failed: " + err); if (cb) cb(false); }
+            function () { _diag.step("_storageSet:ok", key + " bytes=" + raw.length); if (cb) cb(true); },
+            function (err) { _diag.step("_storageSet:rejected", key + " err=" + err); if (cb) cb(false); }
         );
-    } catch (e) { _diag.warn("_storageSet threw: " + e.message); if (cb) cb(false); }
+    } catch (e) { _diag.step("_storageSet:threw", key + " " + e.message); if (cb) cb(false); }
 }
 
 function _storageRemove(key, cb) {
+    _diag.step("_storageRemove:enter", key);
     try {
         OfficeRuntime.storage.removeItem(key).then(
-            function () { if (cb) cb(); },
-            function (err) { _diag.warn("_storageRemove failed: " + err); if (cb) cb(); }
+            function () { _diag.step("_storageRemove:ok", key); if (cb) cb(); },
+            function (err) { _diag.step("_storageRemove:rejected", key + " err=" + err); if (cb) cb(); }
         );
-    } catch (e) { _diag.warn("_storageRemove threw: " + e.message); if (cb) cb(); }
+    } catch (e) { _diag.step("_storageRemove:threw", key + " " + e.message); if (cb) cb(); }
 }
 
 // ─── Session helpers ──────────────────────────────────────────────────────────
@@ -6851,23 +6955,31 @@ function getOrCreateSessionId() {
         if (!sid) {
             sid = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
             try { sessionStorage.setItem(CONFIG.SESSION_KEY, sid); } catch (_) { }
+            _diag.step("getOrCreateSessionId:new", sid);
+        } else {
+            _diag.step("getOrCreateSessionId:existing", sid);
         }
         return sid;
     } catch (_) {
+        _diag.step("getOrCreateSessionId:fallback", "classic-session");
         return "classic-session";
     }
 }
 
 function checkSessionAndClearCaches(cb) {
+    _diag.step("checkSessionAndClearCaches:enter");
     const currentSid = getOrCreateSessionId();
     _storageGet(CONFIG.SESSION_KEY, null, function (cachedSid) {
         if (cachedSid !== currentSid) {
-            _diag.info("Session changed — clearing all caches");
+            _diag.step("checkSessionAndClearCaches:session-changed",
+                "cached=" + cachedSid + " current=" + currentSid);
             _storageSet(CONFIG.SESSION_KEY, currentSid);
             _memSig = null;
             _memRules = null;
             _storageRemove(CONFIG.CACHE_KEY);
             _storageRemove(CONFIG.RULES_CACHE_KEY);
+        } else {
+            _diag.step("checkSessionAndClearCaches:session-same", currentSid);
         }
         if (cb) cb();
     });
@@ -6878,20 +6990,23 @@ function checkSessionAndClearCaches(cb) {
 let _memSig = null;
 
 function getCachedSignature(cb) {
-    if (_memSig) { _diag.info("cacheGet: memory hit"); cb(_memSig); return; }
+    _diag.step("getCachedSignature:enter");
+    if (_memSig) { _diag.step("getCachedSignature:memory-hit", "len=" + _memSig.length); cb(_memSig); return; }
     _storageGet(CONFIG.CACHE_KEY, CONFIG.CACHE_TTL_MS, function (html) {
-        if (html) { _memSig = html; _diag.info("cacheGet: storage hit"); }
-        else { _diag.warn("cacheGet: miss"); }
+        if (html) { _memSig = html; _diag.step("getCachedSignature:storage-hit", "len=" + html.length); }
+        else { _diag.step("getCachedSignature:miss"); }
         cb(html);
     });
 }
 
 function setCachedSignature(html, cb) {
+    _diag.step("setCachedSignature:enter", "len=" + ((html || "").length));
     _memSig = html;
     _storageSet(CONFIG.CACHE_KEY, html, cb || function () { });
 }
 
 function clearCachedSignature(cb) {
+    _diag.step("clearCachedSignature:enter");
     _memSig = null;
     _storageRemove(CONFIG.CACHE_KEY, cb || function () { });
 }
@@ -6901,14 +7016,23 @@ function clearCachedSignature(cb) {
 let _memRules = null;
 
 function getCachedRules(cb) {
-    if (_memRules) { cb(_memRules); return; }
+    _diag.step("getCachedRules:enter");
+    if (_memRules) { _diag.step("getCachedRules:memory-hit"); cb(_memRules); return; }
     _storageGet(CONFIG.RULES_CACHE_KEY, CONFIG.RULES_CACHE_TTL_MS, function (rules) {
-        if (rules) _memRules = rules;
+        if (rules) {
+            _memRules = rules;
+            _diag.step("getCachedRules:storage-hit",
+                "rules=" + (((rules && rules.rulesList) || []).length));
+        } else {
+            _diag.step("getCachedRules:miss");
+        }
         cb(rules);
     });
 }
 
 function setCachedRules(rules, cb) {
+    _diag.step("setCachedRules:enter",
+        "rules=" + (((rules && rules.rulesList) || []).length));
     _memRules = rules;
     _storageSet(CONFIG.RULES_CACHE_KEY, rules, cb || function () { });
 }
@@ -6916,34 +7040,38 @@ function setCachedRules(rules, cb) {
 // ─── Per-signatureId HTML cache ───────────────────────────────────────────────
 
 function getSigById(signatureId, cb) {
+    _diag.step("getSigById:enter", "id=" + signatureId);
     _storageGet(CONFIG.SIG_BY_ID_CACHE_KEY, null, function (map) {
-        if (!map) { cb(null); return; }
+        if (!map) { _diag.step("getSigById:no-map"); cb(null); return; }
         const entry = map[String(signatureId)];
-        if (!entry) { cb(null); return; }
+        if (!entry) { _diag.step("getSigById:no-entry", "id=" + signatureId); cb(null); return; }
         if (Date.now() - entry.ts > CONFIG.SIG_BY_ID_TTL_MS) {
-            _diag.warn("getSigById: TTL expired for id=" + signatureId);
+            _diag.step("getSigById:ttl-expired", "id=" + signatureId);
             cb(null);
             return;
         }
+        _diag.step("getSigById:hit", "id=" + signatureId + " len=" + ((entry.html || "").length));
         cb(entry.html || null);
     });
 }
 
 function setSigById(signatureId, html, cb) {
+    _diag.step("setSigById:enter", "id=" + signatureId);
     _storageGet(CONFIG.SIG_BY_ID_CACHE_KEY, null, function (map) {
         const m = map || {};
         m[String(signatureId)] = { html: html, ts: Date.now() };
         _storageSet(CONFIG.SIG_BY_ID_CACHE_KEY, m, cb || function () { });
-        _diag.info("setSigById: cached id=" + signatureId);
+        _diag.step("setSigById:cached", "id=" + signatureId);
     });
 }
 
 // ─── XHR helper ───────────────────────────────────────────────────────────────
 
 function xhrGet(url, headers, cb) {
+    _diag.step("xhrGet:enter", url);
     let xhr;
     try { xhr = new XMLHttpRequest(); }
-    catch (e) { _diag.error("XHR construct failed: " + e.message); cb(null); return; }
+    catch (e) { _diag.step("xhrGet:construct-failed", e.message); cb(null); return; }
 
     try {
         xhr.open("GET", url, true);
@@ -6953,23 +7081,25 @@ function xhrGet(url, headers, cb) {
                 xhr.setRequestHeader(k, headers[k]);
             }
         }
-    } catch (e) { _diag.error("xhr.open threw: " + e.message); cb(null); return; }
+        _diag.step("xhrGet:opened", "timeout=" + CONFIG.XHR_TIMEOUT_MS + "ms");
+    } catch (e) { _diag.step("xhrGet:open-threw", e.message); cb(null); return; }
 
     xhr.onreadystatechange = function () {
         if (xhr.readyState !== 4) return;
-        _diag.info("XHR status=" + xhr.status + " url=" + url);
+        _diag.step("xhrGet:readyState4", "status=" + xhr.status + " len=" +
+            ((xhr.responseText || "").length) + " url=" + url);
         if (xhr.status >= 200 && xhr.status < 300) {
             cb(xhr.responseText);
         } else {
-            _diag.warn("XHR non-2xx: " + xhr.status);
+            _diag.step("xhrGet:non-2xx", "status=" + xhr.status);
             cb(null);
         }
     };
-    xhr.ontimeout = function () { _diag.warn("XHR timeout: " + url); cb(null); };
-    xhr.onerror = function () { _diag.error("XHR network error: " + url); cb(null); };
+    xhr.ontimeout = function () { _diag.step("xhrGet:timeout", url); cb(null); };
+    xhr.onerror = function () { _diag.step("xhrGet:network-error", url); cb(null); };
 
-    try { xhr.send(); }
-    catch (e) { _diag.error("xhr.send threw: " + e.message); cb(null); }
+    try { xhr.send(); _diag.step("xhrGet:sent"); }
+    catch (e) { _diag.step("xhrGet:send-threw", e.message); cb(null); }
 }
 
 // ─── Platform helpers ─────────────────────────────────────────────────────────
@@ -6991,15 +7121,20 @@ function getUserEmail() {
 
 function showNotification(item, message, type) {
     try {
-        if (!item || typeof item.notificationMessages.replaceAsync !== "function") return;
+        if (!item || !item.notificationMessages ||
+            typeof item.notificationMessages.replaceAsync !== "function") {
+            _diag.step("showNotification:unavailable");
+            return;
+        }
         const msg = message.length > 140 ? message.slice(0, 137) + "..." : message;
         const details = { type: type || "informationalMessage", message: msg, icon: "none", persistent: false };
         item.notificationMessages.replaceAsync(CONFIG.NOTIF_KEY, details, function (r) {
             if (r.status !== "succeeded") {
+                _diag.step("showNotification:replace-failed-adding");
                 item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, function () { });
             }
         });
-    } catch (e) { _diag.warn("showNotification threw: " + e.message); }
+    } catch (e) { _diag.step("showNotification:threw", e.message); }
 }
 
 function removeNotification(item) {
@@ -7010,19 +7145,27 @@ function removeNotification(item) {
 // ─── Manual override (taskpane selection) ─────────────────────────────────────
 
 function loadCustomProps(item, cb) {
-    if (!item || typeof item.loadCustomPropertiesAsync !== "function") { cb(null); return; }
+    _diag.step("loadCustomProps:enter");
+    if (!item || typeof item.loadCustomPropertiesAsync !== "function") {
+        _diag.step("loadCustomProps:unavailable");
+        cb(null);
+        return;
+    }
     try {
         item.loadCustomPropertiesAsync(function (res) {
+            _diag.step("loadCustomProps:callback", "status=" + res.status);
             cb(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null);
         });
-    } catch (e) { _diag.warn("loadCustomProps threw: " + e.message); cb(null); }
+    } catch (e) { _diag.step("loadCustomProps:threw", e.message); cb(null); }
 }
 
 function getManualOverride(item, cb) {
+    _diag.step("getManualOverride:enter");
     loadCustomProps(item, function (props) {
         let id = null;
         try { id = props ? props.get(CONFIG.MANUAL_OVERRIDE_PROP) : null; }
         catch (_) { id = null; }
+        _diag.step("getManualOverride:result", "id=" + (id || "NONE"));
         cb(id ? String(id) : null);
     });
 }
@@ -7030,170 +7173,170 @@ function getManualOverride(item, cb) {
 // Resolves an override id to HTML: "default" → cached default sig,
 // otherwise cache-first then network fallback for a rule signature.
 function resolveOverrideHtml(overrideId, cb) {
+    _diag.step("resolveOverrideHtml:enter", "id=" + overrideId);
     if (overrideId === "default") {
+        _diag.step("resolveOverrideHtml:default-branch");
         getCachedSignature(cb);
         return;
     }
+    _diag.step("resolveOverrideHtml:by-id-branch");
     getOrFetchSignatureById(overrideId, cb);
 }
 
 // ─── Guarded event.completed ──────────────────────────────────────────────────
+//  Flushes the diagnostic trace BEFORE completing, on every exit path,
+//  including the timeout path. The timer fires early by DIAG_FLUSH_BUDGET_MS
+//  so the body write has room to land before Outlook tears down the runtime.
 
-function makeGuardedEvent(event, timeoutMs) {
+function makeGuardedEvent(event, timeoutMs, itemForDiag) {
     let done = false;
-    let completedRequested = false;
+    const budget = CONFIG.DIAG_ENABLED ? CONFIG.DIAG_FLUSH_BUDGET_MS : 0;
+    const fireAt = Math.max(500, timeoutMs - budget);
+
+    _diag.step("makeGuardedEvent:armed", "timeoutMs=" + timeoutMs + " fireAt=" + fireAt);
 
     const timer = setTimeout(function () {
         if (done) return;
-
-        _diag.warn(
-            "Guard timeout (" +
-            timeoutMs +
-            "ms) — forcing complete"
-        );
-
+        _diag.step("guard:TIMEOUT-FORCING-COMPLETE",
+            "budget=" + fireAt + "ms lastStep=" + _diag.lastStep());
         complete();
-    }, timeoutMs);
+    }, fireAt);
 
     function complete(opts) {
         if (done) return;
+        done = true;
+        clearTimeout(timer);
 
-        if (completedRequested) return;
+        _diag.step("guard:complete", "opts=" + JSON.stringify(opts || null));
 
-        completedRequested = true;
+        const item = itemForDiag || _safeGetItem();
+        notifyLastStep(item);
 
-        const finish = function () {
-            if (done) return;
-
-            done = true;
-            clearTimeout(timer);
-
-            try {
-                if (opts) {
-                    event.completed(opts);
-                } else {
-                    event.completed();
-                }
-            } catch (e) {
-                _diag.error(
-                    "event.completed threw: " +
-                    e.message
-                );
-            }
-        };
-
-        const item = _safeGetItem();
-
-        if (CONFIG.DIAG_ENABLED && item) {
-            writeDiagnostics(item, finish);
-        } else {
-            finish();
-        }
+        flushDiagnostics(item, function () {
+            try { if (opts) event.completed(opts); else event.completed(); }
+            catch (e) { _diag.error("event.completed threw: " + e.message); }
+        });
     }
 
     return {
-        completed: complete
+        completed: complete,
+        setItem: function (i) { itemForDiag = i; }
     };
 }
 
 // ─── Backend fetchers ─────────────────────────────────────────────────────────
 
 function fetchDefaultSignature(cb) {
+    _diag.step("fetchDefaultSignature:enter");
     const email = getUserEmail();
-    if (!email) { _diag.error("fetchDefaultSignature: no email"); cb(null); return; }
+    if (!email) { _diag.step("fetchDefaultSignature:no-email"); cb(null); return; }
 
     const encrypted = encryptEmail(email);
-    if (!encrypted) { _diag.error("fetchDefaultSignature: encrypt failed"); cb(null); return; }
+    if (!encrypted) { _diag.step("fetchDefaultSignature:encrypt-failed"); cb(null); return; }
 
     const url = CONFIG.BASE_URL + "/html/outlook/get-active";
     const headers = { "username": encrypted, "X-Platform": getXPlatform() };
 
-    _diag.info("fetchDefaultSignature: GET " + url);
+    _diag.step("fetchDefaultSignature:request", url);
 
     xhrGet(url, headers, function (raw) {
-        if (!raw) { cb(null); return; }
+        if (!raw) { _diag.step("fetchDefaultSignature:empty-response"); cb(null); return; }
 
         const plaintext = decryptResponse(raw);
-        if (!plaintext) { _diag.error("fetchDefaultSignature: decrypt failed"); cb(null); return; }
+        if (!plaintext) { _diag.step("fetchDefaultSignature:decrypt-failed"); cb(null); return; }
 
         let parsed;
         try { parsed = JSON.parse(plaintext); }
-        catch (e) { _diag.error("fetchDefaultSignature: JSON parse error: " + e.message); cb(null); return; }
+        catch (e) { _diag.step("fetchDefaultSignature:json-parse-failed", e.message); cb(null); return; }
 
         const html = parsed && parsed.html;
-        if (!html) { _diag.warn("fetchDefaultSignature: no html field"); cb(null); return; }
+        if (!html) { _diag.step("fetchDefaultSignature:no-html-field"); cb(null); return; }
 
-        _diag.info("fetchDefaultSignature: success, length=" + html.length);
+        _diag.step("fetchDefaultSignature:success", "len=" + html.length);
         cb(html);
     });
 }
 
 function fetchRulesConfig(cb) {
+    _diag.step("fetchRulesConfig:enter");
     const email = getUserEmail();
-    if (!email) { cb(null); return; }
+    if (!email) { _diag.step("fetchRulesConfig:no-email"); cb(null); return; }
 
     const encrypted = encryptEmail(email);
-    if (!encrypted) { cb(null); return; }
+    if (!encrypted) { _diag.step("fetchRulesConfig:encrypt-failed"); cb(null); return; }
 
     const url = CONFIG.BASE_URL + "/rules-config/get-active";
     const headers = { "Content-Type": "application/json", "username": encrypted, "X-Platform": getXPlatform() };
 
+    _diag.step("fetchRulesConfig:request", url);
+
     xhrGet(url, headers, function (raw) {
-        if (!raw) { cb(null); return; }
+        if (!raw) { _diag.step("fetchRulesConfig:empty-response"); cb(null); return; }
 
         let parsed;
         try { parsed = JSON.parse(raw); }
-        catch (e) { _diag.error("fetchRulesConfig: JSON parse: " + e.message); cb(null); return; }
+        catch (e) { _diag.step("fetchRulesConfig:json-parse-failed", e.message); cb(null); return; }
 
         const rulesJson = parsed && parsed.rulesJson;
-        if (!rulesJson) { _diag.warn("fetchRulesConfig: no rulesJson field"); cb(null); return; }
+        if (!rulesJson) { _diag.step("fetchRulesConfig:no-rulesJson-field"); cb(null); return; }
+
+        _diag.step("fetchRulesConfig:success",
+            "rules=" + (((rulesJson && rulesJson.rulesList) || []).length));
 
         setCachedRules(rulesJson, function () {
-            _diag.info("fetchRulesConfig: cached");
+            _diag.step("fetchRulesConfig:cached");
         });
         cb(rulesJson);
     });
 }
 
 function fetchSignatureById(signatureId, cb) {
+    _diag.step("fetchSignatureById:enter", "id=" + signatureId);
     const email = getUserEmail();
-    if (!email) { cb(null); return; }
+    if (!email) { _diag.step("fetchSignatureById:no-email"); cb(null); return; }
 
     const encrypted = encryptEmail(email);
-    if (!encrypted) { cb(null); return; }
+    if (!encrypted) { _diag.step("fetchSignatureById:encrypt-failed"); cb(null); return; }
 
     const url = CONFIG.BASE_URL + "/rules-config/get/" + signatureId;
     const headers = { "username": encrypted, "X-Platform": getXPlatform() };
 
-    _diag.info("fetchSignatureById: id=" + signatureId);
+    _diag.step("fetchSignatureById:request", url);
 
     xhrGet(url, headers, function (raw) {
-        if (!raw) { cb(null); return; }
+        if (!raw) { _diag.step("fetchSignatureById:empty-response", "id=" + signatureId); cb(null); return; }
 
         let parsed;
-        try { parsed = JSON.parse(raw); }
+        try {
+            parsed = JSON.parse(raw);
+            _diag.step("fetchSignatureById:parsed-plain");
+        }
         catch (e) {
+            _diag.step("fetchSignatureById:plain-parse-failed-trying-decrypt");
             const pt = decryptResponse(raw);
             try { parsed = pt ? JSON.parse(pt) : null; }
             catch (_) { parsed = null; }
+            _diag.step("fetchSignatureById:decrypt-parse", parsed ? "ok" : "failed");
         }
 
         const html = parsed && parsed.html;
-        if (!html) { _diag.warn("fetchSignatureById: no html for id=" + signatureId); cb(null); return; }
+        if (!html) { _diag.step("fetchSignatureById:no-html", "id=" + signatureId); cb(null); return; }
 
+        _diag.step("fetchSignatureById:success", "id=" + signatureId + " len=" + html.length);
         setSigById(signatureId, html, function () { });
         cb(html);
     });
 }
 
 function getOrFetchSignatureById(signatureId, cb) {
+    _diag.step("getOrFetchSignatureById:enter", "id=" + signatureId);
     getSigById(signatureId, function (cached) {
         if (cached) {
-            _diag.info("getOrFetchSignatureById: cache hit id=" + signatureId);
+            _diag.step("getOrFetchSignatureById:cache-hit", "id=" + signatureId);
             cb(cached);
             return;
         }
-        _diag.info("getOrFetchSignatureById: cache miss, fetching id=" + signatureId);
+        _diag.step("getOrFetchSignatureById:cache-miss-fetching", "id=" + signatureId);
         fetchSignatureById(signatureId, cb);
     });
 }
@@ -7205,26 +7348,37 @@ function getDomain(email) {
     return at === -1 ? "" : email.slice(at + 1).toLowerCase();
 }
 
-function getRecipientsAsync(field, cb) {
-    if (typeof field.getAsync !== "function") { cb([]); return; }
+function getRecipientsAsync(field, label, cb) {
+    _diag.step("getRecipientsAsync:enter", label);
+    if (!field || typeof field.getAsync !== "function") {
+        _diag.step("getRecipientsAsync:unavailable", label);
+        cb([]);
+        return;
+    }
     field.getAsync(function (result) {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
+            _diag.step("getRecipientsAsync:ok", label + " count=" + ((result.value || []).length));
             cb(result.value || []);
         } else {
+            _diag.step("getRecipientsAsync:failed",
+                label + " err=" + (result.error && result.error.message));
             cb([]);
         }
     });
 }
 
 function getAllRecipientEmails(item, cb) {
-    getRecipientsAsync(item.to, function (toList) {
-        getRecipientsAsync(item.cc, function (ccList) {
+    _diag.step("getAllRecipientEmails:enter");
+    getRecipientsAsync(item.to, "to", function (toList) {
+        getRecipientsAsync(item.cc, "cc", function (ccList) {
             const all = [];
             const seen = {};
             (toList || []).concat(ccList || []).forEach(function (r) {
                 const e = (r.emailAddress || "").toLowerCase();
                 if (e && !seen[e]) { seen[e] = true; all.push(e); }
             });
+            _diag.step("getAllRecipientEmails:done",
+                "unique=" + all.length + " [" + all.join(",") + "]");
             cb(all);
         });
     });
@@ -7256,7 +7410,7 @@ function contextMatches(ruleContext, composeType) {
     const rc = ruleContext.toLowerCase();
     if (rc === "all") return true;
     if (composeType === null || composeType === undefined) {
-        _diag.warn("contextMatches: null composeType — conservative fallback");
+        _diag.step("contextMatches:null-composeType", "conservative fallback → false");
         return false;
     }
     return rc === composeType.toLowerCase();
@@ -7265,48 +7419,60 @@ function contextMatches(ruleContext, composeType) {
 // ─── Compose type detection with fallbacks ───────────────────────────────────
 
 function detectComposeType(item, cb) {
+    _diag.step("detectComposeType:enter");
     if (typeof item.getComposeTypeAsync === "function") {
         item.getComposeTypeAsync(function (result) {
             if (result.status === Office.AsyncResultStatus.Succeeded) {
                 const raw = ((result.value && result.value.composeType) || "").toLowerCase();
-                _diag.info("getComposeTypeAsync raw=" + raw);
+                _diag.step("detectComposeType:getComposeTypeAsync-ok", "raw=" + raw);
                 if (raw === "reply" || raw === "forward") { cb("reply"); return; }
                 if (raw === "newmail") { cb("compose"); return; }
+                _diag.step("detectComposeType:unrecognised-raw", raw);
+            } else {
+                _diag.step("detectComposeType:getComposeTypeAsync-failed",
+                    result.error && result.error.message);
             }
             _trySubjectFallback(item, cb);
         });
         return;
     }
+    _diag.step("detectComposeType:getComposeTypeAsync-unavailable");
     _trySubjectFallback(item, cb);
 }
 
 function _trySubjectFallback(item, cb) {
+    _diag.step("_trySubjectFallback:enter");
     if (typeof item.subject !== "undefined" && typeof item.subject.getAsync === "function") {
         item.subject.getAsync(function (res) {
             if (res.status === Office.AsyncResultStatus.Succeeded) {
                 const subj = (res.value || "").toLowerCase().trim();
+                _diag.step("_trySubjectFallback:subject-read", "subj=" + subj.slice(0, 40));
                 if (subj.indexOf("re:") === 0 || subj.indexOf("fw:") === 0 || subj.indexOf("fwd:") === 0) {
-                    _diag.info("detectComposeType: reply/forward via subject prefix");
+                    _diag.step("_trySubjectFallback:matched-prefix", "→ reply");
                     cb("reply");
                     return;
                 }
+            } else {
+                _diag.step("_trySubjectFallback:subject-read-failed");
             }
             _tryInReplyToFallback(item, cb);
         });
         return;
     }
+    _diag.step("_trySubjectFallback:unavailable");
     _tryInReplyToFallback(item, cb);
 }
 
 function _tryInReplyToFallback(item, cb) {
+    _diag.step("_tryInReplyToFallback:enter");
     try {
         if (item.inReplyToId) {
-            _diag.info("detectComposeType: reply/forward via inReplyToId");
+            _diag.step("_tryInReplyToFallback:has-inReplyToId", "→ reply");
             cb("reply");
             return;
         }
-    } catch (e) { }
-    _diag.info("detectComposeType: defaulting to compose");
+    } catch (e) { _diag.step("_tryInReplyToFallback:threw", e.message); }
+    _diag.step("_tryInReplyToFallback:default", "→ compose");
     cb("compose");
 }
 
@@ -7317,12 +7483,13 @@ function getComposeType(item, cb) {
 // ─── findMatchingRule ────────────────────────────────────────────────────────
 
 function findMatchingRule(item, rules, cb) {
+    _diag.step("findMatchingRule:enter");
     const senderEmail = getUserEmail();
     const senderDomain = getDomain(senderEmail);
 
     getAllRecipientEmails(item, function (emails) {
         if (emails.length === 0) {
-            _diag.warn("findMatchingRule: no recipients — fallback to default");
+            _diag.step("findMatchingRule:no-recipients", "→ fallback to default");
             cb(null);
             return;
         }
@@ -7338,19 +7505,20 @@ function findMatchingRule(item, rules, cb) {
             else hasExternal = true;
         });
 
+        _diag.step("findMatchingRule:recipients-classified",
+            "internal=" + hasInternal + " external=" + hasExternal +
+            " domains=" + recipientDomains.join(","));
+
         getComposeType(item, function (composeType) {
             const ruleList = ((rules && rules.rulesList) || [])
                 .filter(function (r) { return r.enabled; })
                 .sort(function (a, b) { return a.priority - b.priority; });
 
-            _diag.info("findMatchingRule:"
-                + " senderEmail=" + senderEmail
+            _diag.step("findMatchingRule:evaluating",
+                "senderEmail=" + senderEmail
                 + " senderDomain=" + senderDomain
                 + " composeType=" + composeType
-                + " hasInternal=" + hasInternal
-                + " hasExternal=" + hasExternal
-                + " recipDomains=" + recipientDomains.join(",")
-                + " totalRules=" + ruleList.length);
+                + " enabledRules=" + ruleList.length);
 
             let matched = null;
             for (let i = 0; i < ruleList.length; i++) {
@@ -7359,13 +7527,14 @@ function findMatchingRule(item, rules, cb) {
                 const contextOk = contextMatches(r.context, composeType);
                 const recipOk = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
 
-                _diag.info(
-                    (senderOk && contextOk && recipOk ? ">>> MATCH" : "    skip ") +
-                    " | priority=" + r.priority +
-                    " | sender(ok=" + senderOk + ")" +
-                    " | context=" + r.context + "(ok=" + contextOk + ")" +
-                    " | recipientType=" + r.recipientType + "(ok=" + recipOk + ")" +
-                    " | sigId=" + (r.signatureId || "NULL")
+                _diag.step(
+                    "findMatchingRule:rule[" + i + "]" +
+                    (senderOk && contextOk && recipOk ? " >>> MATCH" : " skip"),
+                    "priority=" + r.priority +
+                    " sender(ok=" + senderOk + ")" +
+                    " context=" + r.context + "(ok=" + contextOk + ")" +
+                    " recipientType=" + r.recipientType + "(ok=" + recipOk + ")" +
+                    " sigId=" + (r.signatureId || "NULL")
                 );
 
                 if (senderOk && contextOk && recipOk) {
@@ -7374,8 +7543,8 @@ function findMatchingRule(item, rules, cb) {
                 }
             }
 
-            if (matched) _diag.info("findMatchingRule: winner sigId=" + matched.signatureId);
-            else _diag.warn("findMatchingRule: no rule matched");
+            if (matched) _diag.step("findMatchingRule:winner", "sigId=" + matched.signatureId);
+            else _diag.step("findMatchingRule:no-match");
             cb(matched);
         });
     });
@@ -7384,22 +7553,10 @@ function findMatchingRule(item, rules, cb) {
 // ─── Signature injection ──────────────────────────────────────────────────────
 
 function writeSignature(item, html, onDone) {
+    _diag.step("writeSignature:enter", "len=" + ((html || "").length));
 
-    _diag.info(
-        "writeSignature: starting setSignatureAsync, htmlLength=" +
-        (html ? html.length : 0)
-    );
-
-    if (!item || !item.body) {
-        _diag.error("writeSignature: item.body unavailable");
-        onDone(false);
-        return;
-    }
-
-    if (typeof item.body.setSignatureAsync !== "function") {
-        _diag.error(
-            "writeSignature: setSignatureAsync is NOT available"
-        );
+    if (!item || !item.body || typeof item.body.setSignatureAsync !== "function") {
+        _diag.step("writeSignature:setSignatureAsync-UNAVAILABLE");
 
         showNotification(
             item,
@@ -7411,120 +7568,36 @@ function writeSignature(item, html, onDone) {
         return;
     }
 
-    try {
+    item.body.setSignatureAsync(
+        html,
+        { coercionType: Office.CoercionType.Html },
+        function (r) {
+            if (r.status === Office.AsyncResultStatus.Succeeded) {
+                _diag.step("writeSignature:setSignatureAsync-SUCCESS");
+                onDone(true);
+            } else {
+                _diag.step("writeSignature:setSignatureAsync-FAILED",
+                    (r.error && r.error.message) || "unknown");
 
-        item.body.setSignatureAsync(
-            html,
-            {
-                coercionType: Office.CoercionType.Html
-            },
-            function (r) {
-
-                _diag.info(
-                    "setSignatureAsync callback status=" +
-                    r.status
+                showNotification(
+                    item,
+                    "Signature could not be applied. Please contact Admin.",
+                    "errorMessage"
                 );
 
-                if (r.status === Office.AsyncResultStatus.Succeeded) {
-
-                    _diag.info(
-                        "setSignatureAsync SUCCESS"
-                    );
-
-                    onDone(true);
-
-                } else {
-
-                    const errorCode =
-                        r.error && r.error.code
-                            ? r.error.code
-                            : "UNKNOWN";
-
-                    const errorMessage =
-                        r.error && r.error.message
-                            ? r.error.message
-                            : "Unknown Office error";
-
-                    _diag.error(
-                        "setSignatureAsync FAILED" +
-                        " | code=" + errorCode +
-                        " | message=" + errorMessage
-                    );
-
-                    showNotification(
-                        item,
-                        "Signature could not be applied. Please contact Admin.",
-                        "errorMessage"
-                    );
-
-                    onDone(false);
-                }
+                onDone(false);
             }
-        );
-
-    } catch (e) {
-
-        _diag.error(
-            "setSignatureAsync THREW" +
-            " | name=" + e.name +
-            " | message=" + e.message +
-            " | stack=" + (e.stack || "")
-        );
-
-        onDone(false);
-    }
-}
-
-function writeDiagnostics(item, onDone) {
-    if (!CONFIG.DIAG_ENABLED) {
-        onDone();
-        return;
-    }
-
-    if (!item || !item.body || typeof item.body.prependAsync !== "function") {
-        _diag.error("writeDiagnostics: prependAsync not available");
-        onDone();
-        return;
-    }
-
-    const diagnosticHtml = _diag.html();
-
-    if (!diagnosticHtml) {
-        onDone();
-        return;
-    }
-
-    try {
-        item.body.prependAsync(
-            diagnosticHtml,
-            {
-                coercionType: Office.CoercionType.Html
-            },
-            function (result) {
-
-                if (result.status === Office.AsyncResultStatus.Succeeded) {
-                    _diag.info("writeDiagnostics: diagnostic block inserted");
-                } else {
-                    _diag.error(
-                        "writeDiagnostics failed: " +
-                        ((result.error && result.error.message) || "Unknown error")
-                    );
-                }
-
-                onDone();
-            }
-        );
-    } catch (e) {
-        _diag.error("writeDiagnostics threw: " + e.message);
-        onDone();
-    }
+        }
+    );
 }
 
 // ─── Orchestration helpers ────────────────────────────────────────────────────
 
 function injectSignature(item, html, guarded) {
+    _diag.step("injectSignature:enter", "len=" + ((html || "").length));
     showNotification(item, "Applying signature...", "informationalMessage");
     writeSignature(item, html, function (ok) {
+        _diag.step("injectSignature:written", "ok=" + ok);
         if (ok) {
             removeNotification(item);
             setTimeout(function () { removeNotification(item); }, 3000);
@@ -7536,24 +7609,26 @@ function injectSignature(item, html, guarded) {
 }
 
 function injectDefaultSignature(item, guarded) {
+    _diag.step("injectDefaultSignature:enter");
     showNotification(item, "Fetching signature...", "informationalMessage");
 
     fetchDefaultSignature(function (html) {
         if (html) {
+            _diag.step("injectDefaultSignature:fetched");
             setCachedSignature(html, function () {
-                _diag.info("injectDefaultSignature: fetched and cached");
+                _diag.step("injectDefaultSignature:cached");
                 injectSignature(item, html, guarded);
             });
             return;
         }
 
-        _diag.warn("injectDefaultSignature: fetch failed — checking cache");
+        _diag.step("injectDefaultSignature:fetch-failed", "→ checking cache");
         getCachedSignature(function (cached) {
             if (cached) {
-                _diag.info("injectDefaultSignature: using cached signature");
+                _diag.step("injectDefaultSignature:using-cache");
                 injectSignature(item, cached, guarded);
             } else {
-                _diag.error("injectDefaultSignature: no signature available");
+                _diag.step("injectDefaultSignature:NO-SIGNATURE-AVAILABLE");
                 showNotification(item, "Signature not available. Please contact Admin.", "errorMessage");
                 if (guarded) guarded.completed();
             }
@@ -7562,12 +7637,13 @@ function injectDefaultSignature(item, guarded) {
 }
 
 function injectRuleSignature(item, matched, guarded) {
-    _diag.info("injectRuleSignature: rule matched id=" + matched.signatureId);
+    _diag.step("injectRuleSignature:enter", "sigId=" + matched.signatureId);
     getOrFetchSignatureById(matched.signatureId, function (html) {
         if (html) {
+            _diag.step("injectRuleSignature:html-ready");
             injectSignature(item, html, guarded);
         } else {
-            _diag.warn("injectRuleSignature: rule html null — falling back to default");
+            _diag.step("injectRuleSignature:html-null", "→ falling back to default");
             injectDefaultSignature(item, guarded);
         }
     });
@@ -7576,19 +7652,20 @@ function injectRuleSignature(item, matched, guarded) {
 // ─── Prefetch rule signatures ─────────────────────────────────────────────────
 
 function prefetchAllRuleSignatures(rules) {
+    _diag.step("prefetchAllRuleSignatures:enter");
     const list = ((rules && rules.rulesList) || []).filter(function (r) {
         return r.enabled && r.signatureId != null && senderMatches(r);
     });
     if (list.length === 0) {
-        _diag.info("prefetchAllRuleSignatures: no sender-eligible rules");
+        _diag.step("prefetchAllRuleSignatures:none-eligible");
         return;
     }
 
-    _diag.info("prefetchAllRuleSignatures: " + list.length + " sender-eligible rule(s)");
+    _diag.step("prefetchAllRuleSignatures:eligible", list.length + " rule(s)");
 
     let i = 0;
     function next() {
-        if (i >= list.length) return;
+        if (i >= list.length) { _diag.step("prefetchAllRuleSignatures:done"); return; }
         const r = list[i++];
         getOrFetchSignatureById(r.signatureId, function () { next(); });
     }
@@ -7597,33 +7674,38 @@ function prefetchAllRuleSignatures(rules) {
 
 // =============================================================================
 //  applySignature (OnNewMessageCompose)
-//  Evaluates rules with current recipients and injects the correct signature.
 // =============================================================================
 
 function applySignature(event) {
-    const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
-    _diag.info("=== applySignature START ===");
+    _diag.step("applySignature:ENTRY");
+    const guarded = makeGuardedEvent(
+        event || { completed: function () { } },
+        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
+    );
 
     checkSessionAndClearCaches(function () {
         const item = _safeGetItem();
+        guarded.setItem(item);
+
         if (!item) {
-            _diag.error("applySignature: no item");
+            _diag.step("applySignature:NO-ITEM");
             guarded.completed();
             return;
         }
+        _diag.step("applySignature:item-ok");
 
-        // Get rules (cached or fresh)
         getCachedRules(function (rules) {
             if (rules) {
-                _diag.info("applySignature: rules cache valid");
+                _diag.step("applySignature:rules-from-cache");
                 _evaluateAndInject(item, rules, guarded);
             } else {
-                _diag.info("applySignature: rules cache missing/expired — fetching");
+                _diag.step("applySignature:rules-cache-empty", "→ fetching");
                 fetchRulesConfig(function (freshRules) {
                     if (freshRules) {
+                        _diag.step("applySignature:rules-fetched");
                         _evaluateAndInject(item, freshRules, guarded);
                     } else {
-                        _diag.warn("applySignature: rules fetch failed — using default");
+                        _diag.step("applySignature:rules-fetch-failed", "→ default");
                         injectDefaultSignature(item, guarded);
                     }
                 });
@@ -7637,22 +7719,24 @@ function applySignature(event) {
  * otherwise injects default. Then prefetches rule signatures in background.
  */
 function _evaluateAndInject(item, rules, guarded) {
-    // Prefetch rule signatures (fire-and-forget, no callback needed)
+    _diag.step("_evaluateAndInject:enter",
+        "rules=" + (((rules && rules.rulesList) || []).length));
+
     prefetchAllRuleSignatures(rules);
 
     getAllRecipientEmails(item, function (emails) {
         if (emails.length === 0) {
-            _diag.info("applySignature: no recipients yet — applying default");
+            _diag.step("_evaluateAndInject:no-recipients", "→ default");
             injectDefaultSignature(item, guarded);
             return;
         }
 
         findMatchingRule(item, rules, function (matched) {
             if (matched) {
-                _diag.info("applySignature: rule matched on open");
+                _diag.step("_evaluateAndInject:rule-matched", "sigId=" + matched.signatureId);
                 injectRuleSignature(item, matched, guarded);
             } else {
-                _diag.info("applySignature: no rule matched — applying default");
+                _diag.step("_evaluateAndInject:no-rule-matched", "→ default");
                 injectDefaultSignature(item, guarded);
             }
         });
@@ -7661,41 +7745,48 @@ function _evaluateAndInject(item, rules, guarded) {
 
 // =============================================================================
 //  onRecipientsChangedHandler (OnMessageRecipientsChanged)
-//  Fires every time the user changes To/Cc/Bcc recipients.
-//  Each invocation is a fresh JSRuntime — reads rules from storage cache.
 // =============================================================================
 
 function onRecipientsChangedHandler(event) {
-    const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
-    _diag.info("=== onRecipientsChangedHandler START ===");
+    _diag.step("onRecipientsChangedHandler:ENTRY");
+    const guarded = makeGuardedEvent(
+        event || { completed: function () { } },
+        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
+    );
 
     const item = _safeGetItem();
+    guarded.setItem(item);
+
     if (!item) {
-        _diag.warn("onRecipientsChangedHandler: no item");
+        _diag.step("onRecipientsChangedHandler:NO-ITEM");
         guarded.completed();
         return;
     }
+    _diag.step("onRecipientsChangedHandler:item-ok");
 
     getManualOverride(item, function (overrideId) {
         if (overrideId) {
-            _diag.info("onRecipientsChangedHandler: manual override active (id=" + overrideId + ") — skipping rule re-eval");
+            _diag.step("onRecipientsChangedHandler:manual-override-active",
+                "id=" + overrideId + " → skipping re-eval");
             guarded.completed();
             return;
         }
 
         getCachedRules(function (rules) {
             if (!rules) {
-                _diag.warn("onRecipientsChangedHandler: no rules cached — fetching");
+                _diag.step("onRecipientsChangedHandler:no-rules-cached", "→ fetching");
                 fetchRulesConfig(function (freshRules) {
                     if (freshRules) {
+                        _diag.step("onRecipientsChangedHandler:rules-fetched");
                         _evaluateAndInject(item, freshRules, guarded);
                     } else {
-                        _diag.error("onRecipientsChangedHandler: rules unavailable");
+                        _diag.step("onRecipientsChangedHandler:RULES-UNAVAILABLE");
                         guarded.completed();
                     }
                 });
                 return;
             }
+            _diag.step("onRecipientsChangedHandler:rules-from-cache");
             _evaluateAndInject(item, rules, guarded);
         });
     });
@@ -7703,69 +7794,75 @@ function onRecipientsChangedHandler(event) {
 
 // =============================================================================
 //  onSendHandler (OnMessageSend)
-//  Re-evaluates rules and injects correct signature before send.
 // =============================================================================
 
 function onSendHandler(event) {
+    _diagSendContext = true;
+    _diag.step("onSendHandler:ENTRY");
+
     const guarded = makeGuardedEvent(
         event || { completed: function () { } },
         CONFIG.SEND_HANDLER_TIMEOUT_MS
     );
-    _diag.info("=== onSendHandler START ===");
 
     const item = _safeGetItem();
+    guarded.setItem(item);
+
     if (!item) {
-        _diag.warn("onSendHandler: no item — allowing send");
+        _diag.step("onSendHandler:NO-ITEM", "→ allowing send");
         guarded.completed({ allowEvent: true });
         return;
     }
+    _diag.step("onSendHandler:item-ok");
 
-    // Manual taskpane selection wins at send time.
     getManualOverride(item, function (overrideId) {
         if (overrideId) {
-            _diag.info("onSendHandler: manual override active id=" + overrideId);
+            _diag.step("onSendHandler:manual-override-active", "id=" + overrideId);
             resolveOverrideHtml(overrideId, function (html) {
                 if (html) {
-                    _diag.info("onSendHandler: injecting manual override sig");
-                    writeSignature(item, html, function () {
+                    _diag.step("onSendHandler:injecting-override");
+                    writeSignature(item, html, function (ok) {
+                        _diag.step("onSendHandler:override-written", "ok=" + ok);
                         guarded.completed({ allowEvent: true });
                     });
                 } else {
-                    _diag.warn("onSendHandler: override id set but html unavailable — falling back to rules");
+                    _diag.step("onSendHandler:override-html-unavailable", "→ rule flow");
                     _onSendRuleFlow(item, guarded);
                 }
             });
             return;
         }
+        _diag.step("onSendHandler:no-override", "→ rule flow");
         _onSendRuleFlow(item, guarded);
     });
 }
 
-// Extracted rule/default flow (unchanged from the previous onSendHandler body).
 function _onSendRuleFlow(item, guarded) {
+    _diag.step("_onSendRuleFlow:enter");
     getCachedRules(function (rules) {
         if (!rules) {
-            _diag.warn("onSendHandler: no rules in cache — injecting default");
+            _diag.step("_onSendRuleFlow:no-rules-cached", "→ default");
             _injectDefaultAtSend(item, guarded);
             return;
         }
 
         findMatchingRule(item, rules, function (matched) {
             if (!matched) {
-                _diag.info("onSendHandler: no rule matched — injecting default");
+                _diag.step("_onSendRuleFlow:no-rule-matched", "→ default");
                 _injectDefaultAtSend(item, guarded);
                 return;
             }
 
-            _diag.info("onSendHandler: rule matched id=" + matched.signatureId);
+            _diag.step("_onSendRuleFlow:rule-matched", "sigId=" + matched.signatureId);
             getOrFetchSignatureById(matched.signatureId, function (html) {
                 if (html) {
-                    _diag.info("onSendHandler: injecting rule sig");
-                    writeSignature(item, html, function () {
+                    _diag.step("_onSendRuleFlow:injecting-rule-sig");
+                    writeSignature(item, html, function (ok) {
+                        _diag.step("_onSendRuleFlow:rule-sig-written", "ok=" + ok);
                         guarded.completed({ allowEvent: true });
                     });
                 } else {
-                    _diag.warn("onSendHandler: rule sig unavailable — fallback");
+                    _diag.step("_onSendRuleFlow:rule-sig-unavailable", "→ default");
                     _injectDefaultAtSend(item, guarded);
                 }
             });
@@ -7774,14 +7871,16 @@ function _onSendRuleFlow(item, guarded) {
 }
 
 function _injectDefaultAtSend(item, guarded) {
+    _diag.step("_injectDefaultAtSend:enter");
     getCachedSignature(function (cached) {
         if (!cached) {
-            _diag.warn("_injectDefaultAtSend: no cached default");
+            _diag.step("_injectDefaultAtSend:NO-CACHED-DEFAULT", "→ allowing send bare");
             guarded.completed({ allowEvent: true });
             return;
         }
-        _diag.info("_injectDefaultAtSend: injecting default sig");
-        writeSignature(item, cached, function () {
+        _diag.step("_injectDefaultAtSend:injecting");
+        writeSignature(item, cached, function (ok) {
+            _diag.step("_injectDefaultAtSend:written", "ok=" + ok);
             guarded.completed({ allowEvent: true });
         });
     });
@@ -7789,22 +7888,37 @@ function _injectDefaultAtSend(item, guarded) {
 
 // =============================================================================
 //  onFromChangedHandler (OnMessageFromChanged)
-//  Account switched — clear caches and re-evaluate with new sender context.
 // =============================================================================
 
 function onFromChangedHandler(event) {
-    const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
+    _diag.step("onFromChangedHandler:ENTRY");
+    const guarded = makeGuardedEvent(
+        event || { completed: function () { } },
+        CONFIG.COMPOSE_HANDLER_TIMEOUT_MS
+    );
 
     const item = _safeGetItem();
-    if (!item) { guarded.completed(); return; }
+    guarded.setItem(item);
 
-    _diag.info("onFromChangedHandler: account changed — clearing caches");
+    if (!item) {
+        _diag.step("onFromChangedHandler:NO-ITEM");
+        guarded.completed();
+        return;
+    }
+
+    _diag.step("onFromChangedHandler:clearing-caches");
 
     _memSig = null;
     _memRules = null;
     clearCachedSignature(function () {
         _storageRemove(CONFIG.RULES_CACHE_KEY, function () {
             fetchRulesConfig(function (rules) {
+                if (!rules) {
+                    _diag.step("onFromChangedHandler:rules-fetch-failed", "→ default");
+                    injectDefaultSignature(item, guarded);
+                    return;
+                }
+                _diag.step("onFromChangedHandler:rules-fetched");
                 _evaluateAndInject(item, rules, guarded);
             });
         });
@@ -7827,22 +7941,27 @@ function _safeGetItem() {
             Office.actions.associate("onSendHandler", onSendHandler);
             Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
             Office.actions.associate("onRecipientsChangedHandler", onRecipientsChangedHandler);
-            _diag.info("Handlers registered: applySignature, onSendHandler, onFromChangedHandler, onRecipientsChangedHandler");
+            _diag.step("registerHandlers:associated",
+                "applySignature, onSendHandler, onFromChangedHandler, onRecipientsChangedHandler");
         } catch (e) {
-            _diag.error("Office.actions.associate threw: " + e.message);
+            _diag.step("registerHandlers:associate-threw", e.message);
         }
     }
 
     if (typeof Office === "undefined") {
-        _diag.error("Office is undefined — JSRuntime load failed");
+        _diag.step("registerHandlers:OFFICE-UNDEFINED", "JSRuntime load failed");
         return;
     }
 
     Office.initialize = function () {
+        _diag.step("registerHandlers:Office.initialize-fired");
         doRegister();
     };
 
     if (Office.actions) {
+        _diag.step("registerHandlers:Office.actions-present-registering-immediately");
         doRegister();
+    } else {
+        _diag.step("registerHandlers:Office.actions-absent-waiting-for-initialize");
     }
 })();
