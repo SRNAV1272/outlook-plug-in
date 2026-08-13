@@ -7821,100 +7821,15 @@ function _safeGetItem() {
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 (function registerHandlers() {
-    // function doRegister() {
-    //     try {
-    //         Office.actions.associate("applySignature", applySignature);
-    //         Office.actions.associate("onSendHandler", onSendHandler);
-    //         Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
-    //         Office.actions.associate("onRecipientsChangedHandler", onRecipientsChangedHandler);
-    //         _diag.info("Handlers registered: applySignature, onSendHandler, onFromChangedHandler, onRecipientsChangedHandler");
-    //     } catch (e) {
-    //         _diag.error("Office.actions.associate threw: " + e.message);
-    //     }
-    // }
     function doRegister() {
         try {
-            _diag.info("========== doRegister START ==========");
-
-            const mailbox = Office?.context?.mailbox;
-
-            _diag.info(
-                "Office.context exists=" +
-                !!Office?.context
-            );
-
-            _diag.info(
-                "Office.context.mailbox exists=" +
-                !!mailbox
-            );
-
-            _diag.info(
-                "Office.context.mailbox.item exists=" +
-                !!mailbox?.item
-            );
-
-            _diag.info(
-                "host=" +
-                (Office?.context?.diagnostics?.host || "unknown")
-            );
-
-            _diag.info(
-                "platform=" +
-                (Office?.context?.diagnostics?.platform || "unknown")
-            );
-
-            _diag.info(
-                "version=" +
-                (Office?.context?.diagnostics?.version || "unknown")
-            );
-
-            Office.actions.associate(
-                "applySignature",
-                applySignature
-            );
-
-            _diag.info(
-                "associate applySignature SUCCESS"
-            );
-
-            Office.actions.associate(
-                "onSendHandler",
-                onSendHandler
-            );
-
-            _diag.info(
-                "associate onSendHandler SUCCESS"
-            );
-
-            Office.actions.associate(
-                "onFromChangedHandler",
-                onFromChangedHandler
-            );
-
-            _diag.info(
-                "associate onFromChangedHandler SUCCESS"
-            );
-
-            Office.actions.associate(
-                "onRecipientsChangedHandler",
-                onRecipientsChangedHandler
-            );
-
-            _diag.info(
-                "associate onRecipientsChangedHandler SUCCESS"
-            );
-
-            _diag.info(
-                "========== doRegister END =========="
-            );
-
+            Office.actions.associate("applySignature", applySignature);
+            Office.actions.associate("onSendHandler", onSendHandler);
+            Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
+            Office.actions.associate("onRecipientsChangedHandler", onRecipientsChangedHandler);
+            _diag.info("Handlers registered: applySignature, onSendHandler, onFromChangedHandler, onRecipientsChangedHandler");
         } catch (e) {
-            _diag.error(
-                "doRegister FAILED | " +
-                e.name +
-                " | " +
-                e.message
-            );
+            _diag.error("Office.actions.associate threw: " + e.message);
         }
     }
 
