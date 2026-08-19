@@ -8370,18 +8370,68 @@ function loadCustomProps(item, cb) {
     } catch (e) { _diag.step("loadCustomProps:threw", e.message); done(null); }
 }
 
+// Fire-and-forget: never on the critical path, and never inside the write's
+// settle callback — a second awaited round trip inside the send budget is a real
+// cost. The pane drops its own CustomProperties handle after every save, so it
+// picks this up on its next read.
+function setItemProps(item, kv) {
+    loadCustomProps(item, function (props) {
+        if (!props) return;
+        try {
+            for (const k in kv) {
+                if (!Object.prototype.hasOwnProperty.call(kv, k)) continue;
+                if (kv[k] === null) props.remove(k);
+                else props.set(k, String(kv[k]));
+            }
+            props.saveAsync(function (r) {
+                if (r.status !== Office.AsyncResultStatus.Succeeded) {
+                    _diag.step("setItemProps:save-failed", (r.error && r.error.message) || "?");
+                }
+            });
+        } catch (e) { _diag.step("setItemProps:threw", e.message); }
+    });
+}
+
+// function getManualOverride(item, cb) {
+//     loadCustomProps(item, function (props) {
+//         let id = null;
+//         try { id = props ? props.get(CONFIG.MANUAL_OVERRIDE_PROP) : null; }
+//         catch (_) { id = null; }
+//         _diag.step("getManualOverride", id ? "id=" + id : "none");
+//         cb(id ? String(id) : null);
+//     });
+// }
 function getManualOverride(item, cb) {
     loadCustomProps(item, function (props) {
         let id = null;
         try { id = props ? props.get(CONFIG.MANUAL_OVERRIDE_PROP) : null; }
         catch (_) { id = null; }
-        _diag.step("getManualOverride", id ? "id=" + id : "none");
-        cb(id ? String(id) : null);
+        const s = id == null ? "" : String(id).trim();
+        // An unresolvable pin would beat every rule and then fail to fetch,
+        // leaving whatever is already on the body. Treat it as no pin at all.
+        if (s === "" || s === "null" || s === "undefined") {
+            if (s !== "") _diag.step("getManualOverride:unresolvable-ignored", "id=" + s);
+            cb(null);
+            return;
+        }
+        _diag.step("getManualOverride", "id=" + s);
+        cb(s);
     });
 }
 
+// function resolveOverrideHtml(overrideId, cb) {
+//     if (overrideId === "default") {
+//         getCachedSignature(function (html) {
+//             if (html) { cb(html); return; }
+//             fetchDefaultSignature(cb);
+//         });
+//         return;
+//     }
+//     getOrFetchSignatureById(overrideId, cb);
+// }
+
 function resolveOverrideHtml(overrideId, cb) {
-    if (overrideId === "default") {
+    if (overrideId === CONFIG.DEFAULT_ID) {
         getCachedSignature(function (html) {
             if (html) { cb(html); return; }
             fetchDefaultSignature(cb);
@@ -8389,6 +8439,23 @@ function resolveOverrideHtml(overrideId, cb) {
         return;
     }
     getOrFetchSignatureById(overrideId, cb);
+}
+
+/**
+ * Apply a pinned signature. Goes through writeSignatureIfChanged, so a draft
+ * the pane already wrote correctly is verified and left alone — and one where
+ * the pane's body write failed gets repaired instead of being trusted.
+ * cb(true) = handled, cb(false) = could not resolve, caller should fall through.
+ */
+function applyOverride(item, overrideId, cb) {
+    resolveOverrideHtml(overrideId, function (html) {
+        if (!html) {
+            _diag.step("applyOverride:html-unavailable", "id=" + overrideId);
+            cb(false);
+            return;
+        }
+        writeSignatureIfChanged(item, html, "override:" + overrideId, function () { cb(true); });
+    });
 }
 
 // ─── Guarded event.completed ──────────────────────────────────────────────────
@@ -8889,10 +8956,22 @@ function escAttr(v) {
         .replace(/>/g, "&gt;");
 }
 
+// The decision key ("default", "rule:123", "override:123") is internal to this
+// file — it namespaces the last-applied record. The MARKER written into the body
+// must be the resolvable signature id, because the taskpane and the New Outlook
+// build both wrap with the bare id and only know the id. Marking "override:123"
+// makes every pane-applied signature verify as id-changed and get rewritten on
+// every activation. "default" has no prefix and passes through unchanged.
+function sigIdOf(sigKey) {
+    const s = String(sigKey == null ? "" : sigKey);
+    const c = s.indexOf(":");
+    return c === -1 ? s : s.slice(c + 1);
+}
+
 // A bare <div> with one data attribute: no id (would collide if a mail somehow
 // carried two), no class, no styling that could alter layout.
 function wrapSignature(html, sigKey) {
-    return "<div " + CONFIG.SIG_MARK_ATTR + "=\"" + escAttr(sigKey) + "\">" + html + "</div>";
+    return "<div " + CONFIG.SIG_MARK_ATTR + "=\"" + escAttr(sigIdOf(sigKey)) + "\">" + html + "</div>";
 }
 
 function sigDigest(html) {
@@ -8967,7 +9046,7 @@ function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
                 if (Object.prototype.hasOwnProperty.call(SIG_PROFILE, k)) opt[k] = SIG_PROFILE[k];
             }
             opt.markAttr = CONFIG.SIG_MARK_ATTR;
-            opt.sigId = sigKey;
+            opt.sigId = sigIdOf(sigKey);
 
             try {
                 // Classic writes through Word's HTML engine, which rewrites the
@@ -9041,6 +9120,10 @@ function writeSignature(item, html, sigKey, onDone) {
             function (r) {
                 if (r.status === Office.AsyncResultStatus.Succeeded) {
                     _diag.step("setSignatureAsync:success", "sigKey=" + sigKey);
+                    setItemProps(item, {
+                        [CONFIG.P_ACTIVE_SIG]: sigIdOf(sigKey),
+                        [CONFIG.P_SIG_DIGEST]: sigDigest(html)
+                    });
                     setLastApplied(item, sigKey, html ? html.length : 0, function () { settle(true); },
                         sigDigest(html));
                 } else {
@@ -9300,20 +9383,31 @@ function runPipeline(item, guarded, opts) {
     const options = opts || {};
 
     getManualOverride(item, function (overrideId) {
+        // if (overrideId) {
+        //     _diag.step("PIPELINE:manual-override-wins", "id=" + overrideId);
+        //     resolveOverrideHtml(overrideId, function (html) {
+        //         if (html) {
+        //             writeSignatureIfChanged(item, html, "override:" + overrideId, function () {
+        //                 guarded.completed(options.completeOpts);
+        //             });
+        //         } else {
+        //             _diag.step("PIPELINE:override-html-unavailable", "\u2192 falling through to default+rules");
+        //             _defaultThenRules(item, guarded, options);
+        //         }
+        //     });
+        //     return;
+        // }
+
         if (overrideId) {
             _diag.step("PIPELINE:manual-override-wins", "id=" + overrideId);
-            resolveOverrideHtml(overrideId, function (html) {
-                if (html) {
-                    writeSignatureIfChanged(item, html, "override:" + overrideId, function () {
-                        guarded.completed(options.completeOpts);
-                    });
-                } else {
-                    _diag.step("PIPELINE:override-html-unavailable", "\u2192 falling through to default+rules");
-                    _defaultThenRules(item, guarded, options);
-                }
+            applyOverride(item, overrideId, function (handled) {
+                if (handled) { guarded.completed(options.completeOpts); return; }
+                _diag.step("PIPELINE:override-unresolvable", "\u2192 falling through to default+rules");
+                _defaultThenRules(item, guarded, options);
             });
             return;
         }
+
         _defaultThenRules(item, guarded, options);
     });
 }
@@ -9439,9 +9533,19 @@ function onRecipientsChangedHandler(event) {
 
         resolveSender(item, function () {
             getManualOverride(item, function (overrideId) {
+                // if (overrideId) {
+                //     _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
+                //     guarded.completed();
+                //     return;
+                // }
                 if (overrideId) {
-                    _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
-                    guarded.completed();
+                    // Do not just skip: if the pane's body write failed, or the
+                    // user edited the pinned signature, the draft is wrong and
+                    // this is the only event that will notice before send.
+                    // writeSignatureIfChanged verifies first, so a clean draft
+                    // costs one body read and no write.
+                    _diag.step("onRecipientsChangedHandler:override-active-verifying", "id=" + overrideId);
+                    applyOverride(item, overrideId, function () { guarded.completed(); });
                     return;
                 }
 

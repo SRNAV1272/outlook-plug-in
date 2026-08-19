@@ -2296,6 +2296,17 @@ async function fetchSignatureById(id, encryptedMail) {
  *
  * @returns {Promise<{ html: string|null, source: "cache"|"network"|"none", unassigned: boolean }>}
  */
+// Two activations overlap on Windows/OWA, and prefetch races the evaluation.
+// Without this they all miss the cold cache and all fetch the same id.
+const _inFlight = new Map();
+
+function dedupe(key, make) {
+    const existing = _inFlight.get(key);
+    if (existing) { log(`joining in-flight fetch: ${key}`); return existing; }
+    const p = make().finally(() => _inFlight.delete(key));
+    _inFlight.set(key, p);
+    return p;
+}
 async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = null, silent = false } = {}) {
     const key = String(id);
     const budget = budgetMs ?? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
@@ -2320,12 +2331,28 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
     }
 
     try {
+        // const enc = await encryptEmail(userEmail);
+        // const { html, explicit, failure } = key === DEFAULT_ID
+        //     ? await withTimeout(fetchDefaultSignature(enc), budget, "default fetch")
+        //     : await withTimeout(fetchSignatureById(key, enc), budget, `sig fetch ${key}`);
+
+
         const enc = await encryptEmail(userEmail);
-        const { html, explicit, failure } = key === DEFAULT_ID
-            ? await withTimeout(fetchDefaultSignature(enc), budget, "default fetch")
-            : await withTimeout(fetchSignatureById(key, enc), budget, `sig fetch ${key}`);
+        const inner = dedupe(`sig:${key}`, () => (
+            key === DEFAULT_ID ? fetchDefaultSignature(enc) : fetchSignatureById(key, enc)
+        ).then((r) => {
+            // Cache from the inner promise: a fetch that overran the budget
+            // still warms the cache for the next activation instead of being
+            // discarded and refetched.
+            if (r.html) sigCache.set(key, r.html);
+            return r;
+        }));
+        const { html, explicit, failure } = await withTimeout(
+            inner, budget, key === DEFAULT_ID ? "default fetch" : `sig fetch ${key}`);
+
+
         if (html) {
-            sigCache.set(key, html);
+            // sigCache.set(key, html);
             return { html, source: "network", unassigned: false };
         }
         // Definitive empty answer = nothing is assigned server-side.
@@ -3055,9 +3082,30 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 
     const override = await getManualOverride(item);
     if (override) {
-        // The user chose this signature themselves; we have neither news nor a
-        // complaint. Leave the bar exactly as it is.
-        log("manual override active — leaving signature untouched:", override);
+        // The pane writes P_ACTIVE_SIG alongside the override, so these agreeing
+        // means the pinned signature is genuinely on the body and there is
+        // nothing to do or say. They disagree when the pane's body write failed,
+        // when a pre-contract pane pinned without wrapping, or when the write
+        // lost a race — in which case doing nothing leaves the draft carrying a
+        // signature nobody chose. Reapply through the normal path so the wrapper
+        // and digest end up consistent.
+        const activeNow = await getItemProp(item, P_ACTIVE_SIG);
+        if (activeNow && String(activeNow) === String(override)) {
+            log("manual override active and already on the body:", override);
+            return;
+        }
+        log("manual override active but body state unknown — reapplying:", override);
+        showLoading(item);
+        const rOv = await applyById(item, override, userEmail, seq, { revalidate: false });
+        // Snapshot is null on purpose: a manual choice is recipient-independent,
+        // and markActiveSignature removes the property, so send time re-evaluates
+        // instead of comparing against a snapshot that means nothing.
+        if (rOv.applied && isCurrent(seq)) {
+            await markActiveSignature(item, override, null, rOv.digest);
+        }
+        if (isCurrent(seq)) {
+            reportOutcome(item, rOv.applied ? "applied" : rOv.status === "deferred" ? "quiet" : "failed");
+        }
         return;
     }
 
@@ -3131,8 +3179,18 @@ async function decideSendId(item, userEmail) {
     // lucky match. "" (no recipients) IS comparable and IS persistable.
     const currentSnap = serializeRecipients(await readRecipientEmails(item));
 
+    // const override = await getManualOverride(item);
+    // if (override) return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+
     const override = await getManualOverride(item);
-    if (override) return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+    // A pinned id that cannot be resolved would take precedence over every rule
+    // and then fail to fetch, leaving the mail with whatever is already there.
+    // resolveSigHtml refuses these too, but by then the rules have been skipped.
+    if (override && String(override).trim() !== "" &&
+        String(override) !== "null" && String(override) !== "undefined") {
+        return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+    }
+    if (override) warn("ignoring an unresolvable manual override:", override);
 
     const [activeId, snapshot] = await Promise.all([
         getItemProp(item, P_ACTIVE_SIG),
@@ -3357,6 +3415,7 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         // straight through to roaming and matched the old account's rules.
         store.remove(K_SIG_CACHE, K_SIG_CACHE_LEGACY_DEFAULT);
         _sigMap = null; // v7.5: the parsed map mirrors K_SIG_CACHE — drop it too
+        _inFlight.clear();
         clearRulesCache();
         await markActiveSignature(item, null);
 
