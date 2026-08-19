@@ -1002,6 +1002,55 @@
 //  by network luck.
 //
 // -----------------------------------------------------------------------------
+//  CHANGES IN v7.5.2 — THE MANUAL PIN IS READ THE WAY CLASSIC READS IT
+//
+//  X. THE TASKPANE'S MANUAL OVERRIDE WAS INVISIBLE, AND THEN DELETED. The
+//     Classic build (event-handler-classic.js) calls loadCustomPropertiesAsync
+//     on every single read and writes item properties from exactly one place,
+//     additively. That is the whole reason a pane-applied signature stays put
+//     there. This build memoised ONE CustomProperties handle per item in a
+//     WeakMap for the runtime's entire life, and on Windows/OWA — one long-lived
+//     runtime shared by every activation — that produced two failures:
+//
+//       READ STALENESS. OnNewMessageCompose cached the bag before the user
+//       opened the pane. The pane wrote cardbyte_manual_sig_id through its own
+//       handle. The next OnMessageRecipientsChanged read the CACHED bag, saw no
+//       pin, evaluated the rules, and switched the signature — the reported
+//       "event-handler keeps overriding my choice".
+//
+//       WRITE CLOBBER. saveAsync serialises the whole in-memory bag, so
+//       markActiveSignature writing a stale one DELETED the pin from the item.
+//       After that even a correct read finds nothing, which is why the pin
+//       seemed to work once and then never again.
+//
+//     Mac and mobile were unaffected: a fresh WKWebView per activation leaves
+//     the WeakMap empty, accidentally matching Classic. Windows/OWA only.
+//
+//     Now: invalidateProps() at the top of all four entry points (fresh at the
+//     start of every activation) and getProps({fresh:true}) before every write
+//     (so no save can drop a key written since we loaded). Reads WITHIN one
+//     activation still share the handle — full per-read reloading would cost
+//     ~13 round trips and a cold Mac/mobile send budget cannot absorb that.
+//
+//  Y. THE PIN IS CHECKED BEFORE THE COMPOSE-TIME STATE RESET, as in Classic's
+//     runPipeline. applySignature cleared P_ACTIVE_SIG unconditionally, which
+//     forced a body rewrite every time a pinned draft was reopened.
+//
+//  Z. VALIDATION MOVED INTO getManualOverride, so both call sites agree: an
+//     unresolvable pin ("", "null", "undefined") is treated as no pin, instead
+//     of outranking every rule and then failing to fetch.
+//
+//  AA. OPTIMISATIONS. revalidate:false at compose (it fetched the same id again
+//     on every cache-hit apply, duplicating SIG_TTL_MS and bypassing the dedupe
+//     map); the in-flight dedupe key is account-scoped so a fetch for the
+//     previous identity cannot repopulate the new one's cache after a From
+//     change; the dead `html = html` self-assignment is gone.
+//
+//     UNCHANGED ON PURPOSE: every Mac/mobile fix (cold budgets, the recipient
+//     re-read retry, the roamed-id guard, DEFAULT_ID prefetch), the whole
+//     send-time verification and replacement path, and X_PLATFORM_MAP.
+//
+// -----------------------------------------------------------------------------
 //  CHANGES IN v7.5.1 — VERIFICATION IS SCOPED TO THE LIVE COMPOSE AREA
 //
 //  W. TAMPERING WAS NOT DETECTED ON REPLIES OR FORWARDS. A draft body is not
@@ -1315,7 +1364,7 @@
 //      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v7.5.1";
+const CB_VERSION = "v7.5.2";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -2068,7 +2117,31 @@ function describeRulesSource() {
 
 const _propsByItem = new WeakMap();
 
-function getProps(item) {
+/**
+ * v7.5.2. THE HANDLE IS NO LONGER TRUSTED ACROSS ACTIVATIONS OR ACROSS WRITES.
+ *
+ * The Classic build calls loadCustomPropertiesAsync on EVERY read, and that is
+ * why the taskpane's manual pin has always worked there. This build memoised one
+ * handle per item for the runtime's whole life, which on Windows/OWA (one
+ * long-lived runtime shared by every activation) broke the pin two ways:
+ *
+ *   READ STALENESS — OnNewMessageCompose cached the bag before the user opened
+ *   the pane. The pane then wrote cardbyte_manual_sig_id through its OWN handle.
+ *   The next OnMessageRecipientsChanged read the cached bag, saw no pin, and let
+ *   the rules switch the signature. That is the reported bug.
+ *
+ *   WRITE CLOBBER, worse — CustomProperties.saveAsync serialises the WHOLE
+ *   in-memory bag. Saving a stale one does not merely miss the pin, it DELETES
+ *   it from the item, permanently, so even a later correct read finds nothing.
+ *
+ * Reloading on every read (full Classic parity) would cost ~13 round trips per
+ * activation, which a cold Mac/mobile send budget cannot absorb. So: fresh at
+ * the START of every activation (invalidateProps in each entry point) and fresh
+ * before every WRITE, with reads inside one activation sharing that handle.
+ * Equivalent in effect — the Classic JSRuntime is itself new per activation.
+ */
+function getProps(item, { fresh = false } = {}) {
+    if (fresh) _propsByItem.delete(item);
     if (_propsByItem.has(item)) return _propsByItem.get(item);
     const p = officeAsync((cb) => item.loadCustomPropertiesAsync(cb), {
         ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS,
@@ -2078,6 +2151,11 @@ function getProps(item) {
     return p;
 }
 
+// Called once at the top of every entry point, BEFORE anything reads or writes.
+// One extra loadCustomPropertiesAsync per event, versus silently eating whatever
+// the taskpane wrote since the last activation.
+function invalidateProps(item) { if (item) _propsByItem.delete(item); }
+
 async function getItemProp(item, key) {
     try {
         const v = (await getProps(item))?.get(key);
@@ -2085,8 +2163,14 @@ async function getItemProp(item, key) {
     } catch (_) { return null; }
 }
 
+/**
+ * Loads a FRESH bag before mutating it, because saveAsync writes the whole bag
+ * back: any key the pane added since we last loaded would be dropped. The fresh
+ * handle stays cached afterwards, so reads later in this activation see what we
+ * just wrote without another round trip.
+ */
 async function setItemProps(item, kv) {
-    const props = await getProps(item);
+    const props = await getProps(item, { fresh: true });
     if (!props) return false;
     try {
         for (const [k, v] of Object.entries(kv)) {
@@ -2104,7 +2188,23 @@ async function setItemProps(item, kv) {
     }
 }
 
-const getManualOverride = (item) => getItemProp(item, P_MANUAL_SIG);
+/**
+ * The pinned signature id, or null. Classic parity: validation lives HERE, so
+ * every caller gets the same answer.
+ *
+ * An unresolvable pin ("", "null", "undefined" — a pane that passed a display id
+ * or a failed lookup) would otherwise outrank every rule and then fail to fetch,
+ * leaving the mail with whatever happened to be on it. Treated as no pin at all.
+ */
+async function getManualOverride(item) {
+    const raw = await getItemProp(item, P_MANUAL_SIG);
+    const s = raw == null ? "" : String(raw).trim();
+    if (s === "" || s === "null" || s === "undefined") {
+        if (s !== "") warn("ignoring an unresolvable manual override:", s);
+        return null;
+    }
+    return s;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ACTIVE SIGNATURE ID (+ recipient snapshot)
@@ -2338,7 +2438,10 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
 
 
         const enc = await encryptEmail(userEmail);
-        const inner = dedupe(`sig:${key}`, () => (
+        // Account-scoped: onFromChangedHandler clears the cache, but a fetch
+        // already in flight for the PREVIOUS identity would otherwise resolve
+        // afterwards and write that identity's HTML into the new one's cache.
+        const inner = dedupe(`sig:${String(userEmail).toLowerCase()}:${key}`, () => (
             key === DEFAULT_ID ? fetchDefaultSignature(enc) : fetchSignatureById(key, enc)
         ).then((r) => {
             // Cache from the inner promise: a fetch that overran the budget
@@ -3049,7 +3152,10 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
             timed(`applyById (${key}, detected-only)`, t0);
             return { applied: true, status: "detected", verdict: v.verdict, digest };
         }
-        if (somethingIsThere) html = html;   // ← new
+        // NOTE: TAMPER_TAG is deliberately NOT prepended here. Re-inserting is
+        // policy enforcement, not an accusation — and the user may have edited
+        // the signature on purpose. Prepend it only if the product wants a
+        // visible marker on the outgoing mail.
         if (!isCurrent(seq)) { log("stale write dropped after verification"); return nothing("stale"); }
     }
 
@@ -3139,7 +3245,13 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
     const targetId = rule ? String(rule.signatureId) : DEFAULT_ID;
     if (!isCurrent(seq)) { log("stale evaluation dropped"); return; }
 
-    const result = await applyById(item, targetId, userEmail, seq, { revalidate: true });
+    // v7.5.2: revalidate:false. This fired a fetch for the SAME id on every
+    // cache-hit apply — one guaranteed request per compose and per recipient
+    // change — duplicating what SIG_TTL_MS already bounds, and bypassing the
+    // dedupe map so it could race a prefetch for the same id. Set back to true
+    // only if admin-side signature edits must land mid-compose rather than
+    // within one TTL window.
+    const result = await applyById(item, targetId, userEmail, seq, { revalidate: false });
     const applied = result.applied;
 
     // FIX (L). Persist the decision even when this host could not write it yet
@@ -3179,18 +3291,14 @@ async function decideSendId(item, userEmail) {
     // lucky match. "" (no recipients) IS comparable and IS persistable.
     const currentSnap = serializeRecipients(await readRecipientEmails(item));
 
-    // const override = await getManualOverride(item);
-    // if (override) return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
-
+    // getManualOverride validates and returns null for an unresolvable pin, so
+    // an unusable value falls through to normal rule evaluation instead of
+    // outranking every rule and then failing to resolve. persist:false — a pin
+    // is the user's decision, not an evaluation result to record.
     const override = await getManualOverride(item);
-    // A pinned id that cannot be resolved would take precedence over every rule
-    // and then fail to fetch, leaving the mail with whatever is already there.
-    // resolveSigHtml refuses these too, but by then the rules have been skipped.
-    if (override && String(override).trim() !== "" &&
-        String(override) !== "null" && String(override) !== "undefined") {
+    if (override) {
         return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
     }
-    if (override) warn("ignoring an unresolvable manual override:", override);
 
     const [activeId, snapshot] = await Promise.all([
         getItemProp(item, P_ACTIVE_SIG),
@@ -3297,6 +3405,9 @@ const applySignature = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return complete();
+        // v7.5.2: drop any handle cached by a previous activation before reading
+        // a single property. See getProps().
+        invalidateProps(item);
         log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()})`);
 
         // FIX (M): no "Preparing your signature..." — the bar stays empty until
@@ -3305,7 +3416,14 @@ const applySignature = async function (event = { completed: () => { } }) {
         const seq = beginWrite();
         const userEmail = mailbox?.userProfile?.emailAddress;
 
-        await markActiveSignature(item, null);
+        // v7.5.2. The pin is checked BEFORE the state reset, matching Classic's
+        // runPipeline. Clearing P_ACTIVE_SIG on a pinned draft is not harmful in
+        // itself — evaluateAndApply reapplies the pinned id — but it forces a
+        // needless body write on every re-open of a draft the user has already
+        // chosen a signature for.
+        const pinned = await getManualOverride(item);
+        if (pinned) log("manual override present at compose — not resetting active id:", pinned);
+        else await markActiveSignature(item, null);
 
         // Persist the compose type here, in a runtime where the API behaves.
         // The send runtime reads it instead of re-deriving it.
@@ -3361,6 +3479,7 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
 
     try {
         if (!item) return complete();
+        invalidateProps(item);   // v7.5.2 — the pane may have pinned since the last event
 
         // Let the host settle: OWA fires per keystroke-ish, and a half-typed
         // address produces a recipient set we do not want to evaluate.
@@ -3404,6 +3523,7 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return complete();
+        invalidateProps(item);   // v7.5.2
         log("from changed — re-evaluating for the new account");
 
         const seq = beginWrite();
@@ -3442,6 +3562,9 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return complete();
+        // v7.5.2. CRITICAL at send: the pane's pin is very often written during
+        // this compose session, i.e. after the compose activation cached its bag.
+        invalidateProps(item);
         log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
         // FIX (M): no "Verifying signature..." — onSendCore reports failures only.
 
