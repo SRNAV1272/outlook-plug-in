@@ -7826,6 +7826,12 @@ const CONFIG = {
     NOTIF_ICON: "v11.icon16",
     MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
 
+    // Shared ABI with App.js and event-handler.js. All three write the same
+    // wrapper and the same property names; change one and change all three.
+    P_ACTIVE_SIG: "cardbyte_active_sig_id",
+    P_SIG_DIGEST: "cardbyte_sig_digest",
+    DEFAULT_ID: "default",
+
     DIAG_ENABLED: false,
 };
 

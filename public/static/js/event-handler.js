@@ -3055,9 +3055,30 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 
     const override = await getManualOverride(item);
     if (override) {
-        // The user chose this signature themselves; we have neither news nor a
-        // complaint. Leave the bar exactly as it is.
-        log("manual override active — leaving signature untouched:", override);
+        // The pane writes P_ACTIVE_SIG alongside the override, so these agreeing
+        // means the pinned signature is genuinely on the body and there is
+        // nothing to do or say. They disagree when the pane's body write failed,
+        // when a pre-contract pane pinned without wrapping, or when the write
+        // lost a race — in which case doing nothing leaves the draft carrying a
+        // signature nobody chose. Reapply through the normal path so the wrapper
+        // and digest end up consistent.
+        const activeNow = await getItemProp(item, P_ACTIVE_SIG);
+        if (activeNow && String(activeNow) === String(override)) {
+            log("manual override active and already on the body:", override);
+            return;
+        }
+        log("manual override active but body state unknown — reapplying:", override);
+        showLoading(item);
+        const rOv = await applyById(item, override, userEmail, seq, { revalidate: false });
+        // Snapshot is null on purpose: a manual choice is recipient-independent,
+        // and markActiveSignature removes the property, so send time re-evaluates
+        // instead of comparing against a snapshot that means nothing.
+        if (rOv.applied && isCurrent(seq)) {
+            await markActiveSignature(item, override, null, rOv.digest);
+        }
+        if (isCurrent(seq)) {
+            reportOutcome(item, rOv.applied ? "applied" : rOv.status === "deferred" ? "quiet" : "failed");
+        }
         return;
     }
 
@@ -3131,8 +3152,18 @@ async function decideSendId(item, userEmail) {
     // lucky match. "" (no recipients) IS comparable and IS persistable.
     const currentSnap = serializeRecipients(await readRecipientEmails(item));
 
+    // const override = await getManualOverride(item);
+    // if (override) return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+
     const override = await getManualOverride(item);
-    if (override) return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+    // A pinned id that cannot be resolved would take precedence over every rule
+    // and then fail to fetch, leaving the mail with whatever is already there.
+    // resolveSigHtml refuses these too, but by then the rules have been skipped.
+    if (override && String(override).trim() !== "" &&
+        String(override) !== "null" && String(override) !== "undefined") {
+        return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+    }
+    if (override) warn("ignoring an unresolvable manual override:", override);
 
     const [activeId, snapshot] = await Promise.all([
         getItemProp(item, P_ACTIVE_SIG),
