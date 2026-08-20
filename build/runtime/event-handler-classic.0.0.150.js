@@ -7780,7 +7780,7 @@ const CONFIG = {
     // Handler budgets. Platform allows ~300s and resets per event; the old
     // 10000 / 3500 values were the reason writes were being abandoned.
     COMPOSE_HANDLER_TIMEOUT_MS: 45000,
-    SEND_HANDLER_TIMEOUT_MS: 20000,
+    SEND_HANDLER_TIMEOUT_MS: 8000,
     GUARD_INJECT_GRACE_MS: 8000,
 
     // Compose item resolution

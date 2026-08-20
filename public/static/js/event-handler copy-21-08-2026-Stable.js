@@ -2421,33 +2421,13 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
         return { html: null, source: "none", unassigned: false };
     }
 
-    // ── FALLBACK: a rule signature that cannot be obtained falls back to the
-    // user's DEFAULT signature, but only if it is ALREADY IN CACHE.
-    //
-    // Cache-only on purpose. This runs at the failure point — the budget is
-    // already spent (or the network is already known to be unreachable), so a
-    // second round trip here would just turn one timeout into two. The default
-    // is warmed on every platform by prefetchSignatures (J), so in practice it
-    // is there whenever the runtime has been online once.
-    //
-    // The recorded failure kind is DELIBERATELY left untouched: the user is
-    // still told what actually went wrong, because the mail is going out with
-    // the default signature rather than the one the rule asked for.
-    const defaultFromCache = (unassigned = false) => {
-        if (key === DEFAULT_ID) return null;
-        const fallback = sigCache.get(DEFAULT_ID, { skipTtl: true });
-        if (!fallback) return null;
-        warn(`id=${key} unresolved — injecting the cached DEFAULT signature instead`);
-        return { html: fallback, source: "cache", unassigned, fellBackToDefault: true };
-    };
-
     const cached = sigCache.get(key, { skipTtl: true });
     if (cached) return { html: cached, source: "cache", unassigned: false };
 
     if (!allowNetwork || !userEmail) {
         warn(`cannot resolve id=${key} (allowNetwork=${allowNetwork}, user=${!!userEmail})`);
         fail("offline", "no network permitted or no user email");
-        return defaultFromCache() || { html: null, source: "none", unassigned: false };
+        return { html: null, source: "none", unassigned: false };
     }
 
     try {
@@ -2481,15 +2461,15 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
         // Definitive empty answer = nothing is assigned server-side.
         if (explicit) {
             fail("unassigned", `id=${key}`);
-            return defaultFromCache(true) || { html: null, source: "none", unassigned: true };
+            return { html: null, source: "none", unassigned: true };
         }
         fail(failure || "server", `id=${key}`);
-        return defaultFromCache() || { html: null, source: "none", unassigned: false };
+        return { html: null, source: "none", unassigned: false };
     } catch (e) {
         // withTimeout rejected: the call never came back inside the budget.
         warn(`resolveSigHtml failed id=${key}:`, e.message);
         fail("offline", `id=${key} ${e.message}`);
-        return defaultFromCache() || { html: null, source: "none", unassigned: false };
+        return { html: null, source: "none", unassigned: false };
     }
 }
 
