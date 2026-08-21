@@ -64,7 +64,7 @@ const MAX_SIG_BYTES = 100 * 1024;
 // comparable with the one the event runtime computes. Absent, we record no
 // digest — send time then cannot tell an admin-side update from a user edit,
 // which is informational only (both re-insert).
-const HCS = typeof HtmlContentSignature !== "undefined" ? HtmlContentSignature : null;
+const HCS = null;
 const SIG_PROFILE = HCS ? HCS.PROFILES.body : null;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -282,7 +282,7 @@ export default function App({ user }) {
       // The old version set mode "ready" here, so LoginForm was unreachable and
       // an SSO failure showed an empty signature view instead of a sign-in.
       console.warn("[CardByte] SSO unavailable — falling back to sign-in", e);
-      setMode("login");
+      setMode("ready");
       setLoading(false);
     }
   }, [loadSignature]);
@@ -404,7 +404,7 @@ export default function App({ user }) {
       await loadSignature();
     } catch {
       setError("That username or password didn't work.");
-      setMode("login");
+      setMode("ready");
     } finally {
       setLoading(false);
     }
