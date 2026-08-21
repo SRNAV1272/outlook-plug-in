@@ -7827,6 +7827,19 @@ const CONFIG = {
     MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
 
     DIAG_ENABLED: false,
+
+    // ─── Plan expiry ───────────────────────────────────────────────────────
+    // The backend's one account-level refusal (HTTP 412 + PlanExpiredException).
+    // Unlike every other non-2xx it is definitive, mailbox-wide and not
+    // retryable — no other signature id will succeed either.
+    HTTP_PLAN_EXPIRED: 412,
+    PLAN_EXPIRED_MSG: "Your subscription plan has expired. Please contact your Admin.",
+
+    // An expired plan invalidates the cached HTML as much as the live copy, and
+    // LKG_TTL_MS is SEVEN DAYS — without this, an expired account keeps signing
+    // mail for a week and nobody finds out. Set false only if the product wants
+    // that grace period deliberately.
+    CLEAR_CACHE_ON_PLAN_EXPIRED: true,
 };
 
 // ─── Step-numbered diagnostic log ─────────────────────────────────────────────
@@ -7903,6 +7916,58 @@ function once(ms, label, cb) {
         fired = true;
         clearTimeout(timer);
         cb(value, false);
+    };
+}
+
+// ─── Plan-expiry latch ───────────────────────────────────────────────────────
+//
+// Set from inside xhrGet, so any of the three endpoints can raise it, and read
+// wherever a notification is raised. One activation-scoped flag rather than a
+// return-value contract on every fetcher: an expired plan is a fact about the
+// ACCOUNT, not about the individual request that happened to discover it.
+
+const _plan = (function () {
+    let expired = false;
+    let message = null;
+
+    return {
+        reset: function () { expired = false; message = null; },
+        isExpired: function () { return expired; },
+        message: function () { return message || CONFIG.PLAN_EXPIRED_MSG; },
+        note: function (serverMsg) {
+            if (expired) return;          // first detection wins; the rest are echoes
+            expired = true;
+            message = serverMsg || null;
+            _diag.step("plan:EXPIRED", serverMsg || "(no server message)");
+            if (CONFIG.CLEAR_CACHE_ON_PLAN_EXPIRED) purgeAllCaches();
+        }
+    };
+})();
+
+// Shown verbatim only when it is a real sentence: an exception class name or an
+// over-long string falls back to our own wording rather than putting Java
+// package paths on the notification bar.
+function _serverMessageOf(raw) {
+    const s = String(raw == null ? "" : raw).trim();
+    if (!s) return null;
+    if (/^[\w$]+(\.[\w$]+){2,}$/.test(s)) return null;   // FQCN, not a message
+    return s.length <= 140 ? s : null;
+}
+
+// The error body arrives plain on this endpoint but may be encrypted on others,
+// so try both. Returns { planExpired, message }.
+function _classifyErrorBody(status, rawBody) {
+    let text = String(rawBody || "");
+    let parsed = null;
+    try { parsed = JSON.parse(text); }
+    catch (_) {
+        const pt = decryptResponse(text);
+        if (pt) { text = pt; try { parsed = JSON.parse(pt); } catch (__) { } }
+    }
+    return {
+        planExpired: status === CONFIG.HTTP_PLAN_EXPIRED ||
+            /PlanExpired/i.test(String((parsed && parsed.error) || text)),
+        message: _serverMessageOf(parsed && parsed.message)
     };
 }
 
@@ -8111,6 +8176,23 @@ function clearCachedSignature(cb) {
     _storageRemove(K.sig(), cb || function () { });
 }
 
+// Everything this account has cached, including the seven-day LKG copy. Called
+// only from _plan.note(); fire-and-forget, since the pipeline has already read
+// whatever it read and the point is to stop the NEXT activation serving it.
+function purgeAllCaches() {
+    _diag.step("purgeAllCaches:enter", "account=" + accountKey());
+    _memSig = null;
+    _memSigOwner = null;
+    _memRules = null;
+    _memRulesOwner = null;
+    _memLastApplied = null;
+    _storageRemove(K.sig(), function () { });
+    _storageRemove(K.lkg(), function () { });
+    _storageRemove(K.rules(), function () { });
+    _storageRemove(K.sigById(), function () { });
+    _storageRemove(K.lastApplied(), function () { });
+}
+
 // ─── Rules cache ──────────────────────────────────────────────────────────────
 
 let _memRules = null;
@@ -8252,10 +8334,26 @@ function xhrGet(url, headers, cb) {
 
             // Previously the body was thrown away here, which is why a 409 with
             // a 188-byte explanation told us nothing.
+            // _diag.step("xhrGet:non-2xx-body", _diag.truncate(body, CONFIG.XHR_LOG_BODY_CHARS));
+            // const decrypted = decryptResponse(body);
+            // if (decrypted) {
+            //     _diag.step("xhrGet:non-2xx-body-decrypted", _diag.truncate(decrypted, CONFIG.XHR_LOG_BODY_CHARS));
+            // }
+
             _diag.step("xhrGet:non-2xx-body", _diag.truncate(body, CONFIG.XHR_LOG_BODY_CHARS));
             const decrypted = decryptResponse(body);
             if (decrypted) {
                 _diag.step("xhrGet:non-2xx-body-decrypted", _diag.truncate(decrypted, CONFIG.XHR_LOG_BODY_CHARS));
+            }
+
+            const cls = _classifyErrorBody(xhr.status, body);
+            if (cls.planExpired) {
+                _plan.note(cls.message);
+                // Not retryable, and no point letting the second endpoint try:
+                // the answer is the same for the whole account.
+                _diag.step("xhrGet:plan-expired-abandoning", url);
+                cb(null);
+                return;
             }
 
             // 4xx other than 408/429 is a decision by the server; retrying is
@@ -8354,6 +8452,28 @@ function removeNotification(item) {
         if (!item || !item.notificationMessages) return;
         item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { });
     } catch (_) { }
+}
+
+// Every errorMessage in the pipeline goes through here. When the plan has
+// lapsed, that is the true and more actionable cause of whatever else failed,
+// so it replaces the caller's wording.
+function notifyFailure(item, message) {
+    if (_plan.isExpired()) {
+        showNotification(item, _plan.message(), "errorMessage");
+        return;
+    }
+    showNotification(item, message, "errorMessage");
+}
+
+// The pipeline clears the bar once a signature has settled. A lapsed plan must
+// survive that: a signature may well have been written from cache, and the
+// message is about the account, not about this mail.
+function settleNotification(item) {
+    if (_plan.isExpired()) {
+        showNotification(item, _plan.message(), "errorMessage");
+        return;
+    }
+    removeNotification(item);
 }
 
 // ─── Manual override (taskpane selection) ─────────────────────────────────────
@@ -9092,7 +9212,8 @@ function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
 function writeSignature(item, html, sigKey, onDone) {
     if (!item || !item.body || typeof item.body.setSignatureAsync !== "function") {
         _diag.step("writeSignature:setSignatureAsync-unavailable");
-        showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+        // showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+        notifyFailure(item, "Signature could not be applied. Please contact Admin.");
         onDone(false);
         return;
     }
@@ -9207,6 +9328,7 @@ function flushDiagnostics(item, onDone) {
  */
 function applyDefaultSignature(item, onDone) {
     _diag.step("PHASE1:applyDefaultSignature:enter");
+    notifyFailure(item, "Signature not available. Please contact Admin.");
 
     getCachedSignature(function (cached) {
         if (cached) {
@@ -9236,7 +9358,8 @@ function applyDefaultSignature(item, onDone) {
                         return;
                     }
                     writeSignatureIfChanged(item, stale, "default", function (ok) {
-                        if (ok) removeNotification(item);
+                        // if (ok) removeNotification(item);
+                        if (ok) settleNotification(item);
                         _diag.step("PHASE1:done", "source=last-known-good ok=" + ok);
                         onDone(ok ? stale : null);
                     });
@@ -9417,9 +9540,11 @@ function _defaultThenRules(item, guarded, options) {
         reconcileSignature(item, function (finalKey) {
             if (finalKey) {
                 _diag.step("PIPELINE:settled", "sigKey=" + finalKey);
-                removeNotification(item);
+                // removeNotification(item);
+                settleNotification(item);
             } else if (!appliedHtml) {
                 _diag.step("PIPELINE:NO-SIGNATURE-APPLIED", "neither default nor rule produced HTML");
+                notifyFailure(item, "Signature not available. Please contact Admin.");
             }
 
             // Prefetch BEFORE completing. Code after event.completed() is not
@@ -9501,6 +9626,7 @@ function resolveComposeItem(cb) {
 
 function applySignature(event) {
     _diag.step("applySignature:ENTRY");
+    _plan.reset();
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
 
     resolveComposeItem(function (item) {
@@ -9555,6 +9681,7 @@ function onRecipientsChangedHandler(event) {
                 // would make the signature visibly flicker on every keystroke.
                 reconcileSignature(item, function (finalKey) {
                     _diag.step("onRecipientsChangedHandler:done", "sigKey=" + (finalKey || "none"));
+                    if (_plan.isExpired()) notifyFailure(item, "");
                     guarded.completed();
                 });
             });

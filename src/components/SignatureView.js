@@ -97,6 +97,45 @@ const SIG_BY_ID_TTL_MS = 5 * 60 * 1000;
 const SESSION_KEY = "cardbyte_session_id";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Plan expiry — the backend's one account-level refusal (HTTP 412 +
+// PlanExpiredException). Distinct from every other non-2xx: definitive,
+// mailbox-wide, and not retryable, so no other signature id will succeed either.
+// ─────────────────────────────────────────────────────────────────────────────
+const HTTP_PLAN_EXPIRED = 412;
+const PLAN_EXPIRED_RE = /PlanExpired/i;
+const PLAN_EXPIRED_FALLBACK_MSG =
+    "Your subscription plan has expired. Please contact your Admin to renew.";
+
+// An expired plan invalidates cached HTML as much as the live copy. Set false to
+// let cached signatures keep working through an expiry — they will, silently,
+// for as long as CACHE_TTL_MS, which is how an expiry goes unnoticed.
+const CLEAR_CACHE_ON_PLAN_EXPIRED = true;
+
+// Shown verbatim only when it is a real sentence: an exception class name or an
+// over-long string falls back to our own wording rather than putting Java
+// package paths in the pane.
+function serverMessageOf(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return null;
+    if (/^[\w$]+(\.[\w$]+){2,}$/.test(s)) return null;   // FQCN, not a message
+    return s.length <= 200 ? s : null;
+}
+
+// Reads a non-2xx body ONCE — res.text() cannot be called twice — and
+// classifies it. `message` is display-safe; `error` is used only for matching.
+async function readApiError(res) {
+    let body = null;
+    let raw = "";
+    try { raw = await res.text(); body = JSON.parse(raw); } catch (_) { }
+    return {
+        planExpired:
+            res.status === HTTP_PLAN_EXPIRED || PLAN_EXPIRED_RE.test(String(body?.error || "")),
+        message: serverMessageOf(body?.message),
+        raw: String(body?.message || body?.error || raw || "").slice(0, 200),
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Props
 //   Office      — Office global object
 //   user        — mailbox user profile
@@ -120,6 +159,18 @@ export default function SignatureView({
     const [load, setLoad] = useState(false);
     const [expandedCards, setExpandedCards] = useState({});
     const [applyingId, setApplyingId] = useState(null);
+    const [planExpired, setPlanExpired] = useState(null);   // { message } | null
+
+    // Written by any of the three fetches, read once at the end of
+    // fetchAllSignatures. A ref rather than state so three concurrent 412s don't
+    // each trigger a render mid-fetch, and so the rule loop can bail out on it.
+    const planExpiredRef = useRef(null);
+    const notePlanExpired = (message) => {
+        if (!planExpiredRef.current) {
+            console.warn("[CardByte] 🔒 plan expired:", message || "(no server message)");
+            planExpiredRef.current = { message: message || null };
+        }
+    };
 
     // ─── Mac detection ───────────────────────────────────────────────────────
     const isMac =
@@ -311,7 +362,9 @@ export default function SignatureView({
                 },
             });
             if (!res.ok) {
-                console.warn("[CardByte] Rules fetch returned", res.status);
+                const { planExpired, message, raw } = await readApiError(res);
+                console.warn("[CardByte] Rules fetch returned", res.status, raw);
+                if (planExpired) notePlanExpired(message);
                 return null;
             }
 
@@ -356,27 +409,28 @@ export default function SignatureView({
             }
 
             // ─── Non-OK: inspect the error body ───
-            let serverMessage = "";
-            try {
-                const errText = await primaryRes.text();
-                const errJson = JSON.parse(errText);
-                serverMessage = (errJson?.message || errJson?.error || "").toString();
-            } catch { /* body not JSON — leave blank */ }
+            const { planExpired, message, raw } = await readApiError(primaryRes);
+            console.warn("[CardByte] Primary fetch failed:", primaryRes.status, raw);
 
-            console.warn("[CardByte] Primary fetch failed:", primaryRes.status, serverMessage);
+            if (planExpired) {
+                notePlanExpired(message);
+                // explicit:true — the server answered definitively. It just is
+                // not the "no signature assigned" answer.
+                return { html: null, explicit: true, reason: "planExpired" };
+            }
 
-            // "Primary card not found" (and similar) = definitive: no signature exists for this user
             const notFound =
                 primaryRes.status === 404 ||
-                /not\s*found/i.test(serverMessage) ||
-                /ResourceNotFound/i.test(serverMessage);
+                /not\s*found/i.test(raw) ||
+                /ResourceNotFound/i.test(raw);
 
             if (notFound) {
                 return { html: null, explicit: true, reason: "notFound" };
             }
 
-            // Any other server error (5xx, etc.) — transient/unknown
             return { html: null, explicit: false, reason: "serverError" };
+            // Any other server error (5xx, etc.) — transient/unknown
+            // return { html: null, explicit: false, reason: "serverError" };
         } catch (err) {
             console.warn("[CardByte] renderSignatureOnServer crashed:", err);
             return { html: null, explicit: false, reason: "network" };
@@ -392,8 +446,14 @@ export default function SignatureView({
                     "X-Platform": xPlatform,
                 },
             });
+            // if (!res.ok) {
+            //     console.error("[CardByte] Signature fetch failed:", res.status);
+            //     return null;
+            // }
             if (!res.ok) {
-                console.error("[CardByte] Signature fetch failed:", res.status);
+                const { planExpired, message, raw } = await readApiError(res);
+                console.error("[CardByte] Signature fetch failed:", res.status, raw);
+                if (planExpired) notePlanExpired(message);
                 return null;
             }
             const rawText = await res.text();
@@ -453,6 +513,8 @@ export default function SignatureView({
         if (!user?.emailAddress) return;
         setLoad(true);
         setError("");
+        planExpiredRef.current = null;
+        setPlanExpired(null);
 
         try {
             const xPlatform = getXPlatform();
@@ -507,6 +569,13 @@ export default function SignatureView({
                 console.log(`[CardByte] Evaluating ${totalRules} rule(s) for sender: ${user.emailAddress}`);
 
                 for (const rule of allEnabledRules) {
+                    // One 412 answers for the whole account — no point firing
+                    // one request per rule to be told the same thing N times.
+                    if (planExpiredRef.current) {
+                        console.log("[CardByte] plan expired — stopping rule signature fetches");
+                        break;
+                    }
+
                     // ─── SENDER FILTER ───
                     const isVisible = senderMatches(rule, user.emailAddress);
 
@@ -534,6 +603,25 @@ export default function SignatureView({
                         console.warn(`[CardByte] Could not fetch signature for rule: ${rule.rule || rule.priority}`);
                     }
                 }
+            }
+
+            // An expired plan is an account-level fact, not a per-signature one:
+            // it outranks whatever the individual fetches concluded.
+            if (planExpiredRef.current) {
+                if (CLEAR_CACHE_ON_PLAN_EXPIRED) {
+                    store.remove(
+                        CACHE_KEY, CACHE_SESSION_KEY, CACHE_TIMESTAMP_KEY,
+                        RULES_CACHE_KEY, RULES_CACHE_TIMESTAMP_KEY,
+                        SIG_BY_ID_CACHE_KEY,
+                    );
+                    resultList.length = 0;
+                }
+                setPlanExpired(planExpiredRef.current);
+                setSignatures(resultList);
+                setAllRulesCount(0);
+                setHiddenCount(0);
+                setError("");   // the banner carries the message, not the empty card
+                return;         // `finally` still runs setLoad(false)
             }
 
             setSignatures(resultList);
@@ -709,6 +797,72 @@ export default function SignatureView({
                     overflow: "hidden",
                 }}
             >
+                {/* ── Plan expiry ────────────────────────────────────────────────
+                Persistent, not a toast: this does not clear itself and there is
+                nothing the user can do in this session but tell an admin. */}
+                {planExpired && (
+                    <Paper
+                        elevation={0}
+                        sx={{
+                            p: 1.5,
+                            mb: 1.25,
+                            borderRadius: "10px",
+                            background: COLORS.warningBg,
+                            border: `1px solid ${COLORS.warning}`,
+                            display: "flex",
+                            alignItems: "flex-start",
+                            gap: 1,
+                        }}
+                    >
+                        <Box
+                            sx={{
+                                width: 28, height: 28, flexShrink: 0,
+                                borderRadius: "8px",
+                                background: COLORS.warning,
+                                color: "#fff",
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                            }}
+                        >
+                            <Lock size={14} />
+                        </Box>
+                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Typography
+                                fontFamily="Plus Jakarta Sans"
+                                fontSize="13px"
+                                fontWeight={700}
+                                color={COLORS.primary}
+                            >
+                                Subscription expired
+                            </Typography>
+                            <Typography
+                                fontFamily="Plus Jakarta Sans"
+                                fontSize="11px"
+                                color={COLORS.primary}
+                                sx={{ mt: 0.4, opacity: 0.85, lineHeight: 1.4 }}
+                            >
+                                {planExpired.message || PLAN_EXPIRED_FALLBACK_MSG}
+                            </Typography>
+                            <Button
+                                onClick={fetchAllSignatures}
+                                variant="text"
+                                size="small"
+                                startIcon={<RefreshCw size={12} />}
+                                sx={{
+                                    mt: 0.75, px: 0.75, py: 0.25,
+                                    minWidth: 0,
+                                    color: COLORS.primary,
+                                    fontSize: "11px",
+                                    fontFamily: "Plus Jakarta Sans",
+                                    textTransform: "capitalize",
+                                    "& .MuiButton-startIcon": { mr: 0.5 },
+                                }}
+                            >
+                                Check again
+                            </Button>
+                        </Box>
+                    </Paper>
+                )}
+                
                 <Box sx={{ position: "absolute", top: "-45%", right: "-15%", width: 130, height: 130, background: "radial-gradient(circle, rgba(139,92,246,0.35), transparent 70%)", borderRadius: "50%", pointerEvents: "none" }} />
 
                 <Box display="flex" alignItems="center" gap={1} position="relative" zIndex={1}>
