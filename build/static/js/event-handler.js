@@ -1374,6 +1374,18 @@ const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 const BASE_URL = "https://ns-enterprise.cardbyte.ai/email-signature";
 
+// The backend's one account-level refusal: HTTP 412 + PlanExpiredException.
+// Distinct from every other non-2xx because it is definitive, global to the
+// mailbox, and not retryable — no other id will succeed either.
+const HTTP_PLAN_EXPIRED = 412;
+const PLAN_EXPIRED_RE = /PlanExpired/i;
+
+// A lapsed subscription invalidates the cached HTML as much as the live copy,
+// and without this a warm cache hides the expiry until SIG_TTL_MS lapses.
+// Set false if the product prefers cached signatures to keep working through
+// an expiry (they will, silently, for as long as the cache lives).
+const PURGE_CACHE_ON_PLAN_EXPIRED = true;
+
 // The id standing for "the user's default (non-rule) signature".
 // Replace with a real backend id when /html/outlook/get-active returns one;
 // that removes the only remaining special case in resolveSigHtml().
@@ -1773,6 +1785,13 @@ const FAILURES = {
         rank: 2, fatal: false,
         msg: "Couldn't load your signature rules. Please contact Admin.",
     },
+
+    // Outranks every other fatal (rank 5): once the plan has expired every
+    // subsequent call fails too, and this is the one message that explains why.
+    plan_expired: {
+        rank: 5, fatal: true,
+        msg: "Your subscription plan has expired. Please contact Admin.",
+    },
 };
 
 let _failure = null;          // { kind, rank, fatal, msg }
@@ -1788,11 +1807,13 @@ function clearFailures() {
 const hasFailure = () => _failure !== null;
 const wasReported = () => _reported;
 
-function recordFailure(kind, detail = "") {
+function recordFailure(kind, detail = "", serverMsg = null) {
     const f = FAILURES[kind];
     if (!f) { warn("recordFailure: unknown kind", kind); return; }
     warn(`failure recorded: ${kind}${detail ? ` — ${detail}` : ""}`);
-    if (!_failure || f.rank > _failure.rank) _failure = { kind, ...f };
+    if (!_failure || f.rank > _failure.rank) {
+        _failure = { kind, ...f, msg: serverMsg || f.msg };
+    }
 }
 
 // A null/absent HTTP status means the request never got an answer (transport,
@@ -2038,6 +2059,11 @@ const sigCache = {
         }
         if (n) { sigCache.write(map); log(`purged ${n} stale signature cache entr${n === 1 ? "y" : "ies"}`); }
     },
+    wipe() {
+        _sigMap = {};
+        store.remove(K_SIG_CACHE, K_SIG_CACHE_LEGACY_DEFAULT);
+        log("signature cache wiped");
+    },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2277,6 +2303,27 @@ function apiHeaders(encryptedMail, extra = {}) {
     return { username: encryptedMail, "X-Platform": getXPlatform(), ...extra };
 }
 
+// Shown verbatim only when it is a real sentence: an exception class name or an
+// over-long string falls back to the canned wording rather than putting Java
+// package paths on the notification bar.
+function serverMessage(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return null;
+    if (/^[\w$]+(\.[\w$]+){2,}$/.test(s)) return null;   // FQCN, not a message
+    return s.length <= 150 ? s : null;                    // host hard limit
+}
+
+// Reads a non-2xx body ONCE and classifies it. `message` is display-safe;
+// `error` (the exception class) is used only for matching.
+async function readApiError(res) {
+    let body = null;
+    try { body = JSON.parse(await res.text()); } catch (_) { }
+    const message = serverMessage(body?.message);
+    const planExpired =
+        res.status === HTTP_PLAN_EXPIRED || PLAN_EXPIRED_RE.test(String(body?.error || ""));
+    return { message, planExpired, raw: String(body?.message || body?.error || "") };
+}
+
 async function fetchRules(encryptedMail) {
     const xp = getXPlatform();
     try {
@@ -2284,13 +2331,27 @@ async function fetchRules(encryptedMail) {
             method: "GET",
             headers: apiHeaders(encryptedMail, { "Content-Type": "application/json" }),
         });
+        // if (!res.ok) {
+        //     // Status is logged WITH the platform header: a 4xx that disappears
+        //     // when X-Platform is WINDOWS is fix (I), not a backend outage.
+        //     let body = "";
+        //     try { body = (await res.text()).slice(0, 200); } catch (_) { }
+        //     warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, body);
+        //     noteRulesFetchError(failureKindFor(res.status));
+        //     return null;
+        // }
         if (!res.ok) {
-            // Status is logged WITH the platform header: a 4xx that disappears
-            // when X-Platform is WINDOWS is fix (I), not a backend outage.
-            let body = "";
-            try { body = (await res.text()).slice(0, 200); } catch (_) { }
-            warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, body);
-            noteRulesFetchError(failureKindFor(res.status));
+            const { message, planExpired, raw } = await readApiError(res);
+            warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, raw);
+            if (planExpired) {
+                // Recorded directly, breaking the "fetches never record" rule of
+                // (O) deliberately: this is an account-level fact, not a rules
+                // degradation, and it is true whether or not a cached ruleset
+                // covers for the failed fetch. noteRulesFetchError still runs so
+                // the existing degraded path is unchanged.
+                recordFailure("plan_expired", "rules-config", message);
+            }
+            noteRulesFetchError(planExpired ? "server" : failureKindFor(res.status));
             return null;
         }
         const rulesJson = JSON.parse(await res.text())?.rulesJson;
@@ -2324,15 +2385,31 @@ async function fetchDefaultSignature(encryptedMail) {
             method: "GET",
             headers: apiHeaders(encryptedMail),
         });
+        // if (!res.ok) {
+        //     let msg = "";
+        //     try { const b = JSON.parse(await res.text()); msg = String(b?.message || b?.error || ""); } catch (_) { }
+        //     warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, msg);
+        //     const notFound = res.status === 404 || /not\s*found/i.test(msg);
+        //     return {
+        //         html: null,
+        //         explicit: notFound,
+        //         failure: notFound ? null : failureKindFor(res.status),
+        //     };
+        // }
         if (!res.ok) {
-            let msg = "";
-            try { const b = JSON.parse(await res.text()); msg = String(b?.message || b?.error || ""); } catch (_) { }
-            warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, msg);
-            const notFound = res.status === 404 || /not\s*found/i.test(msg);
+            const { message, planExpired, raw } = await readApiError(res);
+            warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, raw);
+            if (planExpired) {
+                // explicit:false on purpose — resolveSigHtml checks `explicit`
+                // BEFORE `failure`, and this is not "nothing assigned".
+                return { html: null, explicit: false, failure: "plan_expired", failureMsg: message };
+            }
+            const notFound = res.status === 404 || /not\s*found/i.test(raw);
             return {
                 html: null,
                 explicit: notFound,
                 failure: notFound ? null : failureKindFor(res.status),
+                failureMsg: null,
             };
         }
         let html = null;
@@ -2358,13 +2435,27 @@ async function fetchSignatureById(id, encryptedMail) {
             method: "GET",
             headers: apiHeaders(encryptedMail),
         });
+        // if (!res.ok) {
+        //     err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`);
+        //     const notFound = res.status === 404;
+        //     return {
+        //         html: null,
+        //         explicit: notFound,
+        //         failure: notFound ? null : failureKindFor(res.status),
+        //     };
+        // }
         if (!res.ok) {
-            err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`);
+            const { message, planExpired, raw } = await readApiError(res);
+            err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`, raw);
+            if (planExpired) {
+                return { html: null, explicit: false, failure: "plan_expired", failureMsg: message };
+            }
             const notFound = res.status === 404;
             return {
                 html: null,
                 explicit: notFound,
                 failure: notFound ? null : failureKindFor(res.status),
+                failureMsg: null,
             };
         }
         let html = null;
@@ -2410,7 +2501,8 @@ function dedupe(key, make) {
 async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = null, silent = false } = {}) {
     const key = String(id);
     const budget = budgetMs ?? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
-    const fail = (kind, detail) => { if (!silent) recordFailure(kind, detail); };
+    // const fail = (kind, detail) => { if (!silent) recordFailure(kind, detail); };
+    const fail = (kind, detail, msg = null) => { if (!silent) recordFailure(kind, detail, msg); };
 
     // FIX (C) belt-and-braces: a rule that slipped through with no signatureId
     // would otherwise be requested as the literal "null" / "undefined".
@@ -2470,14 +2562,21 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
             if (r.html) sigCache.set(key, r.html);
             return r;
         }));
+
         const { html, explicit, failure } = await withTimeout(
             inner, budget, key === DEFAULT_ID ? "default fetch" : `sig fetch ${key}`);
 
+        if (html) return { html, source: "network", unassigned: false };
 
-        if (html) {
-            // sigCache.set(key, html);
-            return { html, source: "network", unassigned: false };
+        if (failure === "plan_expired") {
+            // No defaultFromCache() here: the subscription is what lapsed, so a
+            // cached copy is no more licensed than the live one — and silently
+            // serving it is exactly how an expiry goes unnoticed for a TTL.
+            fail("plan_expired", `id=${key}`, failureMsg);
+            if (PURGE_CACHE_ON_PLAN_EXPIRED) { sigCache.wipe(); clearRulesCache(); }
+            return { html: null, source: "none", unassigned: false, planExpired: true };
         }
+
         // Definitive empty answer = nothing is assigned server-side.
         if (explicit) {
             fail("unassigned", `id=${key}`);
