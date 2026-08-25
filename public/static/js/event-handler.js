@@ -30,774 +30,951 @@
     "use strict";
     if (typeof module === "object" && module.exports) module.exports = factory();
     else root.HtmlContentSignature = factory();
-})(typeof self !== "undefined" ? self : this, function () {
-    "use strict";
+})(
+    // Classic Outlook's JSRuntime is not a clean browser-or-node global: resolve
+    // through every known name, same trick as the patched CryptoJS UMD wrapper
+    // that ships alongside this file in the classic bundle.
+    (typeof self !== "undefined" && self) ||
+    (typeof window !== "undefined" && window) ||
+    (typeof globalThis !== "undefined" && globalThis) ||
+    this,
+    function () {
+        "use strict";
 
-    var VERSION = "hcs2";
+        var VERSION = "hcs2";
 
-    /* ---------------------------------------------------------------- tables */
+        /* ---------------------------------------------------------------- tables */
 
-    // Elements whose content is raw text, not markup.
-    var RAW_TEXT = {
-        script: 1, style: 1, title: 1, textarea: 1,
-        xmp: 1, noscript: 1, noframes: 1, plaintext: 1
-    };
-
-    // Elements that force a visual break between text runs.
-    var BLOCK = {
-        address: 1, article: 1, aside: 1, blockquote: 1, body: 1, br: 1,
-        caption: 1, center: 1, col: 1, colgroup: 1, dd: 1, details: 1, dialog: 1,
-        dir: 1, div: 1, dl: 1, dt: 1, fieldset: 1, figcaption: 1, figure: 1,
-        footer: 1, form: 1, h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1, header: 1,
-        hgroup: 1, hr: 1, html: 1, legend: 1, li: 1, main: 1, menu: 1, nav: 1,
-        ol: 1, optgroup: 1, option: 1, p: 1, pre: 1, section: 1, summary: 1,
-        table: 1, tbody: 1, td: 1, tfoot: 1, th: 1, thead: 1, tr: 1, ul: 1
-    };
-
-    // URL-bearing attributes, in FIXED order so emission is deterministic.
-    var URL_ATTRS = [
-        "src", "srcset", "poster", "background", "data",
-        "xlink:href", "formaction", "action", "dynsrc", "lowsrc"
-    ];
-
-    var NAMED = {
-        amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00A0",
-        ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", zwnj: "\u200C", zwj: "\u200D",
-        lrm: "\u200E", rlm: "\u200F", shy: "\u00AD",
-        ndash: "\u2013", mdash: "\u2014", lsquo: "\u2018", rsquo: "\u2019",
-        sbquo: "\u201A", ldquo: "\u201C", rdquo: "\u201D", bdquo: "\u201E",
-        dagger: "\u2020", Dagger: "\u2021", bull: "\u2022", hellip: "\u2026",
-        permil: "\u2030", prime: "\u2032", Prime: "\u2033", lsaquo: "\u2039",
-        rsaquo: "\u203A", oline: "\u203E", frasl: "\u2044", euro: "\u20AC",
-        trade: "\u2122", copy: "\u00A9", reg: "\u00AE", deg: "\u00B0",
-        plusmn: "\u00B1", middot: "\u00B7", laquo: "\u00AB", raquo: "\u00BB",
-        times: "\u00D7", divide: "\u00F7", frac12: "\u00BD", frac14: "\u00BC",
-        frac34: "\u00BE", pound: "\u00A3", yen: "\u00A5", cent: "\u00A2",
-        curren: "\u00A4", sect: "\u00A7", para: "\u00B6", micro: "\u00B5",
-        iexcl: "\u00A1", iquest: "\u00BF", brvbar: "\u00A6", uml: "\u00A8",
-        not: "\u00AC", macr: "\u00AF", acute: "\u00B4", cedil: "\u00B8",
-        sup1: "\u00B9", sup2: "\u00B2", sup3: "\u00B3", ordm: "\u00BA", ordf: "\u00AA",
-        agrave: "\u00E0", aacute: "\u00E1", acirc: "\u00E2", atilde: "\u00E3",
-        auml: "\u00E4", aring: "\u00E5", ccedil: "\u00E7", egrave: "\u00E8",
-        eacute: "\u00E9", ecirc: "\u00EA", euml: "\u00EB", igrave: "\u00EC",
-        iacute: "\u00ED", icirc: "\u00EE", iuml: "\u00EF", ntilde: "\u00F1",
-        ograve: "\u00F2", oacute: "\u00F3", ocirc: "\u00F4", otilde: "\u00F5",
-        ouml: "\u00F6", ugrave: "\u00F9", uacute: "\u00FA", ucirc: "\u00FB",
-        uuml: "\u00FC", yacute: "\u00FD", szlig: "\u00DF",
-        Agrave: "\u00C0", Aacute: "\u00C1", Auml: "\u00C4", Ccedil: "\u00C7",
-        Egrave: "\u00C8", Eacute: "\u00C9", Ouml: "\u00D6", Uuml: "\u00DC",
-        Ntilde: "\u00D1"
-    };
-
-    // Entities browsers decode even without a trailing semicolon.
-    var NO_SEMI = {
-        amp: 1, lt: 1, gt: 1, quot: 1, nbsp: 1, copy: 1, reg: 1, deg: 1, pound: 1,
-        yen: 1, cent: 1, sect: 1, middot: 1, times: 1, divide: 1, not: 1, shy: 1,
-        macr: 1, acute: 1, uml: 1, para: 1, micro: 1
-    };
-
-    // Invisible / formatting characters that cannot change what is rendered.
-    var ZERO_WIDTH = /[\u00AD\u200B\u200C\u200D\u200E\u200F\u2060\u2061\u2062\u2063\u2064\uFEFF]/g;
-    // Everything HTML treats as collapsible whitespace, incl. NBSP + Unicode spaces.
-    var WHITESPACE = /[\t\n\f\r \u000B\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g;
-
-    var DEFAULTS = {
-        links: true,        // capture <a href> / <area href> targets
-        media: true,        // capture src / srcset / poster / background / ...
-        css: true,          // capture <style> bodies and style="" url()s
-        scriptBodies: true, // capture <script> bodies
-        breaks: true,       // emit break tokens at block boundaries
-        normalizeUnicode: true, // NFC, so composed vs decomposed compare equal
-        lowercaseUrls: false,   // off: URL paths are case-sensitive
-        // Collapse cid:/blob:/data: URLs to one placeholder. REQUIRED when
-        // comparing against a live Outlook draft body: the host rewrites remote
-        // <img src> to cid: attachment references as soon as the signature is
-        // inserted, so a strict URL compare reports every desktop draft as tampered.
-        // http(s) URLs stay strict - those are the ones worth guarding.
-        hostRewrittenUrls: false
-    };
-
-    /* --------------------------------------------------------------- helpers */
-
-    function options(o) {
-        var out = {}, k;
-        for (k in DEFAULTS) if (DEFAULTS.hasOwnProperty(k)) out[k] = DEFAULTS[k];
-        if (o) for (k in o) if (o.hasOwnProperty(k) && out.hasOwnProperty(k)) out[k] = o[k];
-        return out;
-    }
-
-    function fromCodePoint(cp) {
-        if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "\uFFFD";
-        if (cp > 0xffff) {
-            cp -= 0x10000;
-            return String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
-        }
-        return String.fromCharCode(cp);
-    }
-
-    var ENT_RE = /&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31})(;?)/g;
-
-    function decodeEntities(str) {
-        if (str.indexOf("&") === -1) return str;
-        return str.replace(ENT_RE, function (m, body, semi) {
-            if (body.charAt(0) === "#") {
-                var cp = body.charAt(1) === "x" || body.charAt(1) === "X"
-                    ? parseInt(body.slice(2), 16)
-                    : parseInt(body.slice(1), 10);
-                if (isNaN(cp)) return m;
-                return fromCodePoint(cp);
-            }
-            if (NAMED.hasOwnProperty(body) && (semi || NO_SEMI[body])) return NAMED[body];
-            // Unknown entity: leave verbatim. Deterministic on every host.
-            return m;
-        });
-    }
-
-    function normalizeText(s, o) {
-        s = s.replace(ZERO_WIDTH, "");
-        if (o.normalizeUnicode && typeof s.normalize === "function") {
-            try { s = s.normalize("NFC"); } catch (e) { /* older hosts */ }
-        }
-        return s.replace(WHITESPACE, " ");
-    }
-
-    // Browsers strip tabs/newlines/CRs from URLs and trim surrounding whitespace.
-    function normalizeUrl(v, o) {
-        if (v == null) return "";
-        v = decodeEntities(String(v)).replace(/[\t\n\r]+/g, "").replace(ZERO_WIDTH, "");
-        v = v.replace(/^[\s\u00A0]+|[\s\u00A0]+$/g, "");
-        if (o.hostRewrittenUrls && /^(?:cid|blob|data):/i.test(v)) return "@embedded";
-        return o.lowercaseUrls ? v.toLowerCase() : v;
-    }
-
-    function normalizeSrcset(v, o) {
-        // "a.png 1x,  b.png 2x" -> "a.png 1x,b.png 2x" (order preserved, ws collapsed)
-        var parts = String(v == null ? "" : v).split(",");
-        var res = [], i, p, sp, url, desc;
-        for (i = 0; i < parts.length; i++) {
-            p = decodeEntities(parts[i]).replace(WHITESPACE, " ").replace(/^ | $/g, "");
-            if (!p) continue;
-            sp = p.indexOf(" ");
-            url = sp === -1 ? p : p.slice(0, sp);
-            desc = sp === -1 ? "" : " " + p.slice(sp + 1);
-            res.push(normalizeUrl(url, o) + desc);
-        }
-        return res.join(",");
-    }
-
-    var CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi;
-
-    function cssUrls(css, o) {
-        var found = [], m;
-        CSS_URL_RE.lastIndex = 0;
-        while ((m = CSS_URL_RE.exec(css)) !== null) {
-            var u = normalizeUrl(m[1] != null ? m[1] : (m[2] != null ? m[2] : m[3]), o);
-            if (u) found.push(u);
-            if (CSS_URL_RE.lastIndex === m.index) CSS_URL_RE.lastIndex++; // guard
-        }
-        return found;
-    }
-
-    /* ---------------------------------------------------------- token emitter */
-
-    function Emitter(o) {
-        this.o = o;
-        this.tokens = [];
-        this.buf = [];
-        this.pendingSpace = false;
-    }
-
-    Emitter.prototype.flush = function () {
-        if (this.buf.length) {
-            this.tokens.push(["t", this.buf.join("")]);
-            this.buf.length = 0;
-        }
-        this.pendingSpace = false;
-    };
-
-    Emitter.prototype.text = function (raw, alreadyDecoded) {
-        if (!raw) return;
-        var t = normalizeText(alreadyDecoded ? raw : decodeEntities(raw), this.o);
-        if (!t) return;
-        if (t === " ") { if (this.buf.length) this.pendingSpace = true; return; }
-        var lead = t.charAt(0) === " ";
-        var trail = t.charAt(t.length - 1) === " ";
-        var core = t.replace(/^ +| +$/g, "");
-        if (this.buf.length && (this.pendingSpace || lead)) this.buf.push(" ");
-        this.buf.push(core);
-        this.pendingSpace = trail;
-    };
-
-    Emitter.prototype.token = function (arr) {
-        this.flush();
-        this.tokens.push(arr);
-    };
-
-    Emitter.prototype.brk = function () {
-        if (!this.o.breaks) { if (this.buf.length) this.pendingSpace = true; return; }
-        this.flush();
-        var last = this.tokens[this.tokens.length - 1];
-        if (!this.tokens.length) return;                 // no leading break
-        if (last && last.length === 1 && last[0] === "b") return; // no doubles
-        this.tokens.push(["b"]);
-    };
-
-    // Shared per-element handling for both the tokenizer and the DOM walker.
-    Emitter.prototype.element = function (tag, getAttr) {
-        var o = this.o, i, a, v;
-
-        if (BLOCK[tag]) this.brk();
-
-        if (o.media) {
-            for (i = 0; i < URL_ATTRS.length; i++) {
-                a = URL_ATTRS[i];
-                v = getAttr(a);
-                if (v == null) continue;
-                this.token(["u", tag, a, a === "srcset" ? normalizeSrcset(v, o) : normalizeUrl(v, o)]);
-            }
-        }
-
-        if (o.links && (tag === "a" || tag === "area" || tag === "link")) {
-            v = getAttr("href");
-            if (v != null) this.token(["h", tag, normalizeUrl(v, o)]);
-        }
-
-        // <img> must always be visible in the signature, even with no src,
-        // because its mere presence is rendered content.
-        if (tag === "img" || tag === "image" || tag === "input" || tag === "object" ||
-            tag === "embed" || tag === "iframe" || tag === "video" || tag === "audio" ||
-            tag === "svg" || tag === "canvas") {
-            this.token(["e", tag]);
-            if (tag === "input") {
-                v = getAttr("type");
-                if (v != null) this.token(["a", "type", normalizeText(decodeEntities(String(v)), o)]);
-                v = getAttr("value");
-                if (v != null) this.token(["a", "value", normalizeText(decodeEntities(String(v)), o)]);
-            }
-        }
-
-        if (o.css) {
-            v = getAttr("style");
-            if (v != null) {
-                var urls = cssUrls(decodeEntities(String(v)), o);
-                for (i = 0; i < urls.length; i++) this.token(["c", urls[i]]);
-            }
-        }
-    };
-
-    Emitter.prototype.rawBody = function (tag, body) {
-        var o = this.o, i, urls;
-        if (tag === "style") {
-            if (!o.css) return;
-            body = normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "");
-            this.token(["s", "style", body]);
-            return;
-        }
-        if (tag === "script") {
-            if (!o.scriptBodies) return;
-            body = body.replace(WHITESPACE, " ").replace(/^ +| +$/g, "");
-            this.token(["s", "script", body]);
-            return;
-        }
-        if (tag === "textarea" || tag === "title") {
-            this.token(["s", tag, normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "")]);
-            return;
-        }
-        // noscript / noframes / xmp / plaintext: treat body as visible text
-        this.text(body);
-    };
-
-    Emitter.prototype.finish = function () {
-        this.flush();
-        var t = this.tokens;
-        while (t.length && t[t.length - 1].length === 1 && t[t.length - 1][0] === "b") t.pop();
-        return t;
-    };
-
-    /* --------------------------------------------------- tokenizer (default) */
-
-    function attrGetter(attrs) {
-        return function (name) {
-            return attrs.hasOwnProperty(name) ? attrs[name] : null;
+        // Elements whose content is raw text, not markup.
+        var RAW_TEXT = {
+            script: 1, style: 1, title: 1, textarea: 1,
+            xmp: 1, noscript: 1, noframes: 1, plaintext: 1
         };
-    }
 
-    var ATTR_RE = /([^\s=\/>"'][^\s=\/>]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*)))?/g;
+        // Elements that force a visual break between text runs.
+        var BLOCK = {
+            address: 1, article: 1, aside: 1, blockquote: 1, body: 1, br: 1,
+            caption: 1, center: 1, col: 1, colgroup: 1, dd: 1, details: 1, dialog: 1,
+            dir: 1, div: 1, dl: 1, dt: 1, fieldset: 1, figcaption: 1, figure: 1,
+            footer: 1, form: 1, h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1, header: 1,
+            hgroup: 1, hr: 1, html: 1, legend: 1, li: 1, main: 1, menu: 1, nav: 1,
+            ol: 1, optgroup: 1, option: 1, p: 1, pre: 1, section: 1, summary: 1,
+            table: 1, tbody: 1, td: 1, tfoot: 1, th: 1, thead: 1, tr: 1, ul: 1
+        };
 
-    function parseAttrs(src) {
-        var attrs = {}, m, name;
-        ATTR_RE.lastIndex = 0;
-        while ((m = ATTR_RE.exec(src)) !== null) {
-            if (ATTR_RE.lastIndex === m.index) { ATTR_RE.lastIndex++; continue; }
-            name = m[1].toLowerCase();
-            if (name === "/" || !name) continue;
-            var val = m[2] != null ? m[2] : (m[3] != null ? m[3] : (m[4] != null ? m[4] : ""));
-            // First occurrence wins, matching the HTML parser.
-            if (!attrs.hasOwnProperty(name)) attrs[name] = val;
-        }
-        return attrs;
-    }
+        // URL-bearing attributes, in FIXED order so emission is deterministic.
+        var URL_ATTRS = [
+            "src", "srcset", "poster", "background", "data",
+            "xlink:href", "formaction", "action", "dynsrc", "lowsrc"
+        ];
 
-    function tokenize(html, o) {
-        var s = html == null ? "" : String(html);
-        var n = s.length, i = 0, em = new Emitter(o), guard = 0;
+        var NAMED = {
+            amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00A0",
+            ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", zwnj: "\u200C", zwj: "\u200D",
+            lrm: "\u200E", rlm: "\u200F", shy: "\u00AD",
+            ndash: "\u2013", mdash: "\u2014", lsquo: "\u2018", rsquo: "\u2019",
+            sbquo: "\u201A", ldquo: "\u201C", rdquo: "\u201D", bdquo: "\u201E",
+            dagger: "\u2020", Dagger: "\u2021", bull: "\u2022", hellip: "\u2026",
+            permil: "\u2030", prime: "\u2032", Prime: "\u2033", lsaquo: "\u2039",
+            rsaquo: "\u203A", oline: "\u203E", frasl: "\u2044", euro: "\u20AC",
+            trade: "\u2122", copy: "\u00A9", reg: "\u00AE", deg: "\u00B0",
+            plusmn: "\u00B1", middot: "\u00B7", laquo: "\u00AB", raquo: "\u00BB",
+            times: "\u00D7", divide: "\u00F7", frac12: "\u00BD", frac14: "\u00BC",
+            frac34: "\u00BE", pound: "\u00A3", yen: "\u00A5", cent: "\u00A2",
+            curren: "\u00A4", sect: "\u00A7", para: "\u00B6", micro: "\u00B5",
+            iexcl: "\u00A1", iquest: "\u00BF", brvbar: "\u00A6", uml: "\u00A8",
+            not: "\u00AC", macr: "\u00AF", acute: "\u00B4", cedil: "\u00B8",
+            sup1: "\u00B9", sup2: "\u00B2", sup3: "\u00B3", ordm: "\u00BA", ordf: "\u00AA",
+            agrave: "\u00E0", aacute: "\u00E1", acirc: "\u00E2", atilde: "\u00E3",
+            auml: "\u00E4", aring: "\u00E5", ccedil: "\u00E7", egrave: "\u00E8",
+            eacute: "\u00E9", ecirc: "\u00EA", euml: "\u00EB", igrave: "\u00EC",
+            iacute: "\u00ED", icirc: "\u00EE", iuml: "\u00EF", ntilde: "\u00F1",
+            ograve: "\u00F2", oacute: "\u00F3", ocirc: "\u00F4", otilde: "\u00F5",
+            ouml: "\u00F6", ugrave: "\u00F9", uacute: "\u00FA", ucirc: "\u00FB",
+            uuml: "\u00FC", yacute: "\u00FD", szlig: "\u00DF",
+            Agrave: "\u00C0", Aacute: "\u00C1", Auml: "\u00C4", Ccedil: "\u00C7",
+            Egrave: "\u00C8", Eacute: "\u00C9", Ouml: "\u00D6", Uuml: "\u00DC",
+            Ntilde: "\u00D1"
+        };
 
-        while (i < n) {
-            if (++guard > n * 4 + 16) break; // paranoia: never loop forever
+        // Entities browsers decode even without a trailing semicolon.
+        var NO_SEMI = {
+            amp: 1, lt: 1, gt: 1, quot: 1, nbsp: 1, copy: 1, reg: 1, deg: 1, pound: 1,
+            yen: 1, cent: 1, sect: 1, middot: 1, times: 1, divide: 1, not: 1, shy: 1,
+            macr: 1, acute: 1, uml: 1, para: 1, micro: 1
+        };
 
-            var lt = s.indexOf("<", i);
-            if (lt < 0) { em.text(s.slice(i)); break; }
-            if (lt > i) em.text(s.slice(i, lt));
+        // Invisible / formatting characters that cannot change what is rendered.
+        var ZERO_WIDTH = /[\u00AD\u200B\u200C\u200D\u200E\u200F\u2060\u2061\u2062\u2063\u2064\uFEFF]/g;
+        // Everything HTML treats as collapsible whitespace, incl. NBSP + Unicode spaces.
+        var WHITESPACE = /[\t\n\f\r \u000B\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g;
 
-            var next = s.charAt(lt + 1);
+        var DEFAULTS = {
+            links: true,        // capture <a href> / <area href> targets
+            media: true,        // capture src / srcset / poster / background / ...
+            css: true,          // capture <style> bodies and style="" url()s
+            scriptBodies: true, // capture <script> bodies
+            breaks: true,       // emit break tokens at block boundaries
+            normalizeUnicode: true, // NFC, so composed vs decomposed compare equal
+            lowercaseUrls: false,   // off: URL paths are case-sensitive
+            // Collapse cid:/blob:/data: URLs to one placeholder. REQUIRED when
+            // comparing against a live Outlook draft body: the host rewrites remote
+            // <img src> to cid: attachment references as soon as the signature is
+            // inserted, so a strict URL compare reports every desktop draft as tampered.
+            // http(s) URLs stay strict - those are the ones worth guarding.
+            hostRewrittenUrls: false
+        };
 
-            // Comments (incl. IE conditional comments) - skipped on every host.
-            if (s.substr(lt, 4) === "<!--") {
-                var endC = s.indexOf("-->", lt + 4);
-                if (endC < 0) { i = n; break; }
-                i = endC + 3;
-                continue;
-            }
-            // Doctype, CDATA, processing instructions, bogus comments.
-            if (next === "!" || next === "?") {
-                var endB = s.indexOf(">", lt + 2);
-                i = endB < 0 ? n : endB + 1;
-                continue;
-            }
+        /* --------------------------------------------------------------- helpers */
 
-            var isEnd = next === "/";
-            var nameStart = lt + (isEnd ? 2 : 1);
-            var ch = s.charAt(nameStart);
-            if (!/[a-zA-Z]/.test(ch)) {           // a literal "<" in text
-                em.text("<");
-                i = lt + 1;
-                continue;
-            }
-
-            var p = nameStart;
-            while (p < n && /[^\s\/>]/.test(s.charAt(p))) p++;
-            var tag = s.slice(nameStart, p).toLowerCase();
-
-            // Find the tag's ">" while respecting quoted attribute values.
-            var q = p, quote = "";
-            while (q < n) {
-                var c = s.charAt(q);
-                if (quote) { if (c === quote) quote = ""; }
-                else if (c === '"' || c === "'") quote = c;
-                else if (c === ">") break;
-                q++;
-            }
-            var attrSrc = s.slice(p, q);
-            i = (q < n ? q + 1 : n);
-
-            if (isEnd) {
-                if (BLOCK[tag]) em.brk();
-                if (o.links && tag === "a") em.token(["/h"]);
-                continue;
-            }
-
-            var attrs = parseAttrs(attrSrc);
-            em.element(tag, attrGetter(attrs));
-
-            if (RAW_TEXT[tag]) {
-                if (tag === "plaintext") { em.rawBody(tag, s.slice(i)); i = n; continue; }
-                var close = -1, from = i;
-                // case-insensitive search for "</tag"
-                var lower = s.toLowerCase(), needle = "</" + tag;
-                close = lower.indexOf(needle, from);
-                if (close < 0) { em.rawBody(tag, s.slice(from)); i = n; continue; }
-                em.rawBody(tag, s.slice(from, close));
-                i = close; // end tag consumed on the next iteration
-            }
+        function options(o) {
+            var out = {}, k;
+            for (k in DEFAULTS) if (DEFAULTS.hasOwnProperty(k)) out[k] = DEFAULTS[k];
+            if (o) for (k in o) if (o.hasOwnProperty(k) && out.hasOwnProperty(k)) out[k] = o[k];
+            return out;
         }
 
-        return em.finish();
-    }
-
-    /* ------------------------------------------------- DOM path (diagnostic) */
-
-    var TEXT_NODE = 3, ELEMENT_NODE = 1;
-
-    function domParserSupportsHtml() {
-        try {
-            if (typeof DOMParser === "undefined") return false;
-            var d = new DOMParser().parseFromString("<i>x</i>", "text/html");
-            return !!(d && d.body && d.body.textContent === "x");
-        } catch (e) { return false; }
-    }
-
-    function parseToBody(html) {
-        var str = html == null ? "" : String(html);
-        if (domParserSupportsHtml()) {
-            var d = new DOMParser().parseFromString(str, "text/html");
-            if (d && d.body) return d.body;
+        function fromCodePoint(cp) {
+            if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "\uFFFD";
+            if (cp > 0xffff) {
+                cp -= 0x10000;
+                return String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+            }
+            return String.fromCharCode(cp);
         }
-        if (typeof document !== "undefined" && document.implementation &&
-            document.implementation.createHTMLDocument) {
-            var doc = document.implementation.createHTMLDocument("");
-            // Neutralise loading attributes so an inert parse cannot hit the network,
-            // then read them back from their data-* twins.
-            doc.body.innerHTML = str.replace(
-                /\s(src|srcset|background|poster|lowsrc|dynsrc)\s*=/gi,
-                " data-hcs-$1="
-            );
-            return doc.body;
-        }
-        return null;
-    }
 
-    function domAttrGetter(el) {
-        return function (name) {
-            if (el.hasAttribute && el.hasAttribute(name)) return el.getAttribute(name);
-            if (el.hasAttribute && el.hasAttribute("data-hcs-" + name)) {
-                return el.getAttribute("data-hcs-" + name);
+        var ENT_RE = /&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31})(;?)/g;
+
+        function decodeEntities(str) {
+            if (str.indexOf("&") === -1) return str;
+            return str.replace(ENT_RE, function (m, body, semi) {
+                if (body.charAt(0) === "#") {
+                    var cp = body.charAt(1) === "x" || body.charAt(1) === "X"
+                        ? parseInt(body.slice(2), 16)
+                        : parseInt(body.slice(1), 10);
+                    if (isNaN(cp)) return m;
+                    return fromCodePoint(cp);
+                }
+                if (NAMED.hasOwnProperty(body) && (semi || NO_SEMI[body])) return NAMED[body];
+                // Unknown entity: leave verbatim. Deterministic on every host.
+                return m;
+            });
+        }
+
+        function normalizeText(s, o) {
+            s = s.replace(ZERO_WIDTH, "");
+            if (o.normalizeUnicode && typeof s.normalize === "function") {
+                try { s = s.normalize("NFC"); } catch (e) { /* older hosts */ }
+            }
+            return s.replace(WHITESPACE, " ");
+        }
+
+        // Browsers strip tabs/newlines/CRs from URLs and trim surrounding whitespace.
+        function normalizeUrl(v, o) {
+            if (v == null) return "";
+            v = decodeEntities(String(v)).replace(/[\t\n\r]+/g, "").replace(ZERO_WIDTH, "");
+            v = v.replace(/^[\s\u00A0]+|[\s\u00A0]+$/g, "");
+            if (o.hostRewrittenUrls && /^(?:cid|blob|data):/i.test(v)) return "@embedded";
+            return o.lowercaseUrls ? v.toLowerCase() : v;
+        }
+
+        function normalizeSrcset(v, o) {
+            // "a.png 1x,  b.png 2x" -> "a.png 1x,b.png 2x" (order preserved, ws collapsed)
+            var parts = String(v == null ? "" : v).split(",");
+            var res = [], i, p, sp, url, desc;
+            for (i = 0; i < parts.length; i++) {
+                p = decodeEntities(parts[i]).replace(WHITESPACE, " ").replace(/^ | $/g, "");
+                if (!p) continue;
+                sp = p.indexOf(" ");
+                url = sp === -1 ? p : p.slice(0, sp);
+                desc = sp === -1 ? "" : " " + p.slice(sp + 1);
+                res.push(normalizeUrl(url, o) + desc);
+            }
+            return res.join(",");
+        }
+
+        var CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi;
+
+        function cssUrls(css, o) {
+            var found = [], m;
+            CSS_URL_RE.lastIndex = 0;
+            while ((m = CSS_URL_RE.exec(css)) !== null) {
+                var u = normalizeUrl(m[1] != null ? m[1] : (m[2] != null ? m[2] : m[3]), o);
+                if (u) found.push(u);
+                if (CSS_URL_RE.lastIndex === m.index) CSS_URL_RE.lastIndex++; // guard
+            }
+            return found;
+        }
+
+        /* ---------------------------------------------------------- token emitter */
+
+        function Emitter(o) {
+            this.o = o;
+            this.tokens = [];
+            this.buf = [];
+            this.pendingSpace = false;
+        }
+
+        Emitter.prototype.flush = function () {
+            if (this.buf.length) {
+                this.tokens.push(["t", this.buf.join("")]);
+                this.buf.length = 0;
+            }
+            this.pendingSpace = false;
+        };
+
+        Emitter.prototype.text = function (raw, alreadyDecoded) {
+            if (!raw) return;
+            var t = normalizeText(alreadyDecoded ? raw : decodeEntities(raw), this.o);
+            if (!t) return;
+            if (t === " ") { if (this.buf.length) this.pendingSpace = true; return; }
+            var lead = t.charAt(0) === " ";
+            var trail = t.charAt(t.length - 1) === " ";
+            var core = t.replace(/^ +| +$/g, "");
+            if (this.buf.length && (this.pendingSpace || lead)) this.buf.push(" ");
+            this.buf.push(core);
+            this.pendingSpace = trail;
+        };
+
+        Emitter.prototype.token = function (arr) {
+            this.flush();
+            this.tokens.push(arr);
+        };
+
+        Emitter.prototype.brk = function () {
+            if (!this.o.breaks) { if (this.buf.length) this.pendingSpace = true; return; }
+            this.flush();
+            var last = this.tokens[this.tokens.length - 1];
+            if (!this.tokens.length) return;                 // no leading break
+            if (last && last.length === 1 && last[0] === "b") return; // no doubles
+            this.tokens.push(["b"]);
+        };
+
+        // Shared per-element handling for both the tokenizer and the DOM walker.
+        Emitter.prototype.element = function (tag, getAttr) {
+            var o = this.o, i, a, v;
+
+            if (BLOCK[tag]) this.brk();
+
+            if (o.media) {
+                for (i = 0; i < URL_ATTRS.length; i++) {
+                    a = URL_ATTRS[i];
+                    v = getAttr(a);
+                    if (v == null) continue;
+                    this.token(["u", tag, a, a === "srcset" ? normalizeSrcset(v, o) : normalizeUrl(v, o)]);
+                }
+            }
+
+            if (o.links && (tag === "a" || tag === "area" || tag === "link")) {
+                v = getAttr("href");
+                if (v != null) this.token(["h", tag, normalizeUrl(v, o)]);
+            }
+
+            // <img> must always be visible in the signature, even with no src,
+            // because its mere presence is rendered content.
+            if (tag === "img" || tag === "image" || tag === "input" || tag === "object" ||
+                tag === "embed" || tag === "iframe" || tag === "video" || tag === "audio" ||
+                tag === "svg" || tag === "canvas") {
+                this.token(["e", tag]);
+                if (tag === "input") {
+                    v = getAttr("type");
+                    if (v != null) this.token(["a", "type", normalizeText(decodeEntities(String(v)), o)]);
+                    v = getAttr("value");
+                    if (v != null) this.token(["a", "value", normalizeText(decodeEntities(String(v)), o)]);
+                }
+            }
+
+            if (o.css) {
+                v = getAttr("style");
+                if (v != null) {
+                    var urls = cssUrls(decodeEntities(String(v)), o);
+                    for (i = 0; i < urls.length; i++) this.token(["c", urls[i]]);
+                }
+            }
+        };
+
+        Emitter.prototype.rawBody = function (tag, body) {
+            var o = this.o, i, urls;
+            if (tag === "style") {
+                if (!o.css) return;
+                body = normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "");
+                this.token(["s", "style", body]);
+                return;
+            }
+            if (tag === "script") {
+                if (!o.scriptBodies) return;
+                body = body.replace(WHITESPACE, " ").replace(/^ +| +$/g, "");
+                this.token(["s", "script", body]);
+                return;
+            }
+            if (tag === "textarea" || tag === "title") {
+                this.token(["s", tag, normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "")]);
+                return;
+            }
+            // noscript / noframes / xmp / plaintext: treat body as visible text
+            this.text(body);
+        };
+
+        Emitter.prototype.finish = function () {
+            this.flush();
+            var t = this.tokens;
+            while (t.length && t[t.length - 1].length === 1 && t[t.length - 1][0] === "b") t.pop();
+            return t;
+        };
+
+        /* --------------------------------------------------- tokenizer (default) */
+
+        function attrGetter(attrs) {
+            return function (name) {
+                return attrs.hasOwnProperty(name) ? attrs[name] : null;
+            };
+        }
+
+        var ATTR_RE = /([^\s=\/>"'][^\s=\/>]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*)))?/g;
+
+        function parseAttrs(src) {
+            var attrs = {}, m, name;
+            ATTR_RE.lastIndex = 0;
+            while ((m = ATTR_RE.exec(src)) !== null) {
+                if (ATTR_RE.lastIndex === m.index) { ATTR_RE.lastIndex++; continue; }
+                name = m[1].toLowerCase();
+                if (name === "/" || !name) continue;
+                var val = m[2] != null ? m[2] : (m[3] != null ? m[3] : (m[4] != null ? m[4] : ""));
+                // First occurrence wins, matching the HTML parser.
+                if (!attrs.hasOwnProperty(name)) attrs[name] = val;
+            }
+            return attrs;
+        }
+
+        function tokenize(html, o) {
+            var s = html == null ? "" : String(html);
+            var n = s.length, i = 0, em = new Emitter(o), guard = 0;
+
+            while (i < n) {
+                if (++guard > n * 4 + 16) break; // paranoia: never loop forever
+
+                var lt = s.indexOf("<", i);
+                if (lt < 0) { em.text(s.slice(i)); break; }
+                if (lt > i) em.text(s.slice(i, lt));
+
+                var next = s.charAt(lt + 1);
+
+                // Comments (incl. IE conditional comments) - skipped on every host.
+                if (s.substr(lt, 4) === "<!--") {
+                    var endC = s.indexOf("-->", lt + 4);
+                    if (endC < 0) { i = n; break; }
+                    i = endC + 3;
+                    continue;
+                }
+                // Doctype, CDATA, processing instructions, bogus comments.
+                if (next === "!" || next === "?") {
+                    var endB = s.indexOf(">", lt + 2);
+                    i = endB < 0 ? n : endB + 1;
+                    continue;
+                }
+
+                var isEnd = next === "/";
+                var nameStart = lt + (isEnd ? 2 : 1);
+                var ch = s.charAt(nameStart);
+                if (!/[a-zA-Z]/.test(ch)) {           // a literal "<" in text
+                    em.text("<");
+                    i = lt + 1;
+                    continue;
+                }
+
+                var p = nameStart;
+                while (p < n && /[^\s\/>]/.test(s.charAt(p))) p++;
+                var tag = s.slice(nameStart, p).toLowerCase();
+
+                // Find the tag's ">" while respecting quoted attribute values.
+                var q = p, quote = "";
+                while (q < n) {
+                    var c = s.charAt(q);
+                    if (quote) { if (c === quote) quote = ""; }
+                    else if (c === '"' || c === "'") quote = c;
+                    else if (c === ">") break;
+                    q++;
+                }
+                var attrSrc = s.slice(p, q);
+                i = (q < n ? q + 1 : n);
+
+                if (isEnd) {
+                    if (BLOCK[tag]) em.brk();
+                    if (o.links && tag === "a") em.token(["/h"]);
+                    continue;
+                }
+
+                var attrs = parseAttrs(attrSrc);
+                em.element(tag, attrGetter(attrs));
+
+                if (RAW_TEXT[tag]) {
+                    if (tag === "plaintext") { em.rawBody(tag, s.slice(i)); i = n; continue; }
+                    var close = -1, from = i;
+                    // case-insensitive search for "</tag"
+                    var lower = s.toLowerCase(), needle = "</" + tag;
+                    close = lower.indexOf(needle, from);
+                    if (close < 0) { em.rawBody(tag, s.slice(from)); i = n; continue; }
+                    em.rawBody(tag, s.slice(from, close));
+                    i = close; // end tag consumed on the next iteration
+                }
+            }
+
+            return em.finish();
+        }
+
+        /* ------------------------------------------------- DOM path (diagnostic) */
+
+        var TEXT_NODE = 3, ELEMENT_NODE = 1;
+
+        function domParserSupportsHtml() {
+            try {
+                if (typeof DOMParser === "undefined") return false;
+                var d = new DOMParser().parseFromString("<i>x</i>", "text/html");
+                return !!(d && d.body && d.body.textContent === "x");
+            } catch (e) { return false; }
+        }
+
+        function parseToBody(html) {
+            var str = html == null ? "" : String(html);
+            if (domParserSupportsHtml()) {
+                var d = new DOMParser().parseFromString(str, "text/html");
+                if (d && d.body) return d.body;
+            }
+            if (typeof document !== "undefined" && document.implementation &&
+                document.implementation.createHTMLDocument) {
+                var doc = document.implementation.createHTMLDocument("");
+                // Neutralise loading attributes so an inert parse cannot hit the network,
+                // then read them back from their data-* twins.
+                doc.body.innerHTML = str.replace(
+                    /\s(src|srcset|background|poster|lowsrc|dynsrc)\s*=/gi,
+                    " data-hcs-$1="
+                );
+                return doc.body;
             }
             return null;
-        };
-    }
+        }
 
-    function tokenizeDom(html, o) {
-        var body = parseToBody(html);
-        var em = new Emitter(o);
-        if (!body) return null;
+        function domAttrGetter(el) {
+            return function (name) {
+                if (el.hasAttribute && el.hasAttribute(name)) return el.getAttribute(name);
+                if (el.hasAttribute && el.hasAttribute("data-hcs-" + name)) {
+                    return el.getAttribute("data-hcs-" + name);
+                }
+                return null;
+            };
+        }
 
-        var stack = [{ node: body, i: 0, entered: false }];
-        while (stack.length) {
-            var top = stack[stack.length - 1];
-            var node = top.node;
+        function tokenizeDom(html, o) {
+            var body = parseToBody(html);
+            var em = new Emitter(o);
+            if (!body) return null;
 
-            if (!top.entered) {
-                top.entered = true;
-                if (node !== body && node.nodeType === ELEMENT_NODE) {
-                    var tag = String(node.tagName || "").toLowerCase();
-                    em.element(tag, domAttrGetter(node));
-                    if (RAW_TEXT[tag]) {
-                        em.rawBody(tag, node.textContent || "");
-                        stack.pop();
-                        continue;
+            var stack = [{ node: body, i: 0, entered: false }];
+            while (stack.length) {
+                var top = stack[stack.length - 1];
+                var node = top.node;
+
+                if (!top.entered) {
+                    top.entered = true;
+                    if (node !== body && node.nodeType === ELEMENT_NODE) {
+                        var tag = String(node.tagName || "").toLowerCase();
+                        em.element(tag, domAttrGetter(node));
+                        if (RAW_TEXT[tag]) {
+                            em.rawBody(tag, node.textContent || "");
+                            stack.pop();
+                            continue;
+                        }
                     }
                 }
-            }
 
-            var kids = node.childNodes;
-            if (kids && top.i < kids.length) {
-                var child = kids[top.i++];
-                if (child.nodeType === TEXT_NODE) em.text(child.nodeValue || "", true);
-                else if (child.nodeType === ELEMENT_NODE) stack.push({ node: child, i: 0, entered: false });
-                continue;
-            }
+                var kids = node.childNodes;
+                if (kids && top.i < kids.length) {
+                    var child = kids[top.i++];
+                    if (child.nodeType === TEXT_NODE) em.text(child.nodeValue || "", true);
+                    else if (child.nodeType === ELEMENT_NODE) stack.push({ node: child, i: 0, entered: false });
+                    continue;
+                }
 
-            if (node !== body && node.nodeType === ELEMENT_NODE) {
-                var t2 = String(node.tagName || "").toLowerCase();
-                if (BLOCK[t2]) em.brk();
-                if (o.links && t2 === "a") em.token(["/h"]);
+                if (node !== body && node.nodeType === ELEMENT_NODE) {
+                    var t2 = String(node.tagName || "").toLowerCase();
+                    if (BLOCK[t2]) em.brk();
+                    if (o.links && t2 === "a") em.token(["/h"]);
+                }
+                stack.pop();
             }
-            stack.pop();
+            return em.finish();
         }
-        return em.finish();
-    }
 
-    /* ------------------------------------------------- marked region extraction
-  
-       Locating "the signature" inside a draft body needs an anchor, because
-       setSignatureAsync does NOT always put the block at the end (on a reply it
-       sits above the quoted original). Wrap what you write in a marked element
-       and pull it back out by that attribute.
-  
-       Void elements never open a depth level; raw-text elements are skipped so a
-       marker mentioned inside <style> or a comment cannot be mistaken for one.
-    ------------------------------------------------------------------------- */
+        /* ------------------------------------------------- marked region extraction
+      
+           Locating "the signature" inside a draft body needs an anchor, because
+           setSignatureAsync does NOT always put the block at the end (on a reply it
+           sits above the quoted original). Wrap what you write in a marked element
+           and pull it back out by that attribute.
+      
+           Void elements never open a depth level; raw-text elements are skipped so a
+           marker mentioned inside <style> or a comment cannot be mistaken for one.
+        ------------------------------------------------------------------------- */
 
-    var VOID = {
-        area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1,
-        link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1
-    };
+        var VOID = {
+            area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1,
+            link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1
+        };
 
-    function isAlpha(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }
-    function isTagNameEnd(c) {
-        return c === 32 || c === 9 || c === 10 || c === 13 || c === 12 || c === 47 || c === 62;
-    }
+        function isAlpha(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }
+        function isTagNameEnd(c) {
+            return c === 32 || c === 9 || c === 10 || c === 13 || c === 12 || c === 47 || c === 62;
+        }
 
-    /**
-     * Every element carrying `attr`, with its inner HTML and the attribute value.
-     *
-     * PERFORMANCE NOTE: this is one flat loop over char codes on purpose. The
-     * first version walked tags through a callback and allocated a descriptor
-     * object per tag; V8 ran it at ~14ms for three calls and then, once the
-     * function was optimised, at ~575ms on the SAME 140KB input - a 40x deopt
-     * cliff that would land squarely inside the send budget. Do not reintroduce
-     * a per-tag callback or per-tag object here.
-     *
-     * @returns {Array<{value:string, inner:string, tag:string}>}
-     */
-    function extractMarkedRegions(html, attr) {
-        var s = String(html == null ? "" : html);
-        var a = String(attr).toLowerCase();
-        var found = [];
-        if (!s || s.indexOf("<") === -1) return found;
+        /**
+         * Every element carrying `attr`, with its inner HTML and the attribute value.
+         *
+         * PERFORMANCE NOTE: this is one flat loop over char codes on purpose. The
+         * first version walked tags through a callback and allocated a descriptor
+         * object per tag; V8 ran it at ~14ms for three calls and then, once the
+         * function was optimised, at ~575ms on the SAME 140KB input - a 40x deopt
+         * cliff that would land squarely inside the send budget. Do not reintroduce
+         * a per-tag callback or per-tag object here.
+         *
+         * @returns {Array<{value:string, inner:string, tag:string, start:number, end:number}>}
+         *   start/end bracket the whole element, so a caller can compare against a
+         *   quote boundary and discard copies sitting in the quoted thread.
+         */
+        function extractMarkedRegions(html, attr) {
+            var s = String(html == null ? "" : html);
+            var a = String(attr).toLowerCase();
+            var found = [];
+            if (!s || s.indexOf("<") === -1) return found;
 
-        var lower = s.toLowerCase();
-        if (lower.indexOf(a) === -1) return found;   // no marker anywhere: done
+            var lower = s.toLowerCase();
+            if (lower.indexOf(a) === -1) return found;   // no marker anywhere: done
 
-        var n = s.length, i = 0;
-        var openTag = "", depth = 0, innerStart = 0, openValue = "";
+            var n = s.length, i = 0;
+            var openTag = "", depth = 0, innerStart = 0, openValue = "", openStart = 0;
 
-        while (i < n) {
-            var lt = s.indexOf("<", i);
-            if (lt < 0) break;
+            while (i < n) {
+                var lt = s.indexOf("<", i);
+                if (lt < 0) break;
 
-            // <!-- comment -->  (also swallows IE conditional comment blocks)
-            if (s.charCodeAt(lt + 1) === 33 && s.charCodeAt(lt + 2) === 45 && s.charCodeAt(lt + 3) === 45) {
-                var ec = s.indexOf("-->", lt + 4);
-                i = ec < 0 ? n : ec + 3;
-                continue;
+                // <!-- comment -->  (also swallows IE conditional comment blocks)
+                if (s.charCodeAt(lt + 1) === 33 && s.charCodeAt(lt + 2) === 45 && s.charCodeAt(lt + 3) === 45) {
+                    var ec = s.indexOf("-->", lt + 4);
+                    i = ec < 0 ? n : ec + 3;
+                    continue;
+                }
+                var nc = s.charCodeAt(lt + 1);
+                if (nc === 33 || nc === 63) {              // doctype / PI / bogus comment
+                    var eb = s.indexOf(">", lt + 2);
+                    i = eb < 0 ? n : eb + 1;
+                    continue;
+                }
+
+                var isEnd = nc === 47;
+                var ns = lt + (isEnd ? 2 : 1);
+                if (!isAlpha(s.charCodeAt(ns))) { i = lt + 1; continue; }
+
+                var p = ns;
+                while (p < n && !isTagNameEnd(s.charCodeAt(p))) p++;
+                var tag = lower.slice(ns, p);
+
+                var q = p, quote = 0;
+                while (q < n) {
+                    var c = s.charCodeAt(q);
+                    if (quote) { if (c === quote) quote = 0; }
+                    else if (c === 34 || c === 39) quote = c;
+                    else if (c === 62) break;
+                    q++;
+                }
+                var afterTag = (q < n ? q + 1 : n);
+                // "/>" or a void element never opens a depth level.
+                var selfClosing = !!VOID[tag] || (function () {
+                    var k = q - 1;
+                    while (k > p && isTagNameEnd(s.charCodeAt(k)) && s.charCodeAt(k) !== 47) k--;
+                    return s.charCodeAt(k) === 47;
+                })();
+
+                if (depth > 0) {
+                    if (tag === openTag) {
+                        if (isEnd) {
+                            if (--depth === 0) {
+                                found.push({
+                                    value: openValue, tag: openTag, inner: s.slice(innerStart, lt),
+                                    start: openStart, end: afterTag
+                                });
+                            }
+                        } else if (!selfClosing) depth++;
+                    }
+                } else if (!isEnd && !selfClosing && q - p > a.length) {
+                    // Search WITHIN this tag only. `lower.indexOf(a, p)` would scan to the
+                    // end of the document for every tag that lacks the marker - O(n^2), and
+                    // ~155ms on a 140KB reply thread.
+                    var attrSrc = lower.slice(p, q);
+                    var attrs = attrSrc.indexOf(a) === -1 ? null : parseAttrs(s.slice(p, q));
+                    if (attrs && attrs.hasOwnProperty(a)) {
+                        openTag = tag;
+                        depth = 1;
+                        innerStart = afterTag;
+                        openStart = lt;
+                        openValue = decodeEntities(attrs[a] || "");
+                    }
+                }
+
+                i = afterTag;
+                // Never look for markers inside <style>/<script>/<textarea>/<title>.
+                if (!isEnd && RAW_TEXT[tag]) {
+                    var close = lower.indexOf("</" + tag, i);
+                    i = close < 0 ? n : close;
+                }
             }
-            var nc = s.charCodeAt(lt + 1);
-            if (nc === 33 || nc === 63) {              // doctype / PI / bogus comment
-                var eb = s.indexOf(">", lt + 2);
-                i = eb < 0 ? n : eb + 1;
-                continue;
-            }
 
-            var isEnd = nc === 47;
-            var ns = lt + (isEnd ? 2 : 1);
-            if (!isAlpha(s.charCodeAt(ns))) { i = lt + 1; continue; }
-
-            var p = ns;
-            while (p < n && !isTagNameEnd(s.charCodeAt(p))) p++;
-            var tag = lower.slice(ns, p);
-
-            var q = p, quote = 0;
-            while (q < n) {
-                var c = s.charCodeAt(q);
-                if (quote) { if (c === quote) quote = 0; }
-                else if (c === 34 || c === 39) quote = c;
-                else if (c === 62) break;
-                q++;
-            }
-            var afterTag = (q < n ? q + 1 : n);
-            // "/>" or a void element never opens a depth level.
-            var selfClosing = !!VOID[tag] || (function () {
-                var k = q - 1;
-                while (k > p && isTagNameEnd(s.charCodeAt(k)) && s.charCodeAt(k) !== 47) k--;
-                return s.charCodeAt(k) === 47;
-            })();
-
+            // Unclosed marker (truncated body, or the host mangled the wrapper): take
+            // everything after it rather than reporting nothing.
             if (depth > 0) {
-                if (tag === openTag) {
-                    if (isEnd) {
-                        if (--depth === 0) {
-                            found.push({ value: openValue, tag: openTag, inner: s.slice(innerStart, lt) });
-                        }
-                    } else if (!selfClosing) depth++;
-                }
-            } else if (!isEnd && !selfClosing && q - p > a.length) {
-                // Search WITHIN this tag only. `lower.indexOf(a, p)` would scan to the
-                // end of the document for every tag that lacks the marker - O(n^2), and
-                // ~155ms on a 140KB reply thread.
-                var attrSrc = lower.slice(p, q);
-                var attrs = attrSrc.indexOf(a) === -1 ? null : parseAttrs(s.slice(p, q));
-                if (attrs && attrs.hasOwnProperty(a)) {
-                    openTag = tag;
-                    depth = 1;
-                    innerStart = afterTag;
-                    openValue = decodeEntities(attrs[a] || "");
-                }
+                found.push({
+                    value: openValue, tag: openTag, inner: s.slice(innerStart),
+                    start: openStart, end: s.length
+                });
+            }
+            return found;
+        }
+
+        /* ------------------------------------------------- draft / quote splitting
+      
+           A reply or forward body is NOT just the signature and the user's text: it
+           also carries the quoted thread, which very often contains an intact copy of
+           the same signature (any earlier mail in the thread that we signed). Search
+           the whole body and that copy answers "is the signature intact?" on behalf
+           of the live one — so an edited or deleted live signature reads as
+           identical. Verification must be scoped to the live part.
+      
+           These markers are the separators Outlook and other clients put in front of
+           the quoted section. They are deliberately high-signal: the EARLIEST match
+           wins, so a false positive would truncate too early, report the signature as
+           absent, and cause a rewrite - the safe direction. A bare <hr> is not in the
+           list precisely because signatures contain them.
+        ------------------------------------------------------------------------- */
+
+        var QUOTE_MARKERS = [
+            "appendonsend",                                 // OWA / New Outlook anchor
+            "divrplyfwdmsg",                                // Outlook desktop (and x_ prefixed)
+            "mail-editor-reference-message-container",       // OWA
+            "-----original message-----",                    // Outlook plain separator
+            "-------- original message --------",            // mobile / other clients
+            "id=\"stopspelling\"", "id='stopspelling'",      // Outlook Windows separator
+            "blockquote type=\"cite\"", "blockquote type='cite'", // Mac Outlook, Apple Mail
+            "gmail_quote",                                   // Gmail
+            "yahoo_quoted",                                  // Yahoo
+            "ms-outlook-mobile-reference-message",            // Outlook mobile
+            "border-top:solid #e1e1e1 1.0pt"                 // Word's reply separator
+        ];
+
+        /**
+         * Split a draft body into the live compose area and the quoted thread.
+         * @returns {{live:string, quoted:string, boundary:number}}
+         *   boundary === html.length when no quoted section was found.
+         */
+        function splitDraftAtQuote(html) {
+            var s = String(html == null ? "" : html);
+            var lower = s.toLowerCase();
+            var at = -1;
+            for (var i = 0; i < QUOTE_MARKERS.length; i++) {
+                var hit = lower.indexOf(QUOTE_MARKERS[i]);
+                if (hit !== -1 && (at === -1 || hit < at)) at = hit;
+            }
+            if (at === -1) return { live: s, quoted: "", boundary: s.length };
+            // Rewind to the start of the tag the marker sits in, so a marked signature
+            // ending right before the separator is not clipped mid-element.
+            var lt = s.lastIndexOf("<", at);
+            if (lt !== -1) at = lt;
+            return { live: s.slice(0, at), quoted: s.slice(at), boundary: at };
+        }
+
+        // Ready-made option sets. `body` is the one to use against a draft body.
+        var PROFILES = {
+            // Byte-for-byte content equality. For comparing two stored copies.
+            strict: {},
+            // For comparing a stored signature against what is in an Outlook draft.
+            // CSS and script bodies are excluded because the Word and OWA editors
+            // rewrite style blocks and inline CSS wholesale - keeping them guarantees a
+            // mismatch on every desktop draft. What remains is what tampering has to
+            // touch to be harmful: visible text, link targets, image identity, order.
+            body: { css: false, scriptBodies: false, hostRewrittenUrls: true }
+        };
+
+        function keyOf(tok) { return JSON.stringify(tok); }
+
+        /**
+         * Token equality with ONE asymmetric allowance: when hostRewrittenUrls is on,
+         * "@embedded" in the URL slot of a ["u", tag, attr, url] token matches any
+         * URL on the other side. The cached copy says
+         * src="https://cdn.example/logo.png"; the draft says src="cid:image001.png"
+         * because Outlook attached and rewrote it. Both describe the same image.
+         *
+         * KNOWN LIMIT: this means an attacker who replaces the logo with ANOTHER
+         * cid: attachment is not caught by URL. Image count, position, and every
+         * text and href token are still compared strictly, which is what makes a
+         * misleading signature hard to build.
+         */
+        function tokEq(x, y, wild) {
+            if (x.length !== y.length) return false;
+            for (var i = 0; i < x.length; i++) {
+                if (x[i] === y[i]) continue;
+                if (wild && x[0] === "u" && i === 3 && (x[3] === "@embedded" || y[3] === "@embedded")) continue;
+                return false;
+            }
+            return true;
+        }
+
+        function runsEqual(a, b, wild) {
+            if (a.length !== b.length) return false;
+            for (var i = 0; i < a.length; i++) if (!tokEq(a[i], b[i], wild)) return false;
+            return true;
+        }
+
+        function stripEdgeBreaks(toks) {
+            var a = 0, b = toks.length;
+            while (a < b && toks[a].length === 1 && toks[a][0] === "b") a++;
+            while (b > a && toks[b - 1].length === 1 && toks[b - 1][0] === "b") b--;
+            return toks.slice(a, b);
+        }
+
+        // Index of the first contiguous occurrence of `needle` in `hay`, or -1.
+        // Exact string-key pass first (fast); only retried with the URL wildcard if
+        // that misses and the caller asked for host tolerance.
+        function indexOfTokenRun(hay, needle, wild) {
+            if (!needle.length) return -1;
+            var hk = hay.map(keyOf), nk = needle.map(keyOf);
+            var limit = hk.length - nk.length, i, j, ok;
+            for (i = 0; i <= limit; i++) {
+                ok = true;
+                for (j = 0; j < nk.length; j++) if (hk[i + j] !== nk[j]) { ok = false; break; }
+                if (ok) return i;
+            }
+            if (!wild) return -1;
+            for (i = 0; i <= limit; i++) {
+                ok = true;
+                for (j = 0; j < needle.length; j++) if (!tokEq(hay[i + j], needle[j], true)) { ok = false; break; }
+                if (ok) return i;
+            }
+            return -1;
+        }
+
+        // Fraction of the expected tokens present anywhere in the body (multiset).
+        // Diagnostic only: it separates "edited" from "not there at all".
+        function overlap(expected, actual) {
+            var want = stripEdgeBreaks(expected).filter(function (t) { return t[0] !== "b"; });
+            if (!want.length) return 1;
+            var bag = {}, i, k;
+            for (i = 0; i < actual.length; i++) {
+                k = keyOf(actual[i]);
+                bag[k] = (bag[k] || 0) + 1;
+            }
+            var hit = 0;
+            for (i = 0; i < want.length; i++) {
+                k = keyOf(want[i]);
+                if (bag[k] > 0) { bag[k]--; hit++; }
+            }
+            return hit / want.length;
+        }
+
+        /**
+         * Is `expectedHtml` present, unmodified, inside `containerHtml`?
+         *
+         * @returns {{verdict:"identical"|"modified"|"absent", at:number, overlap:number}}
+         *   identical - found as an intact contiguous run
+         *   modified  - much of it is there but not intact
+         *   absent    - not meaningfully there at all
+         */
+        function verifyRegion(expectedHtml, containerHtml, o) {
+            var opt = options(o);
+            var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
+            var act = tokenize(containerHtml, opt);
+            if (!exp.length) return { verdict: "absent", at: -1, overlap: 0 };
+            var at = indexOfTokenRun(act, exp, opt.hostRewrittenUrls);
+            if (at >= 0) return { verdict: "identical", at: at, overlap: 1 };
+            var ov = overlap(exp, act);
+            return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
+        }
+
+        /** Direct equality of two HTML fragments under a profile. */
+        function verifyExact(expectedHtml, actualHtml, o) {
+            var opt = options(o);
+            var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
+            var act = stripEdgeBreaks(tokenize(actualHtml, opt));
+            if (runsEqual(exp, act, opt.hostRewrittenUrls)) return { verdict: "identical", at: 0, overlap: 1 };
+            var ov = overlap(exp, act);
+            return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
+        }
+
+        /**
+         * THE POLICY BOTH BUILDS SHARE. Is our signature still intact on this DRAFT?
+         *
+         * Everything here exists because a draft is not a fragment. On a reply or
+         * forward it contains the quoted thread, and that thread routinely holds an
+         * intact copy of the very signature being checked. So:
+         *
+         *   1. The body is split at the quoted-thread boundary; only the LIVE part is
+         *      ever searched. A pristine copy sitting in the quote can no longer
+         *      answer for an edited live one.
+         *   2. Marked regions inside the quote are discarded rather than counted as
+         *      duplicates - otherwise every reply in a thread we have signed before
+         *      reports "duplicate" and gets rewritten for nothing.
+         *   3. If the live part has no copy at all, the verdict is absent/modified and
+         *      the caller rewrites, even when the quote holds a perfect copy. That is
+         *      the point: what matters is what the recipient will read at the top.
+         *
+         * DELIBERATE COST: with Outlook configured to place the signature BELOW the
+         * quoted text, the live block falls outside the live slice, so the verdict is
+         * always "absent" and every send rewrites. That is exactly the pre-
+         * verification behaviour, and it is preferred over the alternative - trusting
+         * a trailing marked block, which on a reply-to-our-own-mail is indistinguish-
+         * able from the oldest quoted signature at the bottom of the thread.
+         *
+         * @param {string} expectedHtml  the signature as resolved from cache
+         * @param {string} bodyHtml      the whole draft body
+         * @param {object} o             { markAttr, sigId, ...profile options }
+         * @returns {{verdict:string, reason:string, scope:string, quotedCopy:boolean}}
+         *   verdict: identical | modified | absent | duplicate | id-changed
+         */
+        function verifyInDraft(expectedHtml, bodyHtml, o) {
+            var opt = options(o);
+            var attr = (o && o.markAttr) || "data-cb-sig";
+            var sigId = o && o.sigId != null ? String(o.sigId) : null;
+
+            var split = splitDraftAtQuote(bodyHtml);
+            var hasQuote = split.boundary < String(bodyHtml == null ? "" : bodyHtml).length;
+            var scope = hasQuote ? "live-of-reply" : "whole-body";
+
+            var all = extractMarkedRegions(bodyHtml, attr);
+            var live = [], quoted = 0;
+            for (var i = 0; i < all.length; i++) {
+                if (all[i].start < split.boundary) live.push(all[i]);
+                else quoted++;
             }
 
-            i = afterTag;
-            // Never look for markers inside <style>/<script>/<textarea>/<title>.
-            if (!isEnd && RAW_TEXT[tag]) {
-                var close = lower.indexOf("</" + tag, i);
-                i = close < 0 ? n : close;
+            // Is there an intact copy in the quoted thread? Diagnostic only - it never
+            // changes the verdict, but it is the single most useful fact in a log when
+            // someone asks why a reply was rewritten. Computed LAZILY: tokenising a long
+            // quoted thread costs ~12ms on a 137KB reply, and it is pointless when the
+            // live block already verified clean.
+            var quotedCopy = null;
+            function describe(extra) {
+                if (quotedCopy === null) {
+                    quotedCopy = !!split.quoted &&
+                        verifyRegion(expectedHtml, split.quoted, opt).verdict === "identical";
+                }
+                return extra +
+                    (quoted ? ", " + quoted + " marked copy/copies in the quote" : "") +
+                    (quotedCopy ? ", intact copy in the quote (ignored)" : "");
             }
+
+            if (live.length > 1) {
+                return {
+                    verdict: "duplicate", scope: scope, quotedCopy: quotedCopy,
+                    reason: describe(live.length + " signature blocks in the live area")
+                };
+            }
+
+            if (live.length === 1) {
+                if (sigId !== null && String(live[0].value) !== sigId) {
+                    return {
+                        verdict: "id-changed", scope: scope, quotedCopy: quotedCopy,
+                        reason: describe("live block has id=" + live[0].value + ", target=" + sigId)
+                    };
+                }
+                var r = verifyExact(expectedHtml, live[0].inner, opt);
+                // Clean live block: skip the quoted-thread scan entirely.
+                if (r.verdict === "identical") {
+                    return {
+                        verdict: "identical", scope: scope, quotedCopy: false,
+                        reason: "marked live block, overlap=1.00" +
+                            (quoted ? ", " + quoted + " marked copy/copies in the quote (ignored)" : "")
+                    };
+                }
+                return {
+                    verdict: r.verdict, scope: scope, quotedCopy: quotedCopy,
+                    reason: describe("marked live block, overlap=" + r.overlap.toFixed(2))
+                };
+            }
+
+            // No marked block in the live area: a pre-wrapper draft, a stripped
+            // attribute, or a signature that was never written here. Search the LIVE
+            // slice only - never the quote.
+            var r2 = verifyRegion(expectedHtml, split.live, opt);
+            if (r2.verdict === "identical") {
+                return {
+                    verdict: "identical", scope: scope, quotedCopy: false,
+                    reason: "unmarked live area, overlap=1.00"
+                };
+            }
+            return {
+                verdict: r2.verdict, scope: scope, quotedCopy: quotedCopy,
+                reason: describe("unmarked live area, overlap=" + r2.overlap.toFixed(2))
+            };
         }
 
-        // Unclosed marker (truncated body, or the host mangled the wrapper): take
-        // everything after it rather than reporting nothing.
-        if (depth > 0) found.push({ value: openValue, tag: openTag, inner: s.slice(innerStart) });
-        return found;
-    }
+        /* -------------------------------------------------------------- public API */
 
-    /* ------------------------------------------------------------ verification */
+        function tokensOf(html, o) { return tokenize(html, options(o)); }
 
-    // Ready-made option sets. `body` is the one to use against a draft body.
-    var PROFILES = {
-        // Byte-for-byte content equality. For comparing two stored copies.
-        strict: {},
-        // For comparing a stored signature against what is in an Outlook draft.
-        // CSS and script bodies are excluded because the Word and OWA editors
-        // rewrite style blocks and inline CSS wholesale - keeping them guarantees a
-        // mismatch on every desktop draft. What remains is what tampering has to
-        // touch to be harmful: visible text, link targets, image identity, order.
-        body: { css: false, scriptBodies: false, hostRewrittenUrls: true }
-    };
-
-    function keyOf(tok) { return JSON.stringify(tok); }
-
-    /**
-     * Token equality with ONE asymmetric allowance: when hostRewrittenUrls is on,
-     * "@embedded" in the URL slot of a ["u", tag, attr, url] token matches any
-     * URL on the other side. The cached copy says
-     * src="https://cdn.example/logo.png"; the draft says src="cid:image001.png"
-     * because Outlook attached and rewrote it. Both describe the same image.
-     *
-     * KNOWN LIMIT: this means an attacker who replaces the logo with ANOTHER
-     * cid: attachment is not caught by URL. Image count, position, and every
-     * text and href token are still compared strictly, which is what makes a
-     * misleading signature hard to build.
-     */
-    function tokEq(x, y, wild) {
-        if (x.length !== y.length) return false;
-        for (var i = 0; i < x.length; i++) {
-            if (x[i] === y[i]) continue;
-            if (wild && x[0] === "u" && i === 3 && (x[3] === "@embedded" || y[3] === "@embedded")) continue;
-            return false;
+        function serialize(tokens) {
+            return VERSION + ":" + tokens.length + ":" + JSON.stringify(tokens);
         }
-        return true;
-    }
 
-    function runsEqual(a, b, wild) {
-        if (a.length !== b.length) return false;
-        for (var i = 0; i < a.length; i++) if (!tokEq(a[i], b[i], wild)) return false;
-        return true;
-    }
+        function signature(html, o) { return serialize(tokensOf(html, o)); }
 
-    function stripEdgeBreaks(toks) {
-        var a = 0, b = toks.length;
-        while (a < b && toks[a].length === 1 && toks[a][0] === "b") a++;
-        while (b > a && toks[b - 1].length === 1 && toks[b - 1][0] === "b") b--;
-        return toks.slice(a, b);
-    }
-
-    // Index of the first contiguous occurrence of `needle` in `hay`, or -1.
-    // Exact string-key pass first (fast); only retried with the URL wildcard if
-    // that misses and the caller asked for host tolerance.
-    function indexOfTokenRun(hay, needle, wild) {
-        if (!needle.length) return -1;
-        var hk = hay.map(keyOf), nk = needle.map(keyOf);
-        var limit = hk.length - nk.length, i, j, ok;
-        for (i = 0; i <= limit; i++) {
-            ok = true;
-            for (j = 0; j < nk.length; j++) if (hk[i + j] !== nk[j]) { ok = false; break; }
-            if (ok) return i;
+        function signatureFromDom(html, o) {
+            var t = tokenizeDom(html, options(o));
+            return t ? serialize(t) : null;
         }
-        if (!wild) return -1;
-        for (i = 0; i <= limit; i++) {
-            ok = true;
-            for (j = 0; j < needle.length; j++) if (!tokEq(hay[i + j], needle[j], true)) { ok = false; break; }
-            if (ok) return i;
+
+        function equal(a, b, o) {
+            var sa = signature(a, o), sb = signature(b, o);
+            return sa.length === sb.length && sa === sb;
         }
-        return -1;
-    }
 
-    // Fraction of the expected tokens present anywhere in the body (multiset).
-    // Diagnostic only: it separates "edited" from "not there at all".
-    function overlap(expected, actual) {
-        var want = stripEdgeBreaks(expected).filter(function (t) { return t[0] !== "b"; });
-        if (!want.length) return 1;
-        var bag = {}, i, k;
-        for (i = 0; i < actual.length; i++) {
-            k = keyOf(actual[i]);
-            bag[k] = (bag[k] || 0) + 1;
+        function diff(a, b, o) {
+            var ta = tokensOf(a, o), tb = tokensOf(b, o);
+            var n = Math.max(ta.length, tb.length);
+            for (var i = 0; i < n; i++) {
+                var x = ta[i] ? JSON.stringify(ta[i]) : "(missing)";
+                var y = tb[i] ? JSON.stringify(tb[i]) : "(missing)";
+                if (x !== y) return { equal: false, index: i, left: x, right: y };
+            }
+            return { equal: true, index: -1, left: null, right: null };
         }
-        var hit = 0;
-        for (i = 0; i < want.length; i++) {
-            k = keyOf(want[i]);
-            if (bag[k] > 0) { bag[k]--; hit++; }
+
+        // FNV-1a 32-bit + length. Short, stable, NOT cryptographic - do not use it
+        // as the sole tamper check against a motivated attacker.
+        function digest(html, o) {
+            var s = signature(html, o), h = 0x811c9dc5;
+            for (var i = 0; i < s.length; i++) {
+                h ^= s.charCodeAt(i);
+                h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+            }
+            return ("0000000" + h.toString(16)).slice(-8) + "-" + s.length.toString(36);
         }
-        return hit / want.length;
-    }
 
-    /**
-     * Is `expectedHtml` present, unmodified, inside `containerHtml`?
-     *
-     * @returns {{verdict:"identical"|"modified"|"absent", at:number, overlap:number}}
-     *   identical - found as an intact contiguous run
-     *   modified  - much of it is there but not intact
-     *   absent    - not meaningfully there at all
-     */
-    function verifyRegion(expectedHtml, containerHtml, o) {
-        var opt = options(o);
-        var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
-        var act = tokenize(containerHtml, opt);
-        if (!exp.length) return { verdict: "absent", at: -1, overlap: 0 };
-        var at = indexOfTokenRun(act, exp, opt.hostRewrittenUrls);
-        if (at >= 0) return { verdict: "identical", at: at, overlap: 1 };
-        var ov = overlap(exp, act);
-        return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
-    }
-
-    /** Direct equality of two HTML fragments under a profile. */
-    function verifyExact(expectedHtml, actualHtml, o) {
-        var opt = options(o);
-        var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
-        var act = stripEdgeBreaks(tokenize(actualHtml, opt));
-        if (runsEqual(exp, act, opt.hostRewrittenUrls)) return { verdict: "identical", at: 0, overlap: 1 };
-        var ov = overlap(exp, act);
-        return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
-    }
-
-    /* -------------------------------------------------------------- public API */
-
-    function tokensOf(html, o) { return tokenize(html, options(o)); }
-
-    function serialize(tokens) {
-        return VERSION + ":" + tokens.length + ":" + JSON.stringify(tokens);
-    }
-
-    function signature(html, o) { return serialize(tokensOf(html, o)); }
-
-    function signatureFromDom(html, o) {
-        var t = tokenizeDom(html, options(o));
-        return t ? serialize(t) : null;
-    }
-
-    function equal(a, b, o) {
-        var sa = signature(a, o), sb = signature(b, o);
-        return sa.length === sb.length && sa === sb;
-    }
-
-    function diff(a, b, o) {
-        var ta = tokensOf(a, o), tb = tokensOf(b, o);
-        var n = Math.max(ta.length, tb.length);
-        for (var i = 0; i < n; i++) {
-            var x = ta[i] ? JSON.stringify(ta[i]) : "(missing)";
-            var y = tb[i] ? JSON.stringify(tb[i]) : "(missing)";
-            if (x !== y) return { equal: false, index: i, left: x, right: y };
-        }
-        return { equal: true, index: -1, left: null, right: null };
-    }
-
-    // FNV-1a 32-bit + length. Short, stable, NOT cryptographic - do not use it
-    // as the sole tamper check against a motivated attacker.
-    function digest(html, o) {
-        var s = signature(html, o), h = 0x811c9dc5;
-        for (var i = 0; i < s.length; i++) {
-            h ^= s.charCodeAt(i);
-            h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
-        }
-        return ("0000000" + h.toString(16)).slice(-8) + "-" + s.length.toString(36);
-    }
-
-    return {
-        VERSION: VERSION,
-        DEFAULTS: DEFAULTS,
-        PROFILES: PROFILES,
-        extractMarkedRegions: extractMarkedRegions,
-        verifyRegion: verifyRegion,
-        verifyExact: verifyExact,
-        indexOfTokenRun: indexOfTokenRun,
-        signature: signature,
-        signatureFromDom: signatureFromDom,
-        tokens: tokensOf,
-        equal: equal,
-        diff: diff,
-        digest: digest,
-        domParserSupportsHtml: domParserSupportsHtml,
-        _internals: { decodeEntities: decodeEntities, normalizeUrl: normalizeUrl }
-    };
-});
+        return {
+            VERSION: VERSION,
+            DEFAULTS: DEFAULTS,
+            PROFILES: PROFILES,
+            extractMarkedRegions: extractMarkedRegions,
+            splitDraftAtQuote: splitDraftAtQuote,
+            verifyInDraft: verifyInDraft,
+            verifyRegion: verifyRegion,
+            verifyExact: verifyExact,
+            indexOfTokenRun: indexOfTokenRun,
+            signature: signature,
+            signatureFromDom: signatureFromDom,
+            tokens: tokensOf,
+            equal: equal,
+            diff: diff,
+            digest: digest,
+            domParserSupportsHtml: domParserSupportsHtml,
+            _internals: { decodeEntities: decodeEntities, normalizeUrl: normalizeUrl }
+        };
+    });
 "use strict";
 
 // =============================================================================
@@ -823,6 +1000,86 @@
 //  awaits. Each entry point takes a seq from beginWrite(); a write is dropped
 //  if seq is no longer current. Last decision wins deterministically instead of
 //  by network luck.
+//
+// -----------------------------------------------------------------------------
+//  CHANGES IN v7.5.2 — THE MANUAL PIN IS READ THE WAY CLASSIC READS IT
+//
+//  X. THE TASKPANE'S MANUAL OVERRIDE WAS INVISIBLE, AND THEN DELETED. The
+//     Classic build (event-handler-classic.js) calls loadCustomPropertiesAsync
+//     on every single read and writes item properties from exactly one place,
+//     additively. That is the whole reason a pane-applied signature stays put
+//     there. This build memoised ONE CustomProperties handle per item in a
+//     WeakMap for the runtime's entire life, and on Windows/OWA — one long-lived
+//     runtime shared by every activation — that produced two failures:
+//
+//       READ STALENESS. OnNewMessageCompose cached the bag before the user
+//       opened the pane. The pane wrote cardbyte_manual_sig_id through its own
+//       handle. The next OnMessageRecipientsChanged read the CACHED bag, saw no
+//       pin, evaluated the rules, and switched the signature — the reported
+//       "event-handler keeps overriding my choice".
+//
+//       WRITE CLOBBER. saveAsync serialises the whole in-memory bag, so
+//       markActiveSignature writing a stale one DELETED the pin from the item.
+//       After that even a correct read finds nothing, which is why the pin
+//       seemed to work once and then never again.
+//
+//     Mac and mobile were unaffected: a fresh WKWebView per activation leaves
+//     the WeakMap empty, accidentally matching Classic. Windows/OWA only.
+//
+//     Now: invalidateProps() at the top of all four entry points (fresh at the
+//     start of every activation) and getProps({fresh:true}) before every write
+//     (so no save can drop a key written since we loaded). Reads WITHIN one
+//     activation still share the handle — full per-read reloading would cost
+//     ~13 round trips and a cold Mac/mobile send budget cannot absorb that.
+//
+//  Y. THE PIN IS CHECKED BEFORE THE COMPOSE-TIME STATE RESET, as in Classic's
+//     runPipeline. applySignature cleared P_ACTIVE_SIG unconditionally, which
+//     forced a body rewrite every time a pinned draft was reopened.
+//
+//  Z. VALIDATION MOVED INTO getManualOverride, so both call sites agree: an
+//     unresolvable pin ("", "null", "undefined") is treated as no pin, instead
+//     of outranking every rule and then failing to fetch.
+//
+//  AA. OPTIMISATIONS. revalidate:false at compose (it fetched the same id again
+//     on every cache-hit apply, duplicating SIG_TTL_MS and bypassing the dedupe
+//     map); the in-flight dedupe key is account-scoped so a fetch for the
+//     previous identity cannot repopulate the new one's cache after a From
+//     change; the dead `html = html` self-assignment is gone.
+//
+//     UNCHANGED ON PURPOSE: every Mac/mobile fix (cold budgets, the recipient
+//     re-read retry, the roamed-id guard, DEFAULT_ID prefetch), the whole
+//     send-time verification and replacement path, and X_PLATFORM_MAP.
+//
+// -----------------------------------------------------------------------------
+//  CHANGES IN v7.5.1 — VERIFICATION IS SCOPED TO THE LIVE COMPOSE AREA
+//
+//  W. TAMPERING WAS NOT DETECTED ON REPLIES OR FORWARDS. A draft body is not
+//     just the signature and the user's text: on a reply or forward it also
+//     carries the quoted thread, and that thread routinely holds an INTACT COPY
+//     of the same signature — any earlier mail in the thread that we signed.
+//     v7.5.0 searched the whole body, so that copy answered "is the signature
+//     intact?" on behalf of the live one: an edited or deleted live signature
+//     came back "identical" and nothing was re-inserted. New compose was
+//     unaffected because it has no quoted text, which is exactly how the bug
+//     presented in the field.
+//
+//     verifySignatureOnBody now delegates to HCS.verifyInDraft, which splits
+//     the body at the quoted-thread boundary (appendonsend, divRplyFwdMsg,
+//     -----Original Message-----, blockquote type=cite, gmail_quote, Word's
+//     reply separator, and the mobile variants) and inspects only the LIVE
+//     part. Marked copies inside the quote are DISCARDED rather than counted as
+//     duplicates — that was a second, quieter bug: every reply in a thread we
+//     had signed before reported "duplicate" and got rewritten for nothing.
+//
+//     The classification now lives in the module, shared verbatim with the
+//     Classic build, so the two cannot drift apart on this.
+//
+//     DELIBERATE COST: with Outlook set to place the signature BELOW the quoted
+//     text, the live block falls outside the live slice, the verdict is always
+//     "absent", and every send rewrites — i.e. pre-verification behaviour. That
+//     is preferred over trusting a trailing marked block, which on a
+//     reply-to-our-own-mail is indistinguishable from the oldest quoted
+//     signature at the bottom of the thread.
 //
 // -----------------------------------------------------------------------------
 //  CHANGES IN v7.5.0 — THE SEND NO LONGER REWRITES A SIGNATURE THAT IS ALREADY
@@ -1107,7 +1364,7 @@
 //      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v7.5.0";
+const CB_VERSION = "v7.5.2";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -1116,6 +1373,18 @@ const CB_VERSION = "v7.5.0";
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
 const BASE_URL = "https://newqa-enterprise.cardbyte.ai/email-signature";
+
+// The backend's one account-level refusal: HTTP 412 + PlanExpiredException.
+// Distinct from every other non-2xx because it is definitive, global to the
+// mailbox, and not retryable — no other id will succeed either.
+const HTTP_PLAN_EXPIRED = 412;
+const PLAN_EXPIRED_RE = /PlanExpired/i;
+
+// A lapsed subscription invalidates the cached HTML as much as the live copy,
+// and without this a warm cache hides the expiry until SIG_TTL_MS lapses.
+// Set false if the product prefers cached signatures to keep working through
+// an expiry (they will, silently, for as long as the cache lives).
+const PURGE_CACHE_ON_PLAN_EXPIRED = true;
 
 // The id standing for "the user's default (non-rule) signature".
 // Replace with a real backend id when /html/outlook/get-active returns one;
@@ -1169,6 +1438,11 @@ const MAX_SIG_BYTES = 100 * 1024;
 // wrappers already sitting in open drafts; those degrade to the unmarked
 // token-run path, so it is safe, just less precise for one compose session.
 const SIG_MARK_ATTR = "data-cb-sig";
+// Prepended to the signature when send-time verification found the draft's copy
+// altered and re-inserted it.
+const TAMPER_TAG =
+    `<div style="margin:0 0 6px 0;font:italic 11px Arial,Helvetica,sans-serif;color:#7a6134;">` +
+    `Signature re-inserted</div>`;
 
 // Master switch. false = v7.4 behaviour: always rewrite at send. Turn this off
 // first if a signature ever fails to appear on a sent mail — it isolates the
@@ -1241,6 +1515,9 @@ const NOTIF_KEY = "cardbyte_sig_status";
 // are console-only via timed().
 const NOTIFY_CLEAR_MS = 3000;
 const MSG_APPLIED = "Signature applied";
+// Shown while the signature is being decided and fetched. Raised only by
+// showLoading(), and always superseded or removed by reportOutcome().
+const MSG_LOADING = "Applying your signature...";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  LOGGING
@@ -1395,12 +1672,15 @@ let _lastSnapshot = "";
 //  everything else records a failure and lets the outcome be decided once.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// `icon` is documented as required for type "informationalMessage" and is meant
-// to be an image resource id from the manifest's <Resources><bt:Images>. OWA
-// tolerates an unknown id and renders the message without an icon; Windows
-// desktop is stricter. "none" is what shipped and works — to be robust across
-// hosts, declare an image resource and put its id here.
-const NOTIF_ICON = "none";
+// `icon` must be an image resource id declared in the manifest's
+// <Resources><bt:Images>, and it is resolved against the VersionOverrides in
+// effect — event handlers run under V1_1, so the v11.* ids are the right ones.
+// "none" is not a declared id: OWA tolerates that and renders no icon, while
+// Windows desktop falls back to its generic information glyph, which is why
+// the CardByte icon never appeared. Change this if your manifest names the
+// 16x16 image differently (the classic manifest declares v10.icon16 for
+// VersionOverrides 1.0 and v11.icon16 for V1_1).
+const NOTIF_ICON = "v11.icon16";
 
 // Guards the auto-clear timer: it only clears the message it was scheduled for,
 // so a later error can never be wiped by an earlier success's timeout.
@@ -1505,6 +1785,13 @@ const FAILURES = {
         rank: 2, fatal: false,
         msg: "Couldn't load your signature rules. Please contact Admin.",
     },
+
+    // Outranks every other fatal (rank 5): once the plan has expired every
+    // subsequent call fails too, and this is the one message that explains why.
+    plan_expired: {
+        rank: 5, fatal: true,
+        msg: "Your subscription plan has expired. Please contact Admin.",
+    },
 };
 
 let _failure = null;          // { kind, rank, fatal, msg }
@@ -1520,11 +1807,13 @@ function clearFailures() {
 const hasFailure = () => _failure !== null;
 const wasReported = () => _reported;
 
-function recordFailure(kind, detail = "") {
+function recordFailure(kind, detail = "", serverMsg = null) {
     const f = FAILURES[kind];
     if (!f) { warn("recordFailure: unknown kind", kind); return; }
     warn(`failure recorded: ${kind}${detail ? ` — ${detail}` : ""}`);
-    if (!_failure || f.rank > _failure.rank) _failure = { kind, ...f };
+    if (!_failure || f.rank > _failure.rank) {
+        _failure = { kind, ...f, msg: serverMsg || f.msg };
+    }
 }
 
 // A null/absent HTTP status means the request never got an answer (transport,
@@ -1545,6 +1834,21 @@ const rulesFailureKind = () => (_rulesFetchError === "offline" ? "rules_offline"
  *   quiet   — there was nothing to do (manual override, deferred mobile
  *             compose, blocked evaluation that kept a good signature)
  */
+/**
+ * The progress message. v7.4 removed it (FIX (M)) because six messages flashed
+ * at the user; with only two messages left, a compose that takes a cold-runtime
+ * fetch otherwise shows an empty bar until "Signature applied" appears.
+ *
+ * Deliberately NOT recorded in _reported: this is progress, not an outcome, so
+ * an entry-point catch block must still treat "only the loading message was
+ * shown" as nothing having been said. Every path that raises it ends in
+ * reportOutcome(), which replaces it on success/failure and removes it on
+ * "quiet" — so it cannot get stranded on the bar.
+ */
+function showLoading(item) {
+    showNotification(item, MSG_LOADING, "informationalMessage");
+}
+
 function reportOutcome(item, outcome) {
     // _reported is set only when something is actually put on the bar, so the
     // entry-point catch blocks can tell "nothing was said" from "already said".
@@ -1755,6 +2059,11 @@ const sigCache = {
         }
         if (n) { sigCache.write(map); log(`purged ${n} stale signature cache entr${n === 1 ? "y" : "ies"}`); }
     },
+    wipe() {
+        _sigMap = {};
+        store.remove(K_SIG_CACHE, K_SIG_CACHE_LEGACY_DEFAULT);
+        log("signature cache wiped");
+    },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1834,7 +2143,31 @@ function describeRulesSource() {
 
 const _propsByItem = new WeakMap();
 
-function getProps(item) {
+/**
+ * v7.5.2. THE HANDLE IS NO LONGER TRUSTED ACROSS ACTIVATIONS OR ACROSS WRITES.
+ *
+ * The Classic build calls loadCustomPropertiesAsync on EVERY read, and that is
+ * why the taskpane's manual pin has always worked there. This build memoised one
+ * handle per item for the runtime's whole life, which on Windows/OWA (one
+ * long-lived runtime shared by every activation) broke the pin two ways:
+ *
+ *   READ STALENESS — OnNewMessageCompose cached the bag before the user opened
+ *   the pane. The pane then wrote cardbyte_manual_sig_id through its OWN handle.
+ *   The next OnMessageRecipientsChanged read the cached bag, saw no pin, and let
+ *   the rules switch the signature. That is the reported bug.
+ *
+ *   WRITE CLOBBER, worse — CustomProperties.saveAsync serialises the WHOLE
+ *   in-memory bag. Saving a stale one does not merely miss the pin, it DELETES
+ *   it from the item, permanently, so even a later correct read finds nothing.
+ *
+ * Reloading on every read (full Classic parity) would cost ~13 round trips per
+ * activation, which a cold Mac/mobile send budget cannot absorb. So: fresh at
+ * the START of every activation (invalidateProps in each entry point) and fresh
+ * before every WRITE, with reads inside one activation sharing that handle.
+ * Equivalent in effect — the Classic JSRuntime is itself new per activation.
+ */
+function getProps(item, { fresh = false } = {}) {
+    if (fresh) _propsByItem.delete(item);
     if (_propsByItem.has(item)) return _propsByItem.get(item);
     const p = officeAsync((cb) => item.loadCustomPropertiesAsync(cb), {
         ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS,
@@ -1844,6 +2177,11 @@ function getProps(item) {
     return p;
 }
 
+// Called once at the top of every entry point, BEFORE anything reads or writes.
+// One extra loadCustomPropertiesAsync per event, versus silently eating whatever
+// the taskpane wrote since the last activation.
+function invalidateProps(item) { if (item) _propsByItem.delete(item); }
+
 async function getItemProp(item, key) {
     try {
         const v = (await getProps(item))?.get(key);
@@ -1851,8 +2189,14 @@ async function getItemProp(item, key) {
     } catch (_) { return null; }
 }
 
+/**
+ * Loads a FRESH bag before mutating it, because saveAsync writes the whole bag
+ * back: any key the pane added since we last loaded would be dropped. The fresh
+ * handle stays cached afterwards, so reads later in this activation see what we
+ * just wrote without another round trip.
+ */
 async function setItemProps(item, kv) {
-    const props = await getProps(item);
+    const props = await getProps(item, { fresh: true });
     if (!props) return false;
     try {
         for (const [k, v] of Object.entries(kv)) {
@@ -1870,7 +2214,23 @@ async function setItemProps(item, kv) {
     }
 }
 
-const getManualOverride = (item) => getItemProp(item, P_MANUAL_SIG);
+/**
+ * The pinned signature id, or null. Classic parity: validation lives HERE, so
+ * every caller gets the same answer.
+ *
+ * An unresolvable pin ("", "null", "undefined" — a pane that passed a display id
+ * or a failed lookup) would otherwise outrank every rule and then fail to fetch,
+ * leaving the mail with whatever happened to be on it. Treated as no pin at all.
+ */
+async function getManualOverride(item) {
+    const raw = await getItemProp(item, P_MANUAL_SIG);
+    const s = raw == null ? "" : String(raw).trim();
+    if (s === "" || s === "null" || s === "undefined") {
+        if (s !== "") warn("ignoring an unresolvable manual override:", s);
+        return null;
+    }
+    return s;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ACTIVE SIGNATURE ID (+ recipient snapshot)
@@ -1943,6 +2303,27 @@ function apiHeaders(encryptedMail, extra = {}) {
     return { username: encryptedMail, "X-Platform": getXPlatform(), ...extra };
 }
 
+// Shown verbatim only when it is a real sentence: an exception class name or an
+// over-long string falls back to the canned wording rather than putting Java
+// package paths on the notification bar.
+function serverMessage(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return null;
+    if (/^[\w$]+(\.[\w$]+){2,}$/.test(s)) return null;   // FQCN, not a message
+    return s.length <= 150 ? s : null;                    // host hard limit
+}
+
+// Reads a non-2xx body ONCE and classifies it. `message` is display-safe;
+// `error` (the exception class) is used only for matching.
+async function readApiError(res) {
+    let body = null;
+    try { body = JSON.parse(await res.text()); } catch (_) { }
+    const message = serverMessage(body?.message);
+    const planExpired =
+        res.status === HTTP_PLAN_EXPIRED || PLAN_EXPIRED_RE.test(String(body?.error || ""));
+    return { message, planExpired, raw: String(body?.message || body?.error || "") };
+}
+
 async function fetchRules(encryptedMail) {
     const xp = getXPlatform();
     try {
@@ -1950,13 +2331,27 @@ async function fetchRules(encryptedMail) {
             method: "GET",
             headers: apiHeaders(encryptedMail, { "Content-Type": "application/json" }),
         });
+        // if (!res.ok) {
+        //     // Status is logged WITH the platform header: a 4xx that disappears
+        //     // when X-Platform is WINDOWS is fix (I), not a backend outage.
+        //     let body = "";
+        //     try { body = (await res.text()).slice(0, 200); } catch (_) { }
+        //     warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, body);
+        //     noteRulesFetchError(failureKindFor(res.status));
+        //     return null;
+        // }
         if (!res.ok) {
-            // Status is logged WITH the platform header: a 4xx that disappears
-            // when X-Platform is WINDOWS is fix (I), not a backend outage.
-            let body = "";
-            try { body = (await res.text()).slice(0, 200); } catch (_) { }
-            warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, body);
-            noteRulesFetchError(failureKindFor(res.status));
+            const { message, planExpired, raw } = await readApiError(res);
+            warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, raw);
+            if (planExpired) {
+                // Recorded directly, breaking the "fetches never record" rule of
+                // (O) deliberately: this is an account-level fact, not a rules
+                // degradation, and it is true whether or not a cached ruleset
+                // covers for the failed fetch. noteRulesFetchError still runs so
+                // the existing degraded path is unchanged.
+                recordFailure("plan_expired", "rules-config", message);
+            }
+            noteRulesFetchError(planExpired ? "server" : failureKindFor(res.status));
             return null;
         }
         const rulesJson = JSON.parse(await res.text())?.rulesJson;
@@ -1990,15 +2385,31 @@ async function fetchDefaultSignature(encryptedMail) {
             method: "GET",
             headers: apiHeaders(encryptedMail),
         });
+        // if (!res.ok) {
+        //     let msg = "";
+        //     try { const b = JSON.parse(await res.text()); msg = String(b?.message || b?.error || ""); } catch (_) { }
+        //     warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, msg);
+        //     const notFound = res.status === 404 || /not\s*found/i.test(msg);
+        //     return {
+        //         html: null,
+        //         explicit: notFound,
+        //         failure: notFound ? null : failureKindFor(res.status),
+        //     };
+        // }
         if (!res.ok) {
-            let msg = "";
-            try { const b = JSON.parse(await res.text()); msg = String(b?.message || b?.error || ""); } catch (_) { }
-            warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, msg);
-            const notFound = res.status === 404 || /not\s*found/i.test(msg);
+            const { message, planExpired, raw } = await readApiError(res);
+            warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, raw);
+            if (planExpired) {
+                // explicit:false on purpose — resolveSigHtml checks `explicit`
+                // BEFORE `failure`, and this is not "nothing assigned".
+                return { html: null, explicit: false, failure: "plan_expired", failureMsg: message };
+            }
+            const notFound = res.status === 404 || /not\s*found/i.test(raw);
             return {
                 html: null,
                 explicit: notFound,
                 failure: notFound ? null : failureKindFor(res.status),
+                failureMsg: null,
             };
         }
         let html = null;
@@ -2024,13 +2435,27 @@ async function fetchSignatureById(id, encryptedMail) {
             method: "GET",
             headers: apiHeaders(encryptedMail),
         });
+        // if (!res.ok) {
+        //     err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`);
+        //     const notFound = res.status === 404;
+        //     return {
+        //         html: null,
+        //         explicit: notFound,
+        //         failure: notFound ? null : failureKindFor(res.status),
+        //     };
+        // }
         if (!res.ok) {
-            err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`);
+            const { message, planExpired, raw } = await readApiError(res);
+            err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`, raw);
+            if (planExpired) {
+                return { html: null, explicit: false, failure: "plan_expired", failureMsg: message };
+            }
             const notFound = res.status === 404;
             return {
                 html: null,
                 explicit: notFound,
                 failure: notFound ? null : failureKindFor(res.status),
+                failureMsg: null,
             };
         }
         let html = null;
@@ -2062,10 +2487,22 @@ async function fetchSignatureById(id, encryptedMail) {
  *
  * @returns {Promise<{ html: string|null, source: "cache"|"network"|"none", unassigned: boolean }>}
  */
+// Two activations overlap on Windows/OWA, and prefetch races the evaluation.
+// Without this they all miss the cold cache and all fetch the same id.
+const _inFlight = new Map();
+
+function dedupe(key, make) {
+    const existing = _inFlight.get(key);
+    if (existing) { log(`joining in-flight fetch: ${key}`); return existing; }
+    const p = make().finally(() => _inFlight.delete(key));
+    _inFlight.set(key, p);
+    return p;
+}
 async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = null, silent = false } = {}) {
     const key = String(id);
     const budget = budgetMs ?? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
-    const fail = (kind, detail) => { if (!silent) recordFailure(kind, detail); };
+    // const fail = (kind, detail) => { if (!silent) recordFailure(kind, detail); };
+    const fail = (kind, detail, msg = null) => { if (!silent) recordFailure(kind, detail, msg); };
 
     // FIX (C) belt-and-braces: a rule that slipped through with no signatureId
     // would otherwise be requested as the literal "null" / "undefined".
@@ -2076,36 +2513,82 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
         return { html: null, source: "none", unassigned: false };
     }
 
+    // ── FALLBACK: a rule signature that cannot be obtained falls back to the
+    // user's DEFAULT signature, but only if it is ALREADY IN CACHE.
+    //
+    // Cache-only on purpose. This runs at the failure point — the budget is
+    // already spent (or the network is already known to be unreachable), so a
+    // second round trip here would just turn one timeout into two. The default
+    // is warmed on every platform by prefetchSignatures (J), so in practice it
+    // is there whenever the runtime has been online once.
+    //
+    // The recorded failure kind is DELIBERATELY left untouched: the user is
+    // still told what actually went wrong, because the mail is going out with
+    // the default signature rather than the one the rule asked for.
+    const defaultFromCache = (unassigned = false) => {
+        if (key === DEFAULT_ID) return null;
+        const fallback = sigCache.get(DEFAULT_ID, { skipTtl: true });
+        if (!fallback) return null;
+        warn(`id=${key} unresolved — injecting the cached DEFAULT signature instead`);
+        return { html: fallback, source: "cache", unassigned, fellBackToDefault: true };
+    };
+
     const cached = sigCache.get(key, { skipTtl: true });
     if (cached) return { html: cached, source: "cache", unassigned: false };
 
     if (!allowNetwork || !userEmail) {
         warn(`cannot resolve id=${key} (allowNetwork=${allowNetwork}, user=${!!userEmail})`);
         fail("offline", "no network permitted or no user email");
-        return { html: null, source: "none", unassigned: false };
+        return defaultFromCache() || { html: null, source: "none", unassigned: false };
     }
 
     try {
+        // const enc = await encryptEmail(userEmail);
+        // const { html, explicit, failure } = key === DEFAULT_ID
+        //     ? await withTimeout(fetchDefaultSignature(enc), budget, "default fetch")
+        //     : await withTimeout(fetchSignatureById(key, enc), budget, `sig fetch ${key}`);
+
+
         const enc = await encryptEmail(userEmail);
-        const { html, explicit, failure } = key === DEFAULT_ID
-            ? await withTimeout(fetchDefaultSignature(enc), budget, "default fetch")
-            : await withTimeout(fetchSignatureById(key, enc), budget, `sig fetch ${key}`);
-        if (html) {
-            sigCache.set(key, html);
-            return { html, source: "network", unassigned: false };
+        // Account-scoped: onFromChangedHandler clears the cache, but a fetch
+        // already in flight for the PREVIOUS identity would otherwise resolve
+        // afterwards and write that identity's HTML into the new one's cache.
+        const inner = dedupe(`sig:${String(userEmail).toLowerCase()}:${key}`, () => (
+            key === DEFAULT_ID ? fetchDefaultSignature(enc) : fetchSignatureById(key, enc)
+        ).then((r) => {
+            // Cache from the inner promise: a fetch that overran the budget
+            // still warms the cache for the next activation instead of being
+            // discarded and refetched.
+            if (r.html) sigCache.set(key, r.html);
+            return r;
+        }));
+
+        const { html, explicit, failure } = await withTimeout(
+            inner, budget, key === DEFAULT_ID ? "default fetch" : `sig fetch ${key}`);
+
+        if (html) return { html, source: "network", unassigned: false };
+
+        if (failure === "plan_expired") {
+            // No defaultFromCache() here: the subscription is what lapsed, so a
+            // cached copy is no more licensed than the live one — and silently
+            // serving it is exactly how an expiry goes unnoticed for a TTL.
+            fail("plan_expired", `id=${key}`, failureMsg);
+            if (PURGE_CACHE_ON_PLAN_EXPIRED) { sigCache.wipe(); clearRulesCache(); }
+            return { html: null, source: "none", unassigned: false, planExpired: true };
         }
+
         // Definitive empty answer = nothing is assigned server-side.
         if (explicit) {
             fail("unassigned", `id=${key}`);
-            return { html: null, source: "none", unassigned: true };
+            return defaultFromCache(true) || { html: null, source: "none", unassigned: true };
         }
         fail(failure || "server", `id=${key}`);
-        return { html: null, source: "none", unassigned: false };
+        return defaultFromCache() || { html: null, source: "none", unassigned: false };
     } catch (e) {
         // withTimeout rejected: the call never came back inside the budget.
         warn(`resolveSigHtml failed id=${key}:`, e.message);
         fail("offline", `id=${key} ${e.message}`);
-        return { html: null, source: "none", unassigned: false };
+        return defaultFromCache() || { html: null, source: "none", unassigned: false };
     }
 }
 
@@ -2284,12 +2767,22 @@ async function getComposeType(item, { strict = false, persist = false } = {}) {
         return fromProp;
     }
 
+    // Only a value that came from getComposeTypeAsync or a subject prefix is
+    // authoritative. The non-strict assumption below is a GUESS, and caching or
+    // persisting a guess poisons every later evaluation: line ~2493 short-
+    // circuits on the persisted property, so a reply guessed as "compose"
+    // (getComposeTypeAsync returns "" and the subject is not populated yet at
+    // OnNewMessageCompose) stays "compose" for the life of the draft, and every
+    // context:"reply" rule is skipped — including at send, where the API would
+    // by then have answered correctly.
     let t = await detectComposeType(item, strict);
+    const authoritative = t !== null;
+
     if (!t && !strict) {
-        warn("composeType undetermined — assuming 'compose' (non-strict caller)");
-        t = "compose";
+        warn("composeType undetermined — assuming 'compose' for this call only (not cached)");
+        return "compose";
     }
-    if (t) {
+    if (t && authoritative) {
         _composeTypeByItem.set(item, t);
         if (persist) await setItemProps(item, { [P_COMPOSE_TYPE]: t });
     }
@@ -2354,15 +2847,55 @@ function contextMatches(ruleContext, composeType) {
     return rc === composeType.toLowerCase();
 }
 
+// Pull the address out of whatever shape the backend used for an entry.
+function senderEntryAddress(entry) {
+    if (entry == null) return "";
+    if (typeof entry === "string") return entry.trim().toLowerCase();
+    if (typeof entry === "object") {
+        const v = entry.email ?? entry.emailAddress ?? entry.address ??
+            entry.smtpAddress ?? entry.userPrincipalName ?? entry.upn ?? "";
+        return String(v).trim().toLowerCase();
+    }
+    return String(entry).trim().toLowerCase();
+}
+
+/**
+ * `Senders` has arrived as an array of strings, as a bare string, and as an
+ * array of objects. The old version read `.length` (truthy on a string) and
+ * then called `.some` on it, which throws — and that rejection propagated out
+ * of the `.filter` in findMatchingRule, killing the whole evaluation. Object
+ * entries threw the same way inside `.toLowerCase()`.
+ *
+ * An unreadable list is NOT treated as "unrestricted": that silently widens a
+ * rule to every sender in the tenant. Only a genuinely absent or empty list is.
+ */
 function senderMatches(rule, senderEmail) {
-    if (!rule.Senders?.length) return true;
+    const raw = rule?.Senders;
+    let list = null;
+    if (Array.isArray(raw)) list = raw;
+    else if (typeof raw === "string" && raw.trim() !== "") list = [raw];
+    else if (raw != null && typeof raw === "object") list = [raw];
+
+    if (!list || list.length === 0) return true;
+
     const sender = (senderEmail || "").toLowerCase().trim();
-    return rule.Senders.some((raw) => {
-        const s = (raw || "").toLowerCase().trim();
+    const senderDomain = getDomain(sender);
+
+    const matched = list.some((entry) => {
+        const s = senderEntryAddress(entry);
+        if (!s) return false;
         if (s === "*" || s === "all") return true;
-        if (s.startsWith("*@")) return sender.endsWith(s.slice(1));
+        if (s.startsWith("*@")) return !!senderDomain && sender.endsWith(s.slice(1));
+        if (s.startsWith("@")) return !!senderDomain && sender.endsWith(s);
+        if (!s.includes("@")) return !!senderDomain && s === senderDomain;
         return s === sender;
     });
+
+    if (!matched) {
+        log(`senderMatches: no entry matched | priority=${rule?.priority}`,
+            `| sender=${sender} | Senders=${JSON.stringify(list).slice(0, 300)}`);
+    }
+    return matched;
 }
 
 /**
@@ -2551,14 +3084,21 @@ async function readBodyHtml(item) {
 /**
  * Is `expectedHtml` still intact on the draft?
  *
+ * v7.5.1: the region classification now lives in HCS.verifyInDraft, shared with
+ * the Classic build. It splits the body at the quoted-thread boundary and only
+ * ever inspects the LIVE area. Before that, a reply or forward whose quoted
+ * thread contained an intact copy of the signature — any earlier mail in the
+ * thread that we had signed — reported "identical" while the live signature was
+ * edited or deleted, so nothing was re-inserted. New compose was unaffected
+ * because there is no quoted text, which is exactly how the bug presented.
+ *
  * @returns {Promise<{verdict:string, reason:string, note:string}>}
  *   identical  — untouched. The ONLY verdict that suppresses the write.
  *   modified   — recognisably our signature, edited.
- *   absent     — not on the body at all (normal on mobile, where nothing is
+ *   absent     — not in the live area (normal on mobile, where nothing is
  *                written at compose; also "the user deleted it").
- *   duplicate  — more than one signature block present.
- *   id-changed — the block belongs to a different signature id, so the
- *                difference is explained by the id changing, not by an edit.
+ *   duplicate  — more than one signature block in the live area.
+ *   id-changed — the live block belongs to a different signature id.
  *   unknown    — could not tell. Treated as "write it".
  */
 async function verifySignatureOnBody(item, expectedHtml, id) {
@@ -2568,8 +3108,8 @@ async function verifySignatureOnBody(item, expectedHtml, id) {
     const body = await readBodyHtml(item);
     if (body === null) return { verdict: "unknown", reason: "body unreadable on this host", note: "" };
 
-    // Did the expected copy itself change since compose? If so, a mismatch
-    // below is an admin edit propagating, not a user tampering.
+    // Did the expected copy itself change since we applied it? If so, a
+    // mismatch below is an admin edit propagating, not a user tampering.
     let note = "";
     try {
         const prev = await getItemProp(item, P_SIG_DIGEST);
@@ -2578,25 +3118,16 @@ async function verifySignatureOnBody(item, expectedHtml, id) {
         }
     } catch (_) { }
 
-    const regions = HCS.extractMarkedRegions(body, SIG_MARK_ATTR);
-
-    if (regions.length > 1) {
-        return { verdict: "duplicate", reason: `${regions.length} signature blocks on the body`, note };
+    try {
+        const r = HCS.verifyInDraft(expectedHtml, body, {
+            ...SIG_PROFILE, markAttr: SIG_MARK_ATTR, sigId: id,
+        });
+        return { verdict: r.verdict, reason: `${r.scope}: ${r.reason}`, note };
+    } catch (e) {
+        // The comparison must never take the send down with it.
+        warn("verifyInDraft threw:", e);
+        return { verdict: "unknown", reason: `comparison failed: ${e.message}`, note };
     }
-    if (regions.length === 1) {
-        if (String(regions[0].value) !== String(id)) {
-            return { verdict: "id-changed", reason: `body has id=${regions[0].value}, target=${id}`, note };
-        }
-        const r = HCS.verifyExact(expectedHtml, regions[0].inner, SIG_PROFILE);
-        return { verdict: r.verdict, reason: `marked block, overlap=${r.overlap.toFixed(2)}`, note };
-    }
-
-    // No wrapper: a v7.4 draft, or the host's HTML filter dropped the
-    // attribute. Search for the token run anywhere in the body instead — less
-    // precise about WHICH copy it found, but enough to answer "is an intact
-    // copy present".
-    const r = HCS.verifyRegion(expectedHtml, body, SIG_PROFILE);
-    return { verdict: r.verdict, reason: `unmarked body, overlap=${r.overlap.toFixed(2)}`, note };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2680,7 +3211,26 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
         return nothing("deferred");
     }
 
-    const { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
+    // At compose, skip the write when this id is already the applied one.
+    // OnMessageRecipientsChanged fires repeatedly as a recipient is typed and
+    // resolved, and each pass previously re-resolved the HTML and rewrote the
+    // body even when the decision had not changed — the visible "signatures
+    // inserted one after another until the right rule wins". The send path has
+    // always short-circuited this way (decideSendId reuses P_ACTIVE_SIG when
+    // the recipient snapshot is unchanged, and applyById returns "unchanged"
+    // when verification says the body already carries this signature); compose
+    // now behaves the same. applySignature clears P_ACTIVE_SIG on entry, so the
+    // FIRST insertion on a new draft is unaffected.
+    if (!isSendTime) {
+        const activeNow = await getItemProp(item, P_ACTIVE_SIG);
+        if (activeNow && String(activeNow) === key) {
+            log(`compose: id=${key} already applied — no rewrite`);
+            timed(`applyById (${key}, already-applied)`, t0);
+            return { applied: true, status: "unchanged", verdict: null, digest: null };
+        }
+    }
+
+    let { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
         budgetMs: isSendTime ? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS) : 10_000,
     });
 
@@ -2721,6 +3271,10 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
             timed(`applyById (${key}, detected-only)`, t0);
             return { applied: true, status: "detected", verdict: v.verdict, digest };
         }
+        // NOTE: TAMPER_TAG is deliberately NOT prepended here. Re-inserting is
+        // policy enforcement, not an accusation — and the user may have edited
+        // the signature on purpose. Prepend it only if the product wants a
+        // visible marker on the outgoing mail.
         if (!isCurrent(seq)) { log("stale write dropped after verification"); return nothing("stale"); }
     }
 
@@ -2753,11 +3307,36 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 
     const override = await getManualOverride(item);
     if (override) {
-        // The user chose this signature themselves; we have neither news nor a
-        // complaint. Leave the bar exactly as it is.
-        log("manual override active — leaving signature untouched:", override);
+        // The pane writes P_ACTIVE_SIG alongside the override, so these agreeing
+        // means the pinned signature is genuinely on the body and there is
+        // nothing to do or say. They disagree when the pane's body write failed,
+        // when a pre-contract pane pinned without wrapping, or when the write
+        // lost a race — in which case doing nothing leaves the draft carrying a
+        // signature nobody chose. Reapply through the normal path so the wrapper
+        // and digest end up consistent.
+        const activeNow = await getItemProp(item, P_ACTIVE_SIG);
+        if (activeNow && String(activeNow) === String(override)) {
+            log("manual override active and already on the body:", override);
+            return;
+        }
+        log("manual override active but body state unknown — reapplying:", override);
+        showLoading(item);
+        const rOv = await applyById(item, override, userEmail, seq, { revalidate: false });
+        // Snapshot is null on purpose: a manual choice is recipient-independent,
+        // and markActiveSignature removes the property, so send time re-evaluates
+        // instead of comparing against a snapshot that means nothing.
+        if (rOv.applied && isCurrent(seq)) {
+            await markActiveSignature(item, override, null, rOv.digest);
+        }
+        if (isCurrent(seq)) {
+            reportOutcome(item, rOv.applied ? "applied" : rOv.status === "deferred" ? "quiet" : "failed");
+        }
         return;
     }
+
+    // Progress goes up only after the override check, so a user-chosen
+    // signature never flashes a message about work that is not happening.
+    showLoading(item);
 
     const { rule, blocked } = await findMatchingRule(item, userEmail, {
         allowNetwork,
@@ -2785,7 +3364,13 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
     const targetId = rule ? String(rule.signatureId) : DEFAULT_ID;
     if (!isCurrent(seq)) { log("stale evaluation dropped"); return; }
 
-    const result = await applyById(item, targetId, userEmail, seq, { revalidate: true });
+    // v7.5.2: revalidate:false. This fired a fetch for the SAME id on every
+    // cache-hit apply — one guaranteed request per compose and per recipient
+    // change — duplicating what SIG_TTL_MS already bounds, and bypassing the
+    // dedupe map so it could race a prefetch for the same id. Set back to true
+    // only if admin-side signature edits must land mid-compose rather than
+    // within one TTL window.
+    const result = await applyById(item, targetId, userEmail, seq, { revalidate: false });
     const applied = result.applied;
 
     // FIX (L). Persist the decision even when this host could not write it yet
@@ -2825,8 +3410,14 @@ async function decideSendId(item, userEmail) {
     // lucky match. "" (no recipients) IS comparable and IS persistable.
     const currentSnap = serializeRecipients(await readRecipientEmails(item));
 
+    // getManualOverride validates and returns null for an unresolvable pin, so
+    // an unusable value falls through to normal rule evaluation instead of
+    // outranking every rule and then failing to resolve. persist:false — a pin
+    // is the user's decision, not an evaluation result to record.
     const override = await getManualOverride(item);
-    if (override) return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+    if (override) {
+        return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
+    }
 
     const [activeId, snapshot] = await Promise.all([
         getItemProp(item, P_ACTIVE_SIG),
@@ -2933,6 +3524,9 @@ const applySignature = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return complete();
+        // v7.5.2: drop any handle cached by a previous activation before reading
+        // a single property. See getProps().
+        invalidateProps(item);
         log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()})`);
 
         // FIX (M): no "Preparing your signature..." — the bar stays empty until
@@ -2941,7 +3535,14 @@ const applySignature = async function (event = { completed: () => { } }) {
         const seq = beginWrite();
         const userEmail = mailbox?.userProfile?.emailAddress;
 
-        await markActiveSignature(item, null);
+        // v7.5.2. The pin is checked BEFORE the state reset, matching Classic's
+        // runPipeline. Clearing P_ACTIVE_SIG on a pinned draft is not harmful in
+        // itself — evaluateAndApply reapplies the pinned id — but it forces a
+        // needless body write on every re-open of a draft the user has already
+        // chosen a signature for.
+        const pinned = await getManualOverride(item);
+        if (pinned) log("manual override present at compose — not resetting active id:", pinned);
+        else await markActiveSignature(item, null);
 
         // Persist the compose type here, in a runtime where the API behaves.
         // The send runtime reads it instead of re-deriving it.
@@ -2997,6 +3598,7 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
 
     try {
         if (!item) return complete();
+        invalidateProps(item);   // v7.5.2 — the pane may have pinned since the last event
 
         // Let the host settle: OWA fires per keystroke-ish, and a half-typed
         // address produces a recipient set we do not want to evaluate.
@@ -3040,6 +3642,7 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return complete();
+        invalidateProps(item);   // v7.5.2
         log("from changed — re-evaluating for the new account");
 
         const seq = beginWrite();
@@ -3051,6 +3654,7 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         // straight through to roaming and matched the old account's rules.
         store.remove(K_SIG_CACHE, K_SIG_CACHE_LEGACY_DEFAULT);
         _sigMap = null; // v7.5: the parsed map mirrors K_SIG_CACHE — drop it too
+        _inFlight.clear();
         clearRulesCache();
         await markActiveSignature(item, null);
 
@@ -3077,6 +3681,9 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return complete();
+        // v7.5.2. CRITICAL at send: the pane's pin is very often written during
+        // this compose session, i.e. after the compose activation cached its bag.
+        invalidateProps(item);
         log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
         // FIX (M): no "Verifying signature..." — onSendCore reports failures only.
 

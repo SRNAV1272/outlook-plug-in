@@ -6694,79 +6694,1073 @@
  *          origin lists this file's absolute URL under "allowed".
  *     Without both, every XHR returns status 0 / onerror.
  */
+/*!
+ * html-content-signature v2
+ * ------------------------------------------------------------------
+ * Deterministic canonical signature of an HTML body's *rendered content*,
+ * for detecting tampering by comparing two signatures.
+ *
+ * Design goals (in priority order):
+ *   1. HOST INDEPENDENCE - the default path is a pure string tokenizer, so
+ *      New Outlook (Chromium/WebView2) and Classic Outlook (mshtml/IE11)
+ *      produce byte-identical signatures. No DOMParser required.
+ *   2. UNFORGEABLE ENCODING - tokens are JSON-encoded, so no text content
+ *      can imitate a structural token (the old "|"/":" scheme could).
+ *   3. NO BLIND SPOTS THAT CHANGE WHAT THE USER SEES OR CLICKS -
+ *      link targets, srcset, CSS urls, style/script bodies are covered.
+ *   4. NO FALSE POSITIVES on benign re-serialization - comments, inline
+ *      wrapper churn, entity form, whitespace form, NBSP, zero-width junk.
+ *
+ * Usage:
+ *   var sig = HtmlContentSignature.signature(html);        // canonical string
+ *   HtmlContentSignature.equal(a, b);                      // boolean
+ *   HtmlContentSignature.diff(a, b);                       // where they differ
+ *   HtmlContentSignature.digest(html);                     // short, NON-crypto
+ *
+ * NOTE ON TRUST: this is an integrity *diff*, not a MAC. If the baseline
+ * signature travels with the message or is stored client-side, an attacker
+ * who can edit the HTML can also edit the baseline. Sign/HMAC the canonical
+ * string server-side if you need authenticity, not just change detection.
+ */
+(function (root, factory) {
+    "use strict";
+    if (typeof module === "object" && module.exports) module.exports = factory();
+    else root.HtmlContentSignature = factory();
+})(
+    // Classic Outlook's JSRuntime is not a clean browser-or-node global: resolve
+    // through every known name, same trick as the patched CryptoJS UMD wrapper
+    // that ships alongside this file in the classic bundle.
+    (typeof self !== "undefined" && self) ||
+    (typeof window !== "undefined" && window) ||
+    (typeof globalThis !== "undefined" && globalThis) ||
+    this,
+    function () {
+        "use strict";
+
+        var VERSION = "hcs2";
+
+        /* ---------------------------------------------------------------- tables */
+
+        // Elements whose content is raw text, not markup.
+        var RAW_TEXT = {
+            script: 1, style: 1, title: 1, textarea: 1,
+            xmp: 1, noscript: 1, noframes: 1, plaintext: 1
+        };
+
+        // Elements that force a visual break between text runs.
+        var BLOCK = {
+            address: 1, article: 1, aside: 1, blockquote: 1, body: 1, br: 1,
+            caption: 1, center: 1, col: 1, colgroup: 1, dd: 1, details: 1, dialog: 1,
+            dir: 1, div: 1, dl: 1, dt: 1, fieldset: 1, figcaption: 1, figure: 1,
+            footer: 1, form: 1, h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1, header: 1,
+            hgroup: 1, hr: 1, html: 1, legend: 1, li: 1, main: 1, menu: 1, nav: 1,
+            ol: 1, optgroup: 1, option: 1, p: 1, pre: 1, section: 1, summary: 1,
+            table: 1, tbody: 1, td: 1, tfoot: 1, th: 1, thead: 1, tr: 1, ul: 1
+        };
+
+        // URL-bearing attributes, in FIXED order so emission is deterministic.
+        var URL_ATTRS = [
+            "src", "srcset", "poster", "background", "data",
+            "xlink:href", "formaction", "action", "dynsrc", "lowsrc"
+        ];
+
+        var NAMED = {
+            amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00A0",
+            ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", zwnj: "\u200C", zwj: "\u200D",
+            lrm: "\u200E", rlm: "\u200F", shy: "\u00AD",
+            ndash: "\u2013", mdash: "\u2014", lsquo: "\u2018", rsquo: "\u2019",
+            sbquo: "\u201A", ldquo: "\u201C", rdquo: "\u201D", bdquo: "\u201E",
+            dagger: "\u2020", Dagger: "\u2021", bull: "\u2022", hellip: "\u2026",
+            permil: "\u2030", prime: "\u2032", Prime: "\u2033", lsaquo: "\u2039",
+            rsaquo: "\u203A", oline: "\u203E", frasl: "\u2044", euro: "\u20AC",
+            trade: "\u2122", copy: "\u00A9", reg: "\u00AE", deg: "\u00B0",
+            plusmn: "\u00B1", middot: "\u00B7", laquo: "\u00AB", raquo: "\u00BB",
+            times: "\u00D7", divide: "\u00F7", frac12: "\u00BD", frac14: "\u00BC",
+            frac34: "\u00BE", pound: "\u00A3", yen: "\u00A5", cent: "\u00A2",
+            curren: "\u00A4", sect: "\u00A7", para: "\u00B6", micro: "\u00B5",
+            iexcl: "\u00A1", iquest: "\u00BF", brvbar: "\u00A6", uml: "\u00A8",
+            not: "\u00AC", macr: "\u00AF", acute: "\u00B4", cedil: "\u00B8",
+            sup1: "\u00B9", sup2: "\u00B2", sup3: "\u00B3", ordm: "\u00BA", ordf: "\u00AA",
+            agrave: "\u00E0", aacute: "\u00E1", acirc: "\u00E2", atilde: "\u00E3",
+            auml: "\u00E4", aring: "\u00E5", ccedil: "\u00E7", egrave: "\u00E8",
+            eacute: "\u00E9", ecirc: "\u00EA", euml: "\u00EB", igrave: "\u00EC",
+            iacute: "\u00ED", icirc: "\u00EE", iuml: "\u00EF", ntilde: "\u00F1",
+            ograve: "\u00F2", oacute: "\u00F3", ocirc: "\u00F4", otilde: "\u00F5",
+            ouml: "\u00F6", ugrave: "\u00F9", uacute: "\u00FA", ucirc: "\u00FB",
+            uuml: "\u00FC", yacute: "\u00FD", szlig: "\u00DF",
+            Agrave: "\u00C0", Aacute: "\u00C1", Auml: "\u00C4", Ccedil: "\u00C7",
+            Egrave: "\u00C8", Eacute: "\u00C9", Ouml: "\u00D6", Uuml: "\u00DC",
+            Ntilde: "\u00D1"
+        };
+
+        // Entities browsers decode even without a trailing semicolon.
+        var NO_SEMI = {
+            amp: 1, lt: 1, gt: 1, quot: 1, nbsp: 1, copy: 1, reg: 1, deg: 1, pound: 1,
+            yen: 1, cent: 1, sect: 1, middot: 1, times: 1, divide: 1, not: 1, shy: 1,
+            macr: 1, acute: 1, uml: 1, para: 1, micro: 1
+        };
+
+        // Invisible / formatting characters that cannot change what is rendered.
+        var ZERO_WIDTH = /[\u00AD\u200B\u200C\u200D\u200E\u200F\u2060\u2061\u2062\u2063\u2064\uFEFF]/g;
+        // Everything HTML treats as collapsible whitespace, incl. NBSP + Unicode spaces.
+        var WHITESPACE = /[\t\n\f\r \u000B\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g;
+
+        var DEFAULTS = {
+            links: true,        // capture <a href> / <area href> targets
+            media: true,        // capture src / srcset / poster / background / ...
+            css: true,          // capture <style> bodies and style="" url()s
+            scriptBodies: true, // capture <script> bodies
+            breaks: true,       // emit break tokens at block boundaries
+            normalizeUnicode: true, // NFC, so composed vs decomposed compare equal
+            lowercaseUrls: false,   // off: URL paths are case-sensitive
+            // Collapse cid:/blob:/data: URLs to one placeholder. REQUIRED when
+            // comparing against a live Outlook draft body: the host rewrites remote
+            // <img src> to cid: attachment references as soon as the signature is
+            // inserted, so a strict URL compare reports every desktop draft as tampered.
+            // http(s) URLs stay strict - those are the ones worth guarding.
+            hostRewrittenUrls: false
+        };
+
+        /* --------------------------------------------------------------- helpers */
+
+        function options(o) {
+            var out = {}, k;
+            for (k in DEFAULTS) if (DEFAULTS.hasOwnProperty(k)) out[k] = DEFAULTS[k];
+            if (o) for (k in o) if (o.hasOwnProperty(k) && out.hasOwnProperty(k)) out[k] = o[k];
+            return out;
+        }
+
+        function fromCodePoint(cp) {
+            if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "\uFFFD";
+            if (cp > 0xffff) {
+                cp -= 0x10000;
+                return String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+            }
+            return String.fromCharCode(cp);
+        }
+
+        var ENT_RE = /&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31})(;?)/g;
+
+        function decodeEntities(str) {
+            if (str.indexOf("&") === -1) return str;
+            return str.replace(ENT_RE, function (m, body, semi) {
+                if (body.charAt(0) === "#") {
+                    var cp = body.charAt(1) === "x" || body.charAt(1) === "X"
+                        ? parseInt(body.slice(2), 16)
+                        : parseInt(body.slice(1), 10);
+                    if (isNaN(cp)) return m;
+                    return fromCodePoint(cp);
+                }
+                if (NAMED.hasOwnProperty(body) && (semi || NO_SEMI[body])) return NAMED[body];
+                // Unknown entity: leave verbatim. Deterministic on every host.
+                return m;
+            });
+        }
+
+        function normalizeText(s, o) {
+            s = s.replace(ZERO_WIDTH, "");
+            if (o.normalizeUnicode && typeof s.normalize === "function") {
+                try { s = s.normalize("NFC"); } catch (e) { /* older hosts */ }
+            }
+            return s.replace(WHITESPACE, " ");
+        }
+
+        // Browsers strip tabs/newlines/CRs from URLs and trim surrounding whitespace.
+        function normalizeUrl(v, o) {
+            if (v == null) return "";
+            v = decodeEntities(String(v)).replace(/[\t\n\r]+/g, "").replace(ZERO_WIDTH, "");
+            v = v.replace(/^[\s\u00A0]+|[\s\u00A0]+$/g, "");
+            if (o.hostRewrittenUrls && /^(?:cid|blob|data):/i.test(v)) return "@embedded";
+            return o.lowercaseUrls ? v.toLowerCase() : v;
+        }
+
+        function normalizeSrcset(v, o) {
+            // "a.png 1x,  b.png 2x" -> "a.png 1x,b.png 2x" (order preserved, ws collapsed)
+            var parts = String(v == null ? "" : v).split(",");
+            var res = [], i, p, sp, url, desc;
+            for (i = 0; i < parts.length; i++) {
+                p = decodeEntities(parts[i]).replace(WHITESPACE, " ").replace(/^ | $/g, "");
+                if (!p) continue;
+                sp = p.indexOf(" ");
+                url = sp === -1 ? p : p.slice(0, sp);
+                desc = sp === -1 ? "" : " " + p.slice(sp + 1);
+                res.push(normalizeUrl(url, o) + desc);
+            }
+            return res.join(",");
+        }
+
+        var CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi;
+
+        function cssUrls(css, o) {
+            var found = [], m;
+            CSS_URL_RE.lastIndex = 0;
+            while ((m = CSS_URL_RE.exec(css)) !== null) {
+                var u = normalizeUrl(m[1] != null ? m[1] : (m[2] != null ? m[2] : m[3]), o);
+                if (u) found.push(u);
+                if (CSS_URL_RE.lastIndex === m.index) CSS_URL_RE.lastIndex++; // guard
+            }
+            return found;
+        }
+
+        /* ---------------------------------------------------------- token emitter */
+
+        function Emitter(o) {
+            this.o = o;
+            this.tokens = [];
+            this.buf = [];
+            this.pendingSpace = false;
+        }
+
+        Emitter.prototype.flush = function () {
+            if (this.buf.length) {
+                this.tokens.push(["t", this.buf.join("")]);
+                this.buf.length = 0;
+            }
+            this.pendingSpace = false;
+        };
+
+        Emitter.prototype.text = function (raw, alreadyDecoded) {
+            if (!raw) return;
+            var t = normalizeText(alreadyDecoded ? raw : decodeEntities(raw), this.o);
+            if (!t) return;
+            if (t === " ") { if (this.buf.length) this.pendingSpace = true; return; }
+            var lead = t.charAt(0) === " ";
+            var trail = t.charAt(t.length - 1) === " ";
+            var core = t.replace(/^ +| +$/g, "");
+            if (this.buf.length && (this.pendingSpace || lead)) this.buf.push(" ");
+            this.buf.push(core);
+            this.pendingSpace = trail;
+        };
+
+        Emitter.prototype.token = function (arr) {
+            this.flush();
+            this.tokens.push(arr);
+        };
+
+        Emitter.prototype.brk = function () {
+            if (!this.o.breaks) { if (this.buf.length) this.pendingSpace = true; return; }
+            this.flush();
+            var last = this.tokens[this.tokens.length - 1];
+            if (!this.tokens.length) return;                 // no leading break
+            if (last && last.length === 1 && last[0] === "b") return; // no doubles
+            this.tokens.push(["b"]);
+        };
+
+        // Shared per-element handling for both the tokenizer and the DOM walker.
+        Emitter.prototype.element = function (tag, getAttr) {
+            var o = this.o, i, a, v;
+
+            if (BLOCK[tag]) this.brk();
+
+            if (o.media) {
+                for (i = 0; i < URL_ATTRS.length; i++) {
+                    a = URL_ATTRS[i];
+                    v = getAttr(a);
+                    if (v == null) continue;
+                    this.token(["u", tag, a, a === "srcset" ? normalizeSrcset(v, o) : normalizeUrl(v, o)]);
+                }
+            }
+
+            if (o.links && (tag === "a" || tag === "area" || tag === "link")) {
+                v = getAttr("href");
+                if (v != null) this.token(["h", tag, normalizeUrl(v, o)]);
+            }
+
+            // <img> must always be visible in the signature, even with no src,
+            // because its mere presence is rendered content.
+            if (tag === "img" || tag === "image" || tag === "input" || tag === "object" ||
+                tag === "embed" || tag === "iframe" || tag === "video" || tag === "audio" ||
+                tag === "svg" || tag === "canvas") {
+                this.token(["e", tag]);
+                if (tag === "input") {
+                    v = getAttr("type");
+                    if (v != null) this.token(["a", "type", normalizeText(decodeEntities(String(v)), o)]);
+                    v = getAttr("value");
+                    if (v != null) this.token(["a", "value", normalizeText(decodeEntities(String(v)), o)]);
+                }
+            }
+
+            if (o.css) {
+                v = getAttr("style");
+                if (v != null) {
+                    var urls = cssUrls(decodeEntities(String(v)), o);
+                    for (i = 0; i < urls.length; i++) this.token(["c", urls[i]]);
+                }
+            }
+        };
+
+        Emitter.prototype.rawBody = function (tag, body) {
+            var o = this.o, i, urls;
+            if (tag === "style") {
+                if (!o.css) return;
+                body = normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "");
+                this.token(["s", "style", body]);
+                return;
+            }
+            if (tag === "script") {
+                if (!o.scriptBodies) return;
+                body = body.replace(WHITESPACE, " ").replace(/^ +| +$/g, "");
+                this.token(["s", "script", body]);
+                return;
+            }
+            if (tag === "textarea" || tag === "title") {
+                this.token(["s", tag, normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "")]);
+                return;
+            }
+            // noscript / noframes / xmp / plaintext: treat body as visible text
+            this.text(body);
+        };
+
+        Emitter.prototype.finish = function () {
+            this.flush();
+            var t = this.tokens;
+            while (t.length && t[t.length - 1].length === 1 && t[t.length - 1][0] === "b") t.pop();
+            return t;
+        };
+
+        /* --------------------------------------------------- tokenizer (default) */
+
+        function attrGetter(attrs) {
+            return function (name) {
+                return attrs.hasOwnProperty(name) ? attrs[name] : null;
+            };
+        }
+
+        var ATTR_RE = /([^\s=\/>"'][^\s=\/>]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*)))?/g;
+
+        function parseAttrs(src) {
+            var attrs = {}, m, name;
+            ATTR_RE.lastIndex = 0;
+            while ((m = ATTR_RE.exec(src)) !== null) {
+                if (ATTR_RE.lastIndex === m.index) { ATTR_RE.lastIndex++; continue; }
+                name = m[1].toLowerCase();
+                if (name === "/" || !name) continue;
+                var val = m[2] != null ? m[2] : (m[3] != null ? m[3] : (m[4] != null ? m[4] : ""));
+                // First occurrence wins, matching the HTML parser.
+                if (!attrs.hasOwnProperty(name)) attrs[name] = val;
+            }
+            return attrs;
+        }
+
+        function tokenize(html, o) {
+            var s = html == null ? "" : String(html);
+            var n = s.length, i = 0, em = new Emitter(o), guard = 0;
+
+            while (i < n) {
+                if (++guard > n * 4 + 16) break; // paranoia: never loop forever
+
+                var lt = s.indexOf("<", i);
+                if (lt < 0) { em.text(s.slice(i)); break; }
+                if (lt > i) em.text(s.slice(i, lt));
+
+                var next = s.charAt(lt + 1);
+
+                // Comments (incl. IE conditional comments) - skipped on every host.
+                if (s.substr(lt, 4) === "<!--") {
+                    var endC = s.indexOf("-->", lt + 4);
+                    if (endC < 0) { i = n; break; }
+                    i = endC + 3;
+                    continue;
+                }
+                // Doctype, CDATA, processing instructions, bogus comments.
+                if (next === "!" || next === "?") {
+                    var endB = s.indexOf(">", lt + 2);
+                    i = endB < 0 ? n : endB + 1;
+                    continue;
+                }
+
+                var isEnd = next === "/";
+                var nameStart = lt + (isEnd ? 2 : 1);
+                var ch = s.charAt(nameStart);
+                if (!/[a-zA-Z]/.test(ch)) {           // a literal "<" in text
+                    em.text("<");
+                    i = lt + 1;
+                    continue;
+                }
+
+                var p = nameStart;
+                while (p < n && /[^\s\/>]/.test(s.charAt(p))) p++;
+                var tag = s.slice(nameStart, p).toLowerCase();
+
+                // Find the tag's ">" while respecting quoted attribute values.
+                var q = p, quote = "";
+                while (q < n) {
+                    var c = s.charAt(q);
+                    if (quote) { if (c === quote) quote = ""; }
+                    else if (c === '"' || c === "'") quote = c;
+                    else if (c === ">") break;
+                    q++;
+                }
+                var attrSrc = s.slice(p, q);
+                i = (q < n ? q + 1 : n);
+
+                if (isEnd) {
+                    if (BLOCK[tag]) em.brk();
+                    if (o.links && tag === "a") em.token(["/h"]);
+                    continue;
+                }
+
+                var attrs = parseAttrs(attrSrc);
+                em.element(tag, attrGetter(attrs));
+
+                if (RAW_TEXT[tag]) {
+                    if (tag === "plaintext") { em.rawBody(tag, s.slice(i)); i = n; continue; }
+                    var close = -1, from = i;
+                    // case-insensitive search for "</tag"
+                    var lower = s.toLowerCase(), needle = "</" + tag;
+                    close = lower.indexOf(needle, from);
+                    if (close < 0) { em.rawBody(tag, s.slice(from)); i = n; continue; }
+                    em.rawBody(tag, s.slice(from, close));
+                    i = close; // end tag consumed on the next iteration
+                }
+            }
+
+            return em.finish();
+        }
+
+        /* ------------------------------------------------- DOM path (diagnostic) */
+
+        var TEXT_NODE = 3, ELEMENT_NODE = 1;
+
+        function domParserSupportsHtml() {
+            try {
+                if (typeof DOMParser === "undefined") return false;
+                var d = new DOMParser().parseFromString("<i>x</i>", "text/html");
+                return !!(d && d.body && d.body.textContent === "x");
+            } catch (e) { return false; }
+        }
+
+        function parseToBody(html) {
+            var str = html == null ? "" : String(html);
+            if (domParserSupportsHtml()) {
+                var d = new DOMParser().parseFromString(str, "text/html");
+                if (d && d.body) return d.body;
+            }
+            if (typeof document !== "undefined" && document.implementation &&
+                document.implementation.createHTMLDocument) {
+                var doc = document.implementation.createHTMLDocument("");
+                // Neutralise loading attributes so an inert parse cannot hit the network,
+                // then read them back from their data-* twins.
+                doc.body.innerHTML = str.replace(
+                    /\s(src|srcset|background|poster|lowsrc|dynsrc)\s*=/gi,
+                    " data-hcs-$1="
+                );
+                return doc.body;
+            }
+            return null;
+        }
+
+        function domAttrGetter(el) {
+            return function (name) {
+                if (el.hasAttribute && el.hasAttribute(name)) return el.getAttribute(name);
+                if (el.hasAttribute && el.hasAttribute("data-hcs-" + name)) {
+                    return el.getAttribute("data-hcs-" + name);
+                }
+                return null;
+            };
+        }
+
+        function tokenizeDom(html, o) {
+            var body = parseToBody(html);
+            var em = new Emitter(o);
+            if (!body) return null;
+
+            var stack = [{ node: body, i: 0, entered: false }];
+            while (stack.length) {
+                var top = stack[stack.length - 1];
+                var node = top.node;
+
+                if (!top.entered) {
+                    top.entered = true;
+                    if (node !== body && node.nodeType === ELEMENT_NODE) {
+                        var tag = String(node.tagName || "").toLowerCase();
+                        em.element(tag, domAttrGetter(node));
+                        if (RAW_TEXT[tag]) {
+                            em.rawBody(tag, node.textContent || "");
+                            stack.pop();
+                            continue;
+                        }
+                    }
+                }
+
+                var kids = node.childNodes;
+                if (kids && top.i < kids.length) {
+                    var child = kids[top.i++];
+                    if (child.nodeType === TEXT_NODE) em.text(child.nodeValue || "", true);
+                    else if (child.nodeType === ELEMENT_NODE) stack.push({ node: child, i: 0, entered: false });
+                    continue;
+                }
+
+                if (node !== body && node.nodeType === ELEMENT_NODE) {
+                    var t2 = String(node.tagName || "").toLowerCase();
+                    if (BLOCK[t2]) em.brk();
+                    if (o.links && t2 === "a") em.token(["/h"]);
+                }
+                stack.pop();
+            }
+            return em.finish();
+        }
+
+        /* ------------------------------------------------- marked region extraction
+      
+           Locating "the signature" inside a draft body needs an anchor, because
+           setSignatureAsync does NOT always put the block at the end (on a reply it
+           sits above the quoted original). Wrap what you write in a marked element
+           and pull it back out by that attribute.
+      
+           Void elements never open a depth level; raw-text elements are skipped so a
+           marker mentioned inside <style> or a comment cannot be mistaken for one.
+        ------------------------------------------------------------------------- */
+
+        var VOID = {
+            area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1,
+            link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1
+        };
+
+        function isAlpha(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }
+        function isTagNameEnd(c) {
+            return c === 32 || c === 9 || c === 10 || c === 13 || c === 12 || c === 47 || c === 62;
+        }
+
+        /**
+         * Every element carrying `attr`, with its inner HTML and the attribute value.
+         *
+         * PERFORMANCE NOTE: this is one flat loop over char codes on purpose. The
+         * first version walked tags through a callback and allocated a descriptor
+         * object per tag; V8 ran it at ~14ms for three calls and then, once the
+         * function was optimised, at ~575ms on the SAME 140KB input - a 40x deopt
+         * cliff that would land squarely inside the send budget. Do not reintroduce
+         * a per-tag callback or per-tag object here.
+         *
+         * @returns {Array<{value:string, inner:string, tag:string, start:number, end:number}>}
+         *   start/end bracket the whole element, so a caller can compare against a
+         *   quote boundary and discard copies sitting in the quoted thread.
+         */
+        function extractMarkedRegions(html, attr) {
+            var s = String(html == null ? "" : html);
+            var a = String(attr).toLowerCase();
+            var found = [];
+            if (!s || s.indexOf("<") === -1) return found;
+
+            var lower = s.toLowerCase();
+            if (lower.indexOf(a) === -1) return found;   // no marker anywhere: done
+
+            var n = s.length, i = 0;
+            var openTag = "", depth = 0, innerStart = 0, openValue = "", openStart = 0;
+
+            while (i < n) {
+                var lt = s.indexOf("<", i);
+                if (lt < 0) break;
+
+                // <!-- comment -->  (also swallows IE conditional comment blocks)
+                if (s.charCodeAt(lt + 1) === 33 && s.charCodeAt(lt + 2) === 45 && s.charCodeAt(lt + 3) === 45) {
+                    var ec = s.indexOf("-->", lt + 4);
+                    i = ec < 0 ? n : ec + 3;
+                    continue;
+                }
+                var nc = s.charCodeAt(lt + 1);
+                if (nc === 33 || nc === 63) {              // doctype / PI / bogus comment
+                    var eb = s.indexOf(">", lt + 2);
+                    i = eb < 0 ? n : eb + 1;
+                    continue;
+                }
+
+                var isEnd = nc === 47;
+                var ns = lt + (isEnd ? 2 : 1);
+                if (!isAlpha(s.charCodeAt(ns))) { i = lt + 1; continue; }
+
+                var p = ns;
+                while (p < n && !isTagNameEnd(s.charCodeAt(p))) p++;
+                var tag = lower.slice(ns, p);
+
+                var q = p, quote = 0;
+                while (q < n) {
+                    var c = s.charCodeAt(q);
+                    if (quote) { if (c === quote) quote = 0; }
+                    else if (c === 34 || c === 39) quote = c;
+                    else if (c === 62) break;
+                    q++;
+                }
+                var afterTag = (q < n ? q + 1 : n);
+                // "/>" or a void element never opens a depth level.
+                var selfClosing = !!VOID[tag] || (function () {
+                    var k = q - 1;
+                    while (k > p && isTagNameEnd(s.charCodeAt(k)) && s.charCodeAt(k) !== 47) k--;
+                    return s.charCodeAt(k) === 47;
+                })();
+
+                if (depth > 0) {
+                    if (tag === openTag) {
+                        if (isEnd) {
+                            if (--depth === 0) {
+                                found.push({
+                                    value: openValue, tag: openTag, inner: s.slice(innerStart, lt),
+                                    start: openStart, end: afterTag
+                                });
+                            }
+                        } else if (!selfClosing) depth++;
+                    }
+                } else if (!isEnd && !selfClosing && q - p > a.length) {
+                    // Search WITHIN this tag only. `lower.indexOf(a, p)` would scan to the
+                    // end of the document for every tag that lacks the marker - O(n^2), and
+                    // ~155ms on a 140KB reply thread.
+                    var attrSrc = lower.slice(p, q);
+                    var attrs = attrSrc.indexOf(a) === -1 ? null : parseAttrs(s.slice(p, q));
+                    if (attrs && attrs.hasOwnProperty(a)) {
+                        openTag = tag;
+                        depth = 1;
+                        innerStart = afterTag;
+                        openStart = lt;
+                        openValue = decodeEntities(attrs[a] || "");
+                    }
+                }
+
+                i = afterTag;
+                // Never look for markers inside <style>/<script>/<textarea>/<title>.
+                if (!isEnd && RAW_TEXT[tag]) {
+                    var close = lower.indexOf("</" + tag, i);
+                    i = close < 0 ? n : close;
+                }
+            }
+
+            // Unclosed marker (truncated body, or the host mangled the wrapper): take
+            // everything after it rather than reporting nothing.
+            if (depth > 0) {
+                found.push({
+                    value: openValue, tag: openTag, inner: s.slice(innerStart),
+                    start: openStart, end: s.length
+                });
+            }
+            return found;
+        }
+
+        /* ------------------------------------------------- draft / quote splitting
+      
+           A reply or forward body is NOT just the signature and the user's text: it
+           also carries the quoted thread, which very often contains an intact copy of
+           the same signature (any earlier mail in the thread that we signed). Search
+           the whole body and that copy answers "is the signature intact?" on behalf
+           of the live one — so an edited or deleted live signature reads as
+           identical. Verification must be scoped to the live part.
+      
+           These markers are the separators Outlook and other clients put in front of
+           the quoted section. They are deliberately high-signal: the EARLIEST match
+           wins, so a false positive would truncate too early, report the signature as
+           absent, and cause a rewrite - the safe direction. A bare <hr> is not in the
+           list precisely because signatures contain them.
+        ------------------------------------------------------------------------- */
+
+        var QUOTE_MARKERS = [
+            "appendonsend",                                 // OWA / New Outlook anchor
+            "divrplyfwdmsg",                                // Outlook desktop (and x_ prefixed)
+            "mail-editor-reference-message-container",       // OWA
+            "-----original message-----",                    // Outlook plain separator
+            "-------- original message --------",            // mobile / other clients
+            "id=\"stopspelling\"", "id='stopspelling'",      // Outlook Windows separator
+            "blockquote type=\"cite\"", "blockquote type='cite'", // Mac Outlook, Apple Mail
+            "gmail_quote",                                   // Gmail
+            "yahoo_quoted",                                  // Yahoo
+            "ms-outlook-mobile-reference-message",            // Outlook mobile
+            "border-top:solid #e1e1e1 1.0pt"                 // Word's reply separator
+        ];
+
+        /**
+         * Split a draft body into the live compose area and the quoted thread.
+         * @returns {{live:string, quoted:string, boundary:number}}
+         *   boundary === html.length when no quoted section was found.
+         */
+        function splitDraftAtQuote(html) {
+            var s = String(html == null ? "" : html);
+            var lower = s.toLowerCase();
+            var at = -1;
+            for (var i = 0; i < QUOTE_MARKERS.length; i++) {
+                var hit = lower.indexOf(QUOTE_MARKERS[i]);
+                if (hit !== -1 && (at === -1 || hit < at)) at = hit;
+            }
+            if (at === -1) return { live: s, quoted: "", boundary: s.length };
+            // Rewind to the start of the tag the marker sits in, so a marked signature
+            // ending right before the separator is not clipped mid-element.
+            var lt = s.lastIndexOf("<", at);
+            if (lt !== -1) at = lt;
+            return { live: s.slice(0, at), quoted: s.slice(at), boundary: at };
+        }
+
+        // Ready-made option sets. `body` is the one to use against a draft body.
+        var PROFILES = {
+            // Byte-for-byte content equality. For comparing two stored copies.
+            strict: {},
+            // For comparing a stored signature against what is in an Outlook draft.
+            // CSS and script bodies are excluded because the Word and OWA editors
+            // rewrite style blocks and inline CSS wholesale - keeping them guarantees a
+            // mismatch on every desktop draft. What remains is what tampering has to
+            // touch to be harmful: visible text, link targets, image identity, order.
+            body: { css: false, scriptBodies: false, hostRewrittenUrls: true }
+        };
+
+        function keyOf(tok) { return JSON.stringify(tok); }
+
+        /**
+         * Token equality with ONE asymmetric allowance: when hostRewrittenUrls is on,
+         * "@embedded" in the URL slot of a ["u", tag, attr, url] token matches any
+         * URL on the other side. The cached copy says
+         * src="https://cdn.example/logo.png"; the draft says src="cid:image001.png"
+         * because Outlook attached and rewrote it. Both describe the same image.
+         *
+         * KNOWN LIMIT: this means an attacker who replaces the logo with ANOTHER
+         * cid: attachment is not caught by URL. Image count, position, and every
+         * text and href token are still compared strictly, which is what makes a
+         * misleading signature hard to build.
+         */
+        function tokEq(x, y, wild) {
+            if (x.length !== y.length) return false;
+            for (var i = 0; i < x.length; i++) {
+                if (x[i] === y[i]) continue;
+                if (wild && x[0] === "u" && i === 3 && (x[3] === "@embedded" || y[3] === "@embedded")) continue;
+                return false;
+            }
+            return true;
+        }
+
+        function runsEqual(a, b, wild) {
+            if (a.length !== b.length) return false;
+            for (var i = 0; i < a.length; i++) if (!tokEq(a[i], b[i], wild)) return false;
+            return true;
+        }
+
+        function stripEdgeBreaks(toks) {
+            var a = 0, b = toks.length;
+            while (a < b && toks[a].length === 1 && toks[a][0] === "b") a++;
+            while (b > a && toks[b - 1].length === 1 && toks[b - 1][0] === "b") b--;
+            return toks.slice(a, b);
+        }
+
+        // Index of the first contiguous occurrence of `needle` in `hay`, or -1.
+        // Exact string-key pass first (fast); only retried with the URL wildcard if
+        // that misses and the caller asked for host tolerance.
+        function indexOfTokenRun(hay, needle, wild) {
+            if (!needle.length) return -1;
+            var hk = hay.map(keyOf), nk = needle.map(keyOf);
+            var limit = hk.length - nk.length, i, j, ok;
+            for (i = 0; i <= limit; i++) {
+                ok = true;
+                for (j = 0; j < nk.length; j++) if (hk[i + j] !== nk[j]) { ok = false; break; }
+                if (ok) return i;
+            }
+            if (!wild) return -1;
+            for (i = 0; i <= limit; i++) {
+                ok = true;
+                for (j = 0; j < needle.length; j++) if (!tokEq(hay[i + j], needle[j], true)) { ok = false; break; }
+                if (ok) return i;
+            }
+            return -1;
+        }
+
+        // Fraction of the expected tokens present anywhere in the body (multiset).
+        // Diagnostic only: it separates "edited" from "not there at all".
+        function overlap(expected, actual) {
+            var want = stripEdgeBreaks(expected).filter(function (t) { return t[0] !== "b"; });
+            if (!want.length) return 1;
+            var bag = {}, i, k;
+            for (i = 0; i < actual.length; i++) {
+                k = keyOf(actual[i]);
+                bag[k] = (bag[k] || 0) + 1;
+            }
+            var hit = 0;
+            for (i = 0; i < want.length; i++) {
+                k = keyOf(want[i]);
+                if (bag[k] > 0) { bag[k]--; hit++; }
+            }
+            return hit / want.length;
+        }
+
+        /**
+         * Is `expectedHtml` present, unmodified, inside `containerHtml`?
+         *
+         * @returns {{verdict:"identical"|"modified"|"absent", at:number, overlap:number}}
+         *   identical - found as an intact contiguous run
+         *   modified  - much of it is there but not intact
+         *   absent    - not meaningfully there at all
+         */
+        function verifyRegion(expectedHtml, containerHtml, o) {
+            var opt = options(o);
+            var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
+            var act = tokenize(containerHtml, opt);
+            if (!exp.length) return { verdict: "absent", at: -1, overlap: 0 };
+            var at = indexOfTokenRun(act, exp, opt.hostRewrittenUrls);
+            if (at >= 0) return { verdict: "identical", at: at, overlap: 1 };
+            var ov = overlap(exp, act);
+            return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
+        }
+
+        /** Direct equality of two HTML fragments under a profile. */
+        function verifyExact(expectedHtml, actualHtml, o) {
+            var opt = options(o);
+            var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
+            var act = stripEdgeBreaks(tokenize(actualHtml, opt));
+            if (runsEqual(exp, act, opt.hostRewrittenUrls)) return { verdict: "identical", at: 0, overlap: 1 };
+            var ov = overlap(exp, act);
+            return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
+        }
+
+        /**
+         * THE POLICY BOTH BUILDS SHARE. Is our signature still intact on this DRAFT?
+         *
+         * Everything here exists because a draft is not a fragment. On a reply or
+         * forward it contains the quoted thread, and that thread routinely holds an
+         * intact copy of the very signature being checked. So:
+         *
+         *   1. The body is split at the quoted-thread boundary; only the LIVE part is
+         *      ever searched. A pristine copy sitting in the quote can no longer
+         *      answer for an edited live one.
+         *   2. Marked regions inside the quote are discarded rather than counted as
+         *      duplicates - otherwise every reply in a thread we have signed before
+         *      reports "duplicate" and gets rewritten for nothing.
+         *   3. If the live part has no copy at all, the verdict is absent/modified and
+         *      the caller rewrites, even when the quote holds a perfect copy. That is
+         *      the point: what matters is what the recipient will read at the top.
+         *
+         * DELIBERATE COST: with Outlook configured to place the signature BELOW the
+         * quoted text, the live block falls outside the live slice, so the verdict is
+         * always "absent" and every send rewrites. That is exactly the pre-
+         * verification behaviour, and it is preferred over the alternative - trusting
+         * a trailing marked block, which on a reply-to-our-own-mail is indistinguish-
+         * able from the oldest quoted signature at the bottom of the thread.
+         *
+         * @param {string} expectedHtml  the signature as resolved from cache
+         * @param {string} bodyHtml      the whole draft body
+         * @param {object} o             { markAttr, sigId, ...profile options }
+         * @returns {{verdict:string, reason:string, scope:string, quotedCopy:boolean}}
+         *   verdict: identical | modified | absent | duplicate | id-changed
+         */
+        function verifyInDraft(expectedHtml, bodyHtml, o) {
+            var opt = options(o);
+            var attr = (o && o.markAttr) || "data-cb-sig";
+            var sigId = o && o.sigId != null ? String(o.sigId) : null;
+
+            var split = splitDraftAtQuote(bodyHtml);
+            var hasQuote = split.boundary < String(bodyHtml == null ? "" : bodyHtml).length;
+            var scope = hasQuote ? "live-of-reply" : "whole-body";
+
+            var all = extractMarkedRegions(bodyHtml, attr);
+            var live = [], quoted = 0;
+            for (var i = 0; i < all.length; i++) {
+                if (all[i].start < split.boundary) live.push(all[i]);
+                else quoted++;
+            }
+
+            // Is there an intact copy in the quoted thread? Diagnostic only - it never
+            // changes the verdict, but it is the single most useful fact in a log when
+            // someone asks why a reply was rewritten. Computed LAZILY: tokenising a long
+            // quoted thread costs ~12ms on a 137KB reply, and it is pointless when the
+            // live block already verified clean.
+            var quotedCopy = null;
+            function describe(extra) {
+                if (quotedCopy === null) {
+                    quotedCopy = !!split.quoted &&
+                        verifyRegion(expectedHtml, split.quoted, opt).verdict === "identical";
+                }
+                return extra +
+                    (quoted ? ", " + quoted + " marked copy/copies in the quote" : "") +
+                    (quotedCopy ? ", intact copy in the quote (ignored)" : "");
+            }
+
+            if (live.length > 1) {
+                return {
+                    verdict: "duplicate", scope: scope, quotedCopy: quotedCopy,
+                    reason: describe(live.length + " signature blocks in the live area")
+                };
+            }
+
+            if (live.length === 1) {
+                if (sigId !== null && String(live[0].value) !== sigId) {
+                    return {
+                        verdict: "id-changed", scope: scope, quotedCopy: quotedCopy,
+                        reason: describe("live block has id=" + live[0].value + ", target=" + sigId)
+                    };
+                }
+                var r = verifyExact(expectedHtml, live[0].inner, opt);
+                // Clean live block: skip the quoted-thread scan entirely.
+                if (r.verdict === "identical") {
+                    return {
+                        verdict: "identical", scope: scope, quotedCopy: false,
+                        reason: "marked live block, overlap=1.00" +
+                            (quoted ? ", " + quoted + " marked copy/copies in the quote (ignored)" : "")
+                    };
+                }
+                return {
+                    verdict: r.verdict, scope: scope, quotedCopy: quotedCopy,
+                    reason: describe("marked live block, overlap=" + r.overlap.toFixed(2))
+                };
+            }
+
+            // No marked block in the live area: a pre-wrapper draft, a stripped
+            // attribute, or a signature that was never written here. Search the LIVE
+            // slice only - never the quote.
+            var r2 = verifyRegion(expectedHtml, split.live, opt);
+            if (r2.verdict === "identical") {
+                return {
+                    verdict: "identical", scope: scope, quotedCopy: false,
+                    reason: "unmarked live area, overlap=1.00"
+                };
+            }
+            return {
+                verdict: r2.verdict, scope: scope, quotedCopy: quotedCopy,
+                reason: describe("unmarked live area, overlap=" + r2.overlap.toFixed(2))
+            };
+        }
+
+        /* -------------------------------------------------------------- public API */
+
+        function tokensOf(html, o) { return tokenize(html, options(o)); }
+
+        function serialize(tokens) {
+            return VERSION + ":" + tokens.length + ":" + JSON.stringify(tokens);
+        }
+
+        function signature(html, o) { return serialize(tokensOf(html, o)); }
+
+        function signatureFromDom(html, o) {
+            var t = tokenizeDom(html, options(o));
+            return t ? serialize(t) : null;
+        }
+
+        function equal(a, b, o) {
+            var sa = signature(a, o), sb = signature(b, o);
+            return sa.length === sb.length && sa === sb;
+        }
+
+        function diff(a, b, o) {
+            var ta = tokensOf(a, o), tb = tokensOf(b, o);
+            var n = Math.max(ta.length, tb.length);
+            for (var i = 0; i < n; i++) {
+                var x = ta[i] ? JSON.stringify(ta[i]) : "(missing)";
+                var y = tb[i] ? JSON.stringify(tb[i]) : "(missing)";
+                if (x !== y) return { equal: false, index: i, left: x, right: y };
+            }
+            return { equal: true, index: -1, left: null, right: null };
+        }
+
+        // FNV-1a 32-bit + length. Short, stable, NOT cryptographic - do not use it
+        // as the sole tamper check against a motivated attacker.
+        function digest(html, o) {
+            var s = signature(html, o), h = 0x811c9dc5;
+            for (var i = 0; i < s.length; i++) {
+                h ^= s.charCodeAt(i);
+                h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+            }
+            return ("0000000" + h.toString(16)).slice(-8) + "-" + s.length.toString(36);
+        }
+
+        return {
+            VERSION: VERSION,
+            DEFAULTS: DEFAULTS,
+            PROFILES: PROFILES,
+            extractMarkedRegions: extractMarkedRegions,
+            splitDraftAtQuote: splitDraftAtQuote,
+            verifyInDraft: verifyInDraft,
+            verifyRegion: verifyRegion,
+            verifyExact: verifyExact,
+            indexOfTokenRun: indexOfTokenRun,
+            signature: signature,
+            signatureFromDom: signatureFromDom,
+            tokens: tokensOf,
+            equal: equal,
+            diff: diff,
+            digest: digest,
+            domParserSupportsHtml: domParserSupportsHtml,
+            _internals: { decodeEntities: decodeEntities, normalizeUrl: normalizeUrl }
+        };
+    });
+
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler-classic.js (FIXED v4)
+//  CardByte Outlook Add-in — event-handler-classic.js (v4)
 //
-//  CHANGES IN v4 — THE NOTIFICATION BAR IS TWO MESSAGES, NOT FIVE
+//  INJECTION SEQUENCE (this is the contract this file implements):
 //
-//  1. ONLY TWO THINGS REACH THE USER: "Signature applied", and a failure
-//     reason. "Applying signature...", "Fetching signature..." and the bare
-//     removeNotification-on-success are gone. Progress chatter told the user
-//     nothing they could act on, and on this runtime it was especially noisy:
-//     every recipient change spawns a fresh JSRuntime and replayed the whole
-//     sequence.
+//    Phase 0  Manual override (taskpane selection) — if present, it wins
+//             outright. No default write, no rule evaluation.
 //
-//     NOTE this also ADDS a message that v3 never showed. v3's injectSignature
-//     announced "Applying signature..." and then, on success, silently removed
-//     it — so a successful apply ended with an empty bar and the user had no
-//     confirmation at all. Success is now stated once and auto-clears after
-//     CONFIG.NOTIFY_CLEAR_MS.
+//    Phase 1  DEFAULT signature, applied as fast as possible.
+//               cache hit  → write immediately (no network on critical path)
+//               cache miss → fetch /html/outlook/get-active (with retry),
+//                            write, and cache
+//             Something is on screen at the end of Phase 1 in almost all cases.
 //
-//  2. FAILURES ARE REPORTED FROM ONE PLACE, AT THE END OF THE RUN. v3 notified
-//     from inside writeSignature and injectDefaultSignature, i.e. at the moment
-//     of failure. Two consequences, both visible in the product: a failure that
-//     was then recovered from (default fetch failed, cache served it anyway)
-//     still flashed an error, and because notificationMessages is
-//     last-write-wins on one key, a later success could overwrite a real error.
+//    Phase 2  RULES evaluation, after Phase 1 has finished writing.
+//               - rules from cache, else fetch /rules-config/get-active
+//               - findMatchingRule() against To + Cc and compose type
+//               - if a rule matches AND its HTML resolves AND that HTML
+//                 differs from what Phase 1 wrote → overwrite
+//               - otherwise leave the default in place
 //
-//     Every step that can fail now RECORDS the reason (recordFailure) and
-//     reportOutcome() raises exactly ONE message once the outcome is known:
+//    Phase 3  event.completed(), then background prefetch of the remaining
+//             rule signatures for the next activation.
 //
-//       fatal failure  -> that failure's message (persistent)
-//       degraded       -> what went wrong, given something was still applied
-//                         (rules unreachable; a rule's signature unavailable so
-//                         a fallback was used)
-//       applied        -> "Signature applied", auto-cleared
-//       nothing to say -> silence (manual override, or a blocked run that left
-//                         a good signature alone)
+//  Phases 1 and 2 never run concurrently — Phase 2 starts from Phase 1's
+//  completion callback. Only one setSignatureAsync is ever in flight.
 //
-//     _beginRun() resets the ledger at the top of every handler, so an error
-//     from one JSRuntime activation can never be reported against the next.
+//  ─── Fixes in v4 (vs FIXED v3) ─────────────────────────────────────────────
 //
-//  3. EVERY STEP FEEDS THE LEDGER, NOT JUST setSignatureAsync. xhrGet now
-//     reports WHY it failed and each fetcher passes that up:
-//       XHR timeout / onerror / construct throw -> offline ("check connection")
-//       non-2xx                                 -> server  ("contact Admin")
-//       404, or a 2xx with no html field         -> unassigned (admin config)
-//       decrypt or JSON parse failure           -> server
-//     A recovered failure stays silent: injectDefaultSignature only records the
-//     fetch failure if the cache fallback ALSO comes up empty.
+//  1. CACHE WIPE REMOVED. getOrCreateSessionId() used sessionStorage, which
+//     does not exist in the classic JS-only runtime, so every activation
+//     minted a new random id, decided "session changed", and deleted
+//     cardbyte_sig_html + cardbyte_rules ~1.8s before they were needed. A
+//     single backend hiccup then had no cache to fall back to. Session
+//     tracking is gone; TTLs bound staleness, and onFromChangedHandler still
+//     clears explicitly (the one place it is actually warranted).
 //
-//  4. SEND TIME RAISES FAILURES ONLY. The item is already closing, so a success
-//     message has nothing to land on. The send is never blocked either way.
+//  2. XHR NON-2XX BODIES ARE LOGGED. The observed 409 from
+//     /html/outlook/get-active was discarded silently. Body (raw and
+//     decrypted) is now logged, truncated.
 //
-//  5. THE GUARD TIMEOUT NOW SPEAKS, AND STILL ALLOWS THE SEND. v3's
-//     makeGuardedEvent called event.completed() with no arguments on timeout —
-//     at send that omits { allowEvent: true }, so a slow network could block
-//     the user's mail. The guard now carries the completion args it was created
-//     with, and reports a failure if it fires before anything else did.
+//  3. XHR RETRIES ONCE. Transient failures and single-flight collisions on
+//     the backend no longer produce a signature-less compose.
 //
-//  ── Preserved from v3 ───────────────────────────────────────────────────────
-//  CRITICAL FIX: no polling. Classic Outlook JSRuntime is ephemeral —
-//  setInterval is unreliable across event boundaries. We rely on the
-//  OnMessageRecipientsChanged LaunchEvent registered in the manifest. Each
-//  event creates a fresh JSRuntime, reads rules from OfficeRuntime.storage
-//  cache, evaluates, injects, and completes. This eliminates the "5 times
-//  works, 5 times stops" intermittent behavior.
+//  4. NOTIFICATIONS FIXED. icon:"none" threw Sys.ArgumentException on every
+//     call, so every failure was silent. errorMessage now omits icon and
+//     persistent entirely; informationalMessage uses a real manifest resid.
 //
-//    - Sequential flow (no race between default and rule injection)
-//    - Compose type detection with fallbacks
-//    - contextMatches no longer treats null as pass-through
-//    - Rules cache shares session lifecycle with signature cache
-//    - onFromChangedHandler refreshes rules for new sender
-//    - To + Cc recipient reading
+//  5. GUARD TIMEOUTS RAISED, AND DEFERRED DURING A WRITE. Platform budget is
+//     ~300s, not 10s. The guard also refuses to fire while a
+//     setSignatureAsync callback is outstanding, which previously could end
+//     the add-in operation mid-write and lose the signature.
+//
+//  6. REDUNDANT-WRITE SUPPRESSION. Last applied signature key is tracked, so
+//     OnMessageRecipientsChanged storms no longer trigger repeated identical
+//     setSignatureAsync calls that race in the inline reply surface.
+//
+//  7. COMPOSE ITEM RESOLUTION RETRIES. In the reading pane
+//     Office.context.mailbox.item can briefly resolve to something without
+//     body.setSignatureAsync. Short retry loop instead of instant failure.
+//
+//  8. IN-FLIGHT DEDUPE ON get-active. Prevents this runtime from issuing
+//     overlapping default-signature requests.
+//
+//  ─── Fixes in v5 (multi-account) ───────────────────────────────────────────
+//
+//  9. CACHE KEYS ARE NAMESPACED BY SENDING ACCOUNT. OfficeRuntime.storage is
+//     shared across every account in the Outlook profile, so the unscoped
+//     "cardbyte_sig_html" written by account A was served to account B for
+//     the full 5-minute TTL. That is why Mirang's signature kept landing on
+//     Joni's messages.
+//
+// 10. SENDER IS READ FROM item.from, NOT userProfile.emailAddress.
+//     userProfile reports the mailbox the add-in runs against, which is not
+//     necessarily the account selected in the From dropdown. The resolved
+//     sender now drives the encrypted username header, rule sender matching,
+//     and the cache namespace.
+//
+//  ─── REQUIRED, OUTSIDE THIS FILE ───────────────────────────────────────────
+//
+//  * CryptoJS MUST be concatenated INTO this file before deployment. Imports
+//    and additional <script> tags are not supported in the classic JS-only
+//    runtime; only the single file referenced by <Override type="javascript">
+//    is loaded. If CryptoJS is coming from event.html, every request here
+//    fails with "CryptoJS not loaded".
+//  * CONFIG.NOTIF_ICON must match a <bt:Image> id in the manifest's V1_1
+//    <Resources> block. "v11.icon16" is already declared there.
 // =============================================================================
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -6777,209 +7771,465 @@ const CONFIG = {
 
     BASE_URL: "https://newqa-enterprise.cardbyte.ai/email-signature",
 
-    XHR_TIMEOUT_MS: 6000,
-    COMPOSE_HANDLER_TIMEOUT_MS: 10000,
-    SEND_HANDLER_TIMEOUT_MS: 3500,
+    // Network
+    XHR_TIMEOUT_MS: 8000,
+    XHR_MAX_ATTEMPTS: 2,
+    XHR_RETRY_DELAY_MS: 600,
+    XHR_LOG_BODY_CHARS: 400,
 
+    // Handler budgets. Platform allows ~300s and resets per event; the old
+    // 10000 / 3500 values were the reason writes were being abandoned.
+    COMPOSE_HANDLER_TIMEOUT_MS: 45000,
+    SEND_HANDLER_TIMEOUT_MS: 8000,
+    GUARD_INJECT_GRACE_MS: 8000,
+
+    // Compose item resolution
+    ITEM_RETRY_ATTEMPTS: 6,
+    ITEM_RETRY_DELAY_MS: 250,
+
+    // Ceiling for a single Office.js callback on the critical path
+    ASYNC_STEP_TIMEOUT_MS: 3000,
+
+    // Cache keys
     CACHE_KEY: "cardbyte_sig_html",
+    LKG_KEY: "cardbyte_sig_lkg",
     RULES_CACHE_KEY: "cardbyte_rules",
     SIG_BY_ID_CACHE_KEY: "cardbyte_sig_by_id",
-    SESSION_KEY: "cardbyte_session_id",
+    LAST_APPLIED_KEY: "cardbyte_last_applied",
 
     CACHE_TTL_MS: 5 * 60 * 1000,
+    // Last-known-good survives far longer than the freshness window. It is
+    // only ever read when the fresh cache has expired AND the backend has
+    // failed, so a 409 or an outage degrades to a slightly stale signature
+    // rather than to no signature at all.
+    LKG_TTL_MS: 7 * 24 * 60 * 60 * 1000,
     RULES_CACHE_TTL_MS: 5 * 60 * 1000,
     SIG_BY_ID_TTL_MS: 5 * 60 * 1000,
+    LAST_APPLIED_TTL_MS: 30 * 60 * 1000,
+
+    // Suppress an identical re-write inside this window
+    REDUNDANT_WRITE_WINDOW_MS: 1500,
 
     SIGNATURE_SENTINEL: "cardbyte-sig",
+
+    // ─── Tamper detection (ported from event-handler.js v7.5) ───────────────
+    // Every write is wrapped in <div data-cb-sig="<sigKey>">…</div> so the
+    // block can be found again in a draft — setSignatureAsync does NOT always
+    // place it at the end (on a reply it sits above the quoted thread).
+    // At send the live area is compared against what we expect to be there.
+    VERIFY_BEFORE_WRITE: true,
+    SIG_MARK_ATTR: "data-cb-sig",
+    BODY_READ_TIMEOUT_MS: 6000,
+    // When no forward-specific rule exists, let reply rules cover forwards.
+    TREAT_FORWARD_AS_REPLY: true,
     NOTIF_KEY: "cardbyte_sig_status",
+    NOTIF_ICON: "v11.icon16",
     MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
 
-    // The bar carries exactly two kinds of message: the success below, which
-    // auto-clears, and a failure reason, which is left up for the user to
-    // dismiss. There is no progress chatter — diagnostics live in _diag.
-    MSG_APPLIED: "Signature applied",
-    NOTIFY_CLEAR_MS: 3000,
-
     DIAG_ENABLED: false,
+
+    // ─── Plan expiry ───────────────────────────────────────────────────────
+    // The backend's one account-level refusal (HTTP 412 + PlanExpiredException).
+    // Unlike every other non-2xx it is definitive, mailbox-wide and not
+    // retryable — no other signature id will succeed either.
+    HTTP_PLAN_EXPIRED: 412,
+    PLAN_EXPIRED_MSG: "Your subscription plan has expired. Please contact your Admin.",
+
+    // An expired plan invalidates the cached HTML as much as the live copy, and
+    // LKG_TTL_MS is SEVEN DAYS — without this, an expired account keeps signing
+    // mail for a week and nobody finds out. Set false only if the product wants
+    // that grace period deliberately.
+    CLEAR_CACHE_ON_PLAN_EXPIRED: true,
 };
 
-// ─── Diagnostic log ───────────────────────────────────────────────────────────
+// ─── Step-numbered diagnostic log ─────────────────────────────────────────────
 
 const _diag = (function () {
+    const t0 = Date.now();
     const buf = [];
+    let n = 0;
+    let lastStep = "(none)";
 
-    function push(level, msg) {
-        buf.push("[" + new Date().toISOString() + "] [" + level + "] " + msg);
-        try { if (typeof console !== "undefined") console.log("[CardByte]", level, msg); } catch (_) { }
+    function pad2(v) { return v < 10 ? "0" + v : String(v); }
+
+    function step(label, detail) {
+        n++;
+        const id = "#" + pad2(n);
+        lastStep = id + " " + label;
+        const line = "+ " + (Date.now() - t0) + "ms [STEP] " + id + " \u25B8 " +
+            label + (detail !== undefined && detail !== null && detail !== "" ? " :: " + detail : "");
+        buf.push(line);
+        try { if (typeof console !== "undefined") console.log("[CardByte]", line); } catch (_) { }
     }
 
     function buildHtmlBlock() {
-        const escaped = buf.join("\n")
+        const header = [
+            "[CardByte DIAGNOSTIC \u2014 DELETE BEFORE SENDING]",
+            "LAST STEP REACHED: " + lastStep,
+            "TOTAL STEPS: " + n + " | ELAPSED: " + (Date.now() - t0) + "ms",
+            ""
+        ].join("\n");
+
+        const escaped = (header + "\n" + buf.join("\n"))
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;");
+
         return [
             "<div style='margin:0 0 16px 0;padding:12px 16px;border:2px solid #d9534f;",
             "border-radius:4px;background-color:#fff3cd;font-family:Consolas,monospace;",
             "font-size:11px;color:#333;white-space:pre-wrap;'>",
-            "<strong style='color:#d9534f;font-size:13px;'>",
-            "[CardByte DIAGNOSTIC — DELETE BEFORE SENDING]</strong><br/><br/>",
             escaped, "</div>"
         ].join("");
     }
 
+    function truncate(s, max) {
+        if (s === null || s === undefined) return "";
+        const str = String(s);
+        return str.length > max ? str.slice(0, max) + "\u2026[+" + (str.length - max) + "]" : str;
+    }
+
     return {
-        info: (m) => push("INFO", m),
-        warn: (m) => push("WARN", m),
-        error: (m) => push("ERROR", m),
+        step: step,
+        info: function (m) { step(m); },
+        warn: function (m) { step(m); },
+        error: function (m) { step(m); },
         html: buildHtmlBlock,
+        truncate: truncate,
+        lastStep: function () { return lastStep; },
     };
 })();
+
+// Wraps a callback so it always fires exactly once, within ms. Office.js
+// callbacks on the critical path occasionally never return in the classic
+// runtime; without this the whole pipeline stalls until the guard expires.
+function once(ms, label, cb) {
+    let fired = false;
+    const timer = setTimeout(function () {
+        if (fired) return;
+        fired = true;
+        _diag.step("once:TIMEOUT", label + " after " + ms + "ms \u2014 continuing");
+        cb(undefined, true);
+    }, ms);
+    return function (value) {
+        if (fired) { _diag.step("once:late-callback-ignored", label); return; }
+        fired = true;
+        clearTimeout(timer);
+        cb(value, false);
+    };
+}
+
+// ─── Plan-expiry latch ───────────────────────────────────────────────────────
+//
+// Set from inside xhrGet, so any of the three endpoints can raise it, and read
+// wherever a notification is raised. One activation-scoped flag rather than a
+// return-value contract on every fetcher: an expired plan is a fact about the
+// ACCOUNT, not about the individual request that happened to discover it.
+
+const _plan = (function () {
+    let expired = false;
+    let message = null;
+
+    return {
+        reset: function () { expired = false; message = null; },
+        isExpired: function () { return expired; },
+        message: function () { return message || CONFIG.PLAN_EXPIRED_MSG; },
+        note: function (serverMsg) {
+            if (expired) return;          // first detection wins; the rest are echoes
+            expired = true;
+            message = serverMsg || null;
+            _diag.step("plan:EXPIRED", serverMsg || "(no server message)");
+            if (CONFIG.CLEAR_CACHE_ON_PLAN_EXPIRED) purgeAllCaches();
+        }
+    };
+})();
+
+// Shown verbatim only when it is a real sentence: an exception class name or an
+// over-long string falls back to our own wording rather than putting Java
+// package paths on the notification bar.
+function _serverMessageOf(raw) {
+    const s = String(raw == null ? "" : raw).trim();
+    if (!s) return null;
+    if (/^[\w$]+(\.[\w$]+){2,}$/.test(s)) return null;   // FQCN, not a message
+    return s.length <= 140 ? s : null;
+}
+
+// The error body arrives plain on this endpoint but may be encrypted on others,
+// so try both. Returns { planExpired, message }.
+function _classifyErrorBody(status, rawBody) {
+    let text = String(rawBody || "");
+    let parsed = null;
+    try { parsed = JSON.parse(text); }
+    catch (_) {
+        const pt = decryptResponse(text);
+        if (pt) { text = pt; try { parsed = JSON.parse(pt); } catch (__) { } }
+    }
+    return {
+        planExpired: status === CONFIG.HTTP_PLAN_EXPIRED ||
+            /PlanExpired/i.test(String((parsed && parsed.error) || text)),
+        message: _serverMessageOf(parsed && parsed.message)
+    };
+}
+
+// ─── Account scoping (multiple accounts in one Outlook profile) ──────────────
+//
+// The sending account is read from item.from — the account actually selected
+// in the From dropdown — and every cache key is namespaced by it. Without
+// this, storage written by one account is served to all the others.
+
+let _senderEmail = "";
+let _senderResolvedFor = null;
+
+function _profileEmail() {
+    try { return (Office.context.mailbox.userProfile.emailAddress || "").trim().toLowerCase(); }
+    catch (_) { return ""; }
+}
+
+/**
+ * Must run once per activation, before any cache read or backend call.
+ */
+function resolveSender(item, cb) {
+    const fallback = _profileEmail();
+    const done = once(CONFIG.ASYNC_STEP_TIMEOUT_MS, "resolveSender", function (email, timedOut) {
+        _senderEmail = (email || fallback || "").toLowerCase();
+        _senderResolvedFor = _itemKey(item);
+        _diag.step("resolveSender:settled",
+            "sender=" + _senderEmail + " profile=" + fallback +
+            (timedOut ? " (TIMED OUT \u2014 profile fallback)" : "") +
+            (_senderEmail && fallback && _senderEmail !== fallback ? " (DIFFER \u2014 from wins)" : ""));
+        cb(_senderEmail);
+    });
+
+    if (!item || !item.from || typeof item.from.getAsync !== "function") {
+        _diag.step("resolveSender:no-from-api");
+        done(fallback);
+        return;
+    }
+
+    try {
+        item.from.getAsync(function (res) {
+            let email = "";
+            if (res.status === Office.AsyncResultStatus.Succeeded && res.value) {
+                email = (res.value.emailAddress || "").trim().toLowerCase();
+            } else {
+                _diag.step("resolveSender:from-getAsync-failed",
+                    (res.error && res.error.message) || "?");
+            }
+            done(email || fallback);
+        });
+    } catch (e) {
+        _diag.step("resolveSender:threw", e.message);
+        done(fallback);
+    }
+}
+
+function accountKey() {
+    const e = _senderEmail || _profileEmail() || "unknown";
+    // Storage keys permit no whitespace, path separators or quotes.
+    return e.replace(/[\s/\\'"]/g, "_");
+}
+
+// Namespaced key builders — always use these, never CONFIG.*_KEY directly.
+const K = {
+    sig: function () { return CONFIG.CACHE_KEY + ":" + accountKey(); },
+    lkg: function () { return CONFIG.LKG_KEY + ":" + accountKey(); },
+    rules: function () { return CONFIG.RULES_CACHE_KEY + ":" + accountKey(); },
+    sigById: function () { return CONFIG.SIG_BY_ID_CACHE_KEY + ":" + accountKey(); },
+    lastApplied: function () { return CONFIG.LAST_APPLIED_KEY + ":" + accountKey(); }
+};
 
 // ─── CryptoJS helpers (synchronous) ──────────────────────────────────────────
 
 function encryptEmail(email) {
-    if (!email || !email.trim()) { _diag.warn("encryptEmail: empty email"); return ""; }
-    if (typeof CryptoJS === "undefined") { _diag.error("CryptoJS not loaded"); return ""; }
+    if (!email || !email.trim()) { _diag.step("encryptEmail:empty-email"); return ""; }
+    if (typeof CryptoJS === "undefined") { _diag.step("encryptEmail:CryptoJS-NOT-LOADED"); return ""; }
     try {
+        _diag.step("encryptEmail:enter", "len=" + email.length);
         const key = CryptoJS.enc.Base64.parse(CONFIG.AES_KEY_B64);
         const iv = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
-        return CryptoJS.AES.encrypt(email, key, { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString();
-    } catch (e) { _diag.error("encryptEmail threw: " + e.message); return ""; }
+        const out = CryptoJS.AES.encrypt(email, key, {
+            iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+        }).toString();
+        _diag.step("encryptEmail:ok", "cipherLen=" + out.length);
+        return out;
+    } catch (e) {
+        _diag.step("encryptEmail:threw", e.message);
+        return "";
+    }
 }
 
 function decryptResponse(cipherB64) {
-    if (!cipherB64) { _diag.warn("decryptResponse: empty input"); return ""; }
-    if (typeof CryptoJS === "undefined") { _diag.error("CryptoJS not loaded"); return ""; }
+    if (!cipherB64) return "";
+    if (typeof CryptoJS === "undefined") { _diag.step("decryptResponse:CryptoJS-NOT-LOADED"); return ""; }
     try {
         const key = CryptoJS.enc.Base64.parse(CONFIG.AES_KEY_B64);
         const iv = CryptoJS.enc.Base64.parse(CONFIG.AES_IV_B64);
-        return CryptoJS.AES.decrypt(cipherB64, key, { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString(CryptoJS.enc.Utf8);
-    } catch (e) { _diag.error("decryptResponse threw: " + e.message); return ""; }
+        return CryptoJS.AES.decrypt(cipherB64, key, {
+            iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+        }).toString(CryptoJS.enc.Utf8);
+    } catch (e) {
+        _diag.step("decryptResponse:threw", e.message);
+        return "";
+    }
 }
 
 // ─── OfficeRuntime.storage cache ─────────────────────────────────────────────
 
 function _storageGet(key, ttlMs, cb) {
+    _diag.step("_storageGet:enter", key);
     try {
         OfficeRuntime.storage.getItem(key).then(
             function (raw) {
-                if (!raw) { cb(null); return; }
+                if (!raw) { _diag.step("_storageGet:empty", key); cb(null); return; }
                 let entry;
-                try { entry = JSON.parse(raw); } catch (_) { cb(null); return; }
-                if (!entry || entry.data == null) { cb(null); return; }
+                try { entry = JSON.parse(raw); }
+                catch (_) { _diag.step("_storageGet:parse-fail", key); cb(null); return; }
+                if (!entry || entry.data === null || entry.data === undefined) {
+                    _diag.step("_storageGet:no-data", key); cb(null); return;
+                }
                 if (ttlMs && Date.now() - entry.ts > ttlMs) {
-                    _diag.warn("_storageGet: TTL expired for " + key);
+                    _diag.step("_storageGet:ttl-expired", key);
                     OfficeRuntime.storage.removeItem(key).then(function () { }, function () { });
                     cb(null);
                     return;
                 }
+                _diag.step("_storageGet:hit", key);
                 cb(entry.data);
             },
-            function (err) { _diag.warn("_storageGet failed: " + err); cb(null); }
+            function (err) { _diag.step("_storageGet:failed", key + " " + err); cb(null); }
         );
-    } catch (e) { _diag.warn("_storageGet threw: " + e.message); cb(null); }
+    } catch (e) { _diag.step("_storageGet:threw", key + " " + e.message); cb(null); }
 }
 
 function _storageSet(key, data, cb) {
-    const raw = JSON.stringify({ data: data, ts: Date.now() });
+    _diag.step("_storageSet:enter", key);
+    let raw;
+    try { raw = JSON.stringify({ data: data, ts: Date.now() }); }
+    catch (e) { _diag.step("_storageSet:stringify-threw", e.message); if (cb) cb(false); return; }
+
     try {
         OfficeRuntime.storage.setItem(key, raw).then(
-            function () { if (cb) cb(true); },
-            function (err) { _diag.warn("_storageSet failed: " + err); if (cb) cb(false); }
+            function () { _diag.step("_storageSet:ok", key + " bytes=" + raw.length); if (cb) cb(true); },
+            function (err) { _diag.step("_storageSet:failed", key + " " + err); if (cb) cb(false); }
         );
-    } catch (e) { _diag.warn("_storageSet threw: " + e.message); if (cb) cb(false); }
+    } catch (e) { _diag.step("_storageSet:threw", key + " " + e.message); if (cb) cb(false); }
 }
 
 function _storageRemove(key, cb) {
+    _diag.step("_storageRemove:enter", key);
     try {
         OfficeRuntime.storage.removeItem(key).then(
-            function () { if (cb) cb(); },
-            function (err) { _diag.warn("_storageRemove failed: " + err); if (cb) cb(); }
+            function () { _diag.step("_storageRemove:ok", key); if (cb) cb(); },
+            function (err) { _diag.step("_storageRemove:failed", key + " " + err); if (cb) cb(); }
         );
-    } catch (e) { _diag.warn("_storageRemove threw: " + e.message); if (cb) cb(); }
-}
-
-// ─── Session helpers ──────────────────────────────────────────────────────────
-
-function getOrCreateSessionId() {
-    try {
-        let sid;
-        try { sid = sessionStorage.getItem(CONFIG.SESSION_KEY); } catch (_) { }
-        if (!sid) {
-            sid = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
-            try { sessionStorage.setItem(CONFIG.SESSION_KEY, sid); } catch (_) { }
-        }
-        return sid;
-    } catch (_) {
-        return "classic-session";
-    }
-}
-
-function checkSessionAndClearCaches(cb) {
-    const currentSid = getOrCreateSessionId();
-    _storageGet(CONFIG.SESSION_KEY, null, function (cachedSid) {
-        if (cachedSid !== currentSid) {
-            _diag.info("Session changed — clearing all caches");
-            _storageSet(CONFIG.SESSION_KEY, currentSid);
-            _memSig = null;
-            _memRules = null;
-            _storageRemove(CONFIG.CACHE_KEY);
-            _storageRemove(CONFIG.RULES_CACHE_KEY);
-        }
-        if (cb) cb();
-    });
+    } catch (e) { _diag.step("_storageRemove:threw", key + " " + e.message); if (cb) cb(); }
 }
 
 // ─── Default-signature cache ──────────────────────────────────────────────────
 
 let _memSig = null;
+let _memSigOwner = null;
 
 function getCachedSignature(cb) {
-    if (_memSig) { _diag.info("cacheGet: memory hit"); cb(_memSig); return; }
-    _storageGet(CONFIG.CACHE_KEY, CONFIG.CACHE_TTL_MS, function (html) {
-        if (html) { _memSig = html; _diag.info("cacheGet: storage hit"); }
-        else { _diag.warn("cacheGet: miss"); }
+    _diag.step("getCachedSignature:enter", "account=" + accountKey());
+    if (_memSig && _memSigOwner === accountKey()) {
+        _diag.step("getCachedSignature:memory-hit");
+        cb(_memSig);
+        return;
+    }
+    if (_memSig) { _diag.step("getCachedSignature:memory-owned-by-other-account", "owner=" + _memSigOwner); }
+    _storageGet(K.sig(), CONFIG.CACHE_TTL_MS, function (html) {
+        if (html) {
+            _memSig = html;
+            _memSigOwner = accountKey();
+            _diag.step("getCachedSignature:storage-hit", "len=" + html.length);
+        } else { _diag.step("getCachedSignature:miss"); }
         cb(html);
     });
 }
 
 function setCachedSignature(html, cb) {
     _memSig = html;
-    _storageSet(CONFIG.CACHE_KEY, html, cb || function () { });
+    _memSigOwner = accountKey();
+    _storageSet(K.sig(), html, function () {
+        // Same payload, long expiry. Written second so a failure here never
+        // costs us the fresh entry.
+        _storageSet(K.lkg(), html, cb || function () { });
+    });
+}
+
+/**
+ * Read only when the fresh cache has expired and the backend has failed.
+ */
+function getLastKnownGoodSignature(cb) {
+    _diag.step("getLastKnownGoodSignature:enter", "account=" + accountKey());
+    _storageGet(K.lkg(), CONFIG.LKG_TTL_MS, function (html) {
+        if (html) _diag.step("getLastKnownGoodSignature:hit", "len=" + html.length + " (STALE but usable)");
+        else _diag.step("getLastKnownGoodSignature:miss");
+        cb(html);
+    });
 }
 
 function clearCachedSignature(cb) {
     _memSig = null;
-    _storageRemove(CONFIG.CACHE_KEY, cb || function () { });
+    _memSigOwner = null;
+    _storageRemove(K.sig(), cb || function () { });
+}
+
+// Everything this account has cached, including the seven-day LKG copy. Called
+// only from _plan.note(); fire-and-forget, since the pipeline has already read
+// whatever it read and the point is to stop the NEXT activation serving it.
+function purgeAllCaches() {
+    _diag.step("purgeAllCaches:enter", "account=" + accountKey());
+    _memSig = null;
+    _memSigOwner = null;
+    _memRules = null;
+    _memRulesOwner = null;
+    _memLastApplied = null;
+    _storageRemove(K.sig(), function () { });
+    _storageRemove(K.lkg(), function () { });
+    _storageRemove(K.rules(), function () { });
+    _storageRemove(K.sigById(), function () { });
+    _storageRemove(K.lastApplied(), function () { });
 }
 
 // ─── Rules cache ──────────────────────────────────────────────────────────────
 
 let _memRules = null;
+let _memRulesOwner = null;
 
 function getCachedRules(cb) {
-    if (_memRules) { cb(_memRules); return; }
-    _storageGet(CONFIG.RULES_CACHE_KEY, CONFIG.RULES_CACHE_TTL_MS, function (rules) {
-        if (rules) _memRules = rules;
+    _diag.step("getCachedRules:enter", "account=" + accountKey());
+    if (_memRules && _memRulesOwner === accountKey()) {
+        _diag.step("getCachedRules:memory-hit");
+        cb(_memRules);
+        return;
+    }
+    if (_memRules) { _diag.step("getCachedRules:memory-owned-by-other-account", "owner=" + _memRulesOwner); }
+    _storageGet(K.rules(), CONFIG.RULES_CACHE_TTL_MS, function (rules) {
+        if (rules) { _memRules = rules; _memRulesOwner = accountKey(); _diag.step("getCachedRules:hit"); }
+        else { _diag.step("getCachedRules:miss"); }
         cb(rules);
     });
 }
 
 function setCachedRules(rules, cb) {
     _memRules = rules;
-    _storageSet(CONFIG.RULES_CACHE_KEY, rules, cb || function () { });
+    _memRulesOwner = accountKey();
+    const count = ((rules && rules.rulesList) || []).length;
+    _diag.step("setCachedRules:enter", "rules=" + count);
+    _storageSet(K.rules(), rules, cb || function () { });
 }
 
 // ─── Per-signatureId HTML cache ───────────────────────────────────────────────
 
 function getSigById(signatureId, cb) {
-    _storageGet(CONFIG.SIG_BY_ID_CACHE_KEY, null, function (map) {
+    _storageGet(K.sigById(), null, function (map) {
         if (!map) { cb(null); return; }
         const entry = map[String(signatureId)];
         if (!entry) { cb(null); return; }
         if (Date.now() - entry.ts > CONFIG.SIG_BY_ID_TTL_MS) {
-            _diag.warn("getSigById: TTL expired for id=" + signatureId);
+            _diag.step("getSigById:ttl-expired", "id=" + signatureId);
             cb(null);
             return;
         }
@@ -6988,239 +8238,141 @@ function getSigById(signatureId, cb) {
 }
 
 function setSigById(signatureId, html, cb) {
-    _storageGet(CONFIG.SIG_BY_ID_CACHE_KEY, null, function (map) {
+    _storageGet(K.sigById(), null, function (map) {
         const m = map || {};
         m[String(signatureId)] = { html: html, ts: Date.now() };
-        _storageSet(CONFIG.SIG_BY_ID_CACHE_KEY, m, cb || function () { });
-        _diag.info("setSigById: cached id=" + signatureId);
+        _storageSet(K.sigById(), m, cb || function () { });
+        _diag.step("setSigById:cached", "id=" + signatureId);
     });
 }
 
-// ─── Notifications ────────────────────────────────────────────────────────────
+// ─── Last-applied tracking (redundant-write suppression) ──────────────────────
 //
-//  Two messages, one key, ONE writer (reportOutcome). Nothing else in this file
-//  may call showNotification directly — everything records a failure instead and
-//  lets the outcome be decided once, at the end of the run.
-// ─────────────────────────────────────────────────────────────────────────────
+// Keyed loosely by conversation so a fresh JSRuntime (each
+// OnMessageRecipientsChanged activation can be one) still sees what the
+// previous activation wrote.
 
-// Guards the auto-clear timer so it only clears the message it was scheduled
-// for; a later error can never be wiped by an earlier success's timeout.
-let _notifSeq = 0;
+let _memLastApplied = null;
 
-function showNotification(item, message, type) {
-    try {
-        if (!item || !item.notificationMessages ||
-            typeof item.notificationMessages.replaceAsync !== "function") return;
-
-        const kind = type || "informationalMessage";
-        const msg = message.length > 140 ? message.slice(0, 137) + "..." : message;
-
-        // icon/persistent are only valid for informationalMessage — Windows
-        // desktop rejects the whole call when they are sent with errorMessage.
-        const details = { type: kind, message: msg };
-        if (kind === "informationalMessage") {
-            details.icon = "none";
-            details.persistent = false;
-        }
-
-        _notifSeq++;
-        item.notificationMessages.replaceAsync(CONFIG.NOTIF_KEY, details, function (r) {
-            if (r.status !== "succeeded") {
-                item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, function () { });
-            }
-        });
-    } catch (e) { _diag.warn("showNotification threw: " + e.message); }
+function _itemKey(item) {
+    try { if (item && item.conversationId) return String(item.conversationId); } catch (_) { }
+    return "current";
 }
 
-function removeNotification(item) {
-    try { item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { }); }
-    catch (_) { }
-}
-
-function clearNotificationSoon(item) {
-    const mine = _notifSeq;
-    setTimeout(function () {
-        if (mine === _notifSeq) removeNotification(item);
-    }, CONFIG.NOTIFY_CLEAR_MS);
-}
-
-// ─── Failure ledger ───────────────────────────────────────────────────────────
-//
-//  Any step may fail: the rules call, either signature call, their timeouts, or
-//  the body write itself. None of them notify at the point of failure — they
-//  record here, and reportOutcome() raises ONE message when the outcome is
-//  known. That is what makes a recovered failure silent and "applied, but the
-//  rules were never checked" honest.
-//
-//  RANK breaks ties when several things go wrong in one activation: a fatal
-//  failure always outranks a degradation, and the most specific message wins.
-//  First writer wins within a rank, since the earliest failure is usually the
-//  cause of the later ones.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const FAILURES = {
-    // FATAL — no signature reached the body.
-    offline: {
-        rank: 3, fatal: true,
-        msg: "Couldn't reach the signature service. Check your connection and try again, or contact Admin.",
-    },
-    server: {
-        rank: 3, fatal: true,
-        msg: "The signature service returned an error. Please contact Admin.",
-    },
-    unassigned: {
-        rank: 4, fatal: true,
-        msg: "No signature is assigned to your account. Please contact Admin.",
-    },
-    write_failed: {
-        rank: 4, fatal: true,
-        msg: "Signature could not be applied. Please contact Admin.",
-    },
-    // DEGRADED — something WAS applied, but not necessarily the right thing.
-    // Deliberately worded to fit both "the default was used instead" and "a
-    // previously applied signature was left alone".
-    rule_sig_unavailable: {
-        rank: 2, fatal: false,
-        msg: "Couldn't load the signature for these recipients — a fallback signature was used. Please contact Admin.",
-    },
-    rules_offline: {
-        rank: 2, fatal: false,
-        msg: "Couldn't reach the signature service, so your signature rules weren't checked. Check your connection.",
-    },
-    rules_error: {
-        rank: 2, fatal: false,
-        msg: "Couldn't load your signature rules. Please contact Admin.",
-    },
-};
-
-let _failure = null;          // { kind, rank, fatal, msg }
-let _rulesFetchError = null;  // "offline" | "server" | null
-let _reported = false;        // has a message actually been raised this run?
-
-// Called at the top of every handler. Each JSRuntime activation is one run.
-function _beginRun() {
-    _failure = null;
-    _rulesFetchError = null;
-    _reported = false;
-}
-
-function hasFailure() { return _failure !== null; }
-function wasReported() { return _reported; }
-
-function recordFailure(kind, detail) {
-    const f = FAILURES[kind];
-    if (!f) { _diag.warn("recordFailure: unknown kind " + kind); return; }
-    _diag.warn("failure recorded: " + kind + (detail ? " — " + detail : ""));
-    if (!_failure || f.rank > _failure.rank) {
-        _failure = { kind: kind, rank: f.rank, fatal: f.fatal, msg: f.msg };
-    }
-}
-
-// The rules call records its outcome separately: whether it MATTERS depends on
-// whether a cached ruleset covered for it, which only the caller knows.
-function noteRulesFetchError(kind) { _rulesFetchError = kind; }
-function rulesFailureKind() { return _rulesFetchError === "offline" ? "rules_offline" : "rules_error"; }
-
-/**
- * THE ONLY PLACE A NOTIFICATION IS RAISED.
- *   outcome "applied" — the signature is on the body
- *           "failed"  — it is not, and nothing more specific was recorded
- *           "quiet"   — nothing to do / nothing changed
- */
-function reportOutcome(item, outcome) {
-    function show(msg, type) { _reported = true; showNotification(item, msg, type); }
-
-    if (_failure) { show(_failure.msg, "errorMessage"); return; }
-    if (outcome === "applied") {
-        show(CONFIG.MSG_APPLIED, "informationalMessage");
-        clearNotificationSoon(item);
+function getLastApplied(item, cb) {
+    const key = _itemKey(item);
+    const owner = accountKey();
+    if (_memLastApplied && _memLastApplied.itemKey === key && _memLastApplied.owner === owner) {
+        cb(_memLastApplied);
         return;
     }
-    if (outcome === "failed") { show(FAILURES.write_failed.msg, "errorMessage"); return; }
-    removeNotification(item);
+    _storageGet(K.lastApplied(), CONFIG.LAST_APPLIED_TTL_MS, function (rec) {
+        if (rec && rec.itemKey === key && rec.owner === owner) { _memLastApplied = rec; cb(rec); return; }
+        cb(null);
+    });
 }
 
-/**
- * Report once, then complete the event. Every terminal path goes through here.
- * At send time only failures are raised: the item is already closing, so a
- * success message has nothing to land on. The send is allowed either way.
- */
-function finishRun(item, guarded, outcome, opts) {
-    const isSend = !!(opts && opts.isSendTime);
-    if (isSend) {
-        if (outcome === "applied" && !hasFailure()) removeNotification(item);
-        else reportOutcome(item, outcome);
-        guarded.completed({ allowEvent: true });
-    } else {
-        reportOutcome(item, outcome);
-        guarded.completed();
-    }
+function setLastApplied(item, sigKey, htmlLen, cb, digest) {
+    const rec = {
+        itemKey: _itemKey(item),
+        owner: accountKey(),
+        sigKey: String(sigKey),
+        htmlLen: htmlLen || 0,
+        // v7.5 parity: the digest travels with the key, so send time can tell a
+        // server-side signature update from a user edit.
+        digest: digest || null,
+        ts: Date.now()
+    };
+    _memLastApplied = rec;
+    _diag.step("setLastApplied", "sigKey=" + rec.sigKey + " len=" + rec.htmlLen + " owner=" + rec.owner);
+    _storageSet(K.lastApplied(), rec, cb || function () { });
 }
 
-// ─── XHR helper ───────────────────────────────────────────────────────────────
-//
-//  cb(responseText, failure) — failure is null on success, otherwise
-//  { kind: "offline"|"server", status } so callers can tell "never answered"
-//  from "answered badly". That distinction is the difference between telling the
-//  user to check their connection and telling them to call the admin.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── XHR helper (logs non-2xx bodies, retries once) ──────────────────────────
 
 function xhrGet(url, headers, cb) {
-    let xhr;
-    try { xhr = new XMLHttpRequest(); }
-    catch (e) {
-        _diag.error("XHR construct failed: " + e.message);
-        cb(null, { kind: "offline", status: 0 });
-        return;
-    }
+    let attempt = 0;
 
-    try {
-        xhr.open("GET", url, true);
-        xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
-        for (const k in headers) {
-            if (Object.prototype.hasOwnProperty.call(headers, k)) {
-                xhr.setRequestHeader(k, headers[k]);
+    function fire() {
+        attempt++;
+        let xhr;
+        try { xhr = new XMLHttpRequest(); }
+        catch (e) { _diag.step("xhrGet:construct-failed", e.message); cb(null); return; }
+
+        _diag.step("xhrGet:enter", "attempt=" + attempt + " " + url);
+
+        try {
+            xhr.open("GET", url, true);
+            xhr.timeout = CONFIG.XHR_TIMEOUT_MS;
+            for (const k in headers) {
+                if (Object.prototype.hasOwnProperty.call(headers, k)) {
+                    xhr.setRequestHeader(k, headers[k]);
+                }
+            }
+            _diag.step("xhrGet:opened", "timeout=" + CONFIG.XHR_TIMEOUT_MS + "ms");
+        } catch (e) { _diag.step("xhrGet:open-threw", e.message); cb(null); return; }
+
+        function retryOrFail(reason) {
+            if (attempt < CONFIG.XHR_MAX_ATTEMPTS) {
+                _diag.step("xhrGet:retrying", reason + " in " + CONFIG.XHR_RETRY_DELAY_MS + "ms");
+                setTimeout(fire, CONFIG.XHR_RETRY_DELAY_MS);
+            } else {
+                _diag.step("xhrGet:giving-up", reason + " after " + attempt + " attempt(s)");
+                cb(null);
             }
         }
-    } catch (e) {
-        _diag.error("xhr.open threw: " + e.message);
-        cb(null, { kind: "offline", status: 0 });
-        return;
+
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState !== 4) return;
+            const body = xhr.responseText || "";
+            _diag.step("xhrGet:readyState4", "status=" + xhr.status + " len=" + body.length + " url=" + url);
+
+            if (xhr.status >= 200 && xhr.status < 300) {
+                cb(body);
+                return;
+            }
+
+            // Previously the body was thrown away here, which is why a 409 with
+            // a 188-byte explanation told us nothing.
+            // _diag.step("xhrGet:non-2xx-body", _diag.truncate(body, CONFIG.XHR_LOG_BODY_CHARS));
+            // const decrypted = decryptResponse(body);
+            // if (decrypted) {
+            //     _diag.step("xhrGet:non-2xx-body-decrypted", _diag.truncate(decrypted, CONFIG.XHR_LOG_BODY_CHARS));
+            // }
+
+            _diag.step("xhrGet:non-2xx-body", _diag.truncate(body, CONFIG.XHR_LOG_BODY_CHARS));
+            const decrypted = decryptResponse(body);
+            if (decrypted) {
+                _diag.step("xhrGet:non-2xx-body-decrypted", _diag.truncate(decrypted, CONFIG.XHR_LOG_BODY_CHARS));
+            }
+
+            const cls = _classifyErrorBody(xhr.status, body);
+            if (cls.planExpired) {
+                _plan.note(cls.message);
+                // Not retryable, and no point letting the second endpoint try:
+                // the answer is the same for the whole account.
+                _diag.step("xhrGet:plan-expired-abandoning", url);
+                cb(null);
+                return;
+            }
+
+            // 4xx other than 408/429 is a decision by the server; retrying is
+            // pointless except for the conflict/throttle cases, which are the
+            // ones that look like transient collisions.
+            const retryable = xhr.status === 0 || xhr.status === 408 || xhr.status === 409 ||
+                xhr.status === 429 || xhr.status >= 500;
+            if (retryable) retryOrFail("status=" + xhr.status);
+            else { _diag.step("xhrGet:non-retryable", "status=" + xhr.status); cb(null); }
+        };
+
+        xhr.ontimeout = function () { retryOrFail("timeout"); };
+        xhr.onerror = function () { retryOrFail("network-error"); };
+
+        try { xhr.send(); _diag.step("xhrGet:sent"); }
+        catch (e) { _diag.step("xhrGet:send-threw", e.message); retryOrFail("send-threw"); }
     }
 
-    xhr.onreadystatechange = function () {
-        if (xhr.readyState !== 4) return;
-        _diag.info("XHR status=" + xhr.status + " url=" + url);
-        if (xhr.status >= 200 && xhr.status < 300) {
-            cb(xhr.responseText, null);
-        } else {
-            _diag.warn("XHR non-2xx: " + xhr.status);
-            // Status 0 at readyState 4 means the request never really landed.
-            cb(null, { kind: xhr.status === 0 ? "offline" : "server", status: xhr.status });
-        }
-    };
-    xhr.ontimeout = function () {
-        _diag.warn("XHR timeout: " + url);
-        cb(null, { kind: "offline", status: 0 });
-    };
-    xhr.onerror = function () {
-        _diag.error("XHR network error: " + url);
-        cb(null, { kind: "offline", status: 0 });
-    };
-
-    try { xhr.send(); }
-    catch (e) {
-        _diag.error("xhr.send threw: " + e.message);
-        cb(null, { kind: "offline", status: 0 });
-    }
-}
-
-// A 404 is not a transport or server fault: it is the definitive "there is
-// nothing assigned", which is an admin configuration problem.
-function _kindFor(failure) {
-    if (!failure) return "server";
-    if (failure.status === 404) return "unassigned";
-    return failure.kind || "server";
+    fire();
 }
 
 // ─── Platform helpers ─────────────────────────────────────────────────────────
@@ -7233,181 +8385,330 @@ function getXPlatform() {
     return "WINDOWS";
 }
 
+// Returns the account selected in the From field once resolveSender() has run
+// for this activation; falls back to the profile mailbox otherwise.
 function getUserEmail() {
-    try { return (Office.context.mailbox.userProfile.emailAddress || "").trim(); }
-    catch (_) { return ""; }
+    if (_senderEmail) return _senderEmail;
+    return _profileEmail();
+}
+
+function authHeaders(extra) {
+    const email = getUserEmail();
+    if (!email) { _diag.step("authHeaders:no-user-email"); return null; }
+    const encrypted = encryptEmail(email);
+    if (!encrypted) { _diag.step("authHeaders:encrypt-failed"); return null; }
+    const h = { "username": encrypted, "X-Platform": getXPlatform() };
+    if (extra) {
+        for (const k in extra) {
+            if (Object.prototype.hasOwnProperty.call(extra, k)) h[k] = extra[k];
+        }
+    }
+    return h;
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+//
+// icon:"none" is not a valid value — it must be the resid of a 16x16 image
+// declared in the manifest, and errorMessage accepts neither icon nor
+// persistent. The old details object threw Sys.ArgumentException on every
+// call, which is why failures were completely silent.
+
+function _notifDetails(message, type) {
+    const msg = message.length > 140 ? message.slice(0, 137) + "..." : message;
+    if (type === "errorMessage") {
+        return { type: "errorMessage", message: msg };
+    }
+    return {
+        type: "informationalMessage",
+        message: msg,
+        icon: CONFIG.NOTIF_ICON,
+        persistent: false
+    };
+}
+
+function showNotification(item, message, type) {
+    try {
+        if (!item || !item.notificationMessages ||
+            typeof item.notificationMessages.replaceAsync !== "function") return;
+
+        const details = _notifDetails(message, type);
+        item.notificationMessages.replaceAsync(CONFIG.NOTIF_KEY, details, function (r) {
+            if (r.status !== Office.AsyncResultStatus.Succeeded) {
+                _diag.step("showNotification:replace-failed", (r.error && r.error.message) || "?");
+                try {
+                    item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, function (r2) {
+                        if (r2.status !== Office.AsyncResultStatus.Succeeded) {
+                            _diag.step("showNotification:add-failed", (r2.error && r2.error.message) || "?");
+                        }
+                    });
+                } catch (e) { _diag.step("showNotification:add-threw", e.message); }
+            }
+        });
+    } catch (e) { _diag.step("showNotification:threw", e.message); }
+}
+
+function removeNotification(item) {
+    try {
+        if (!item || !item.notificationMessages) return;
+        item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { });
+    } catch (_) { }
+}
+
+// Every errorMessage in the pipeline goes through here. When the plan has
+// lapsed, that is the true and more actionable cause of whatever else failed,
+// so it replaces the caller's wording.
+function notifyFailure(item, message) {
+    if (_plan.isExpired()) {
+        showNotification(item, _plan.message(), "errorMessage");
+        return;
+    }
+    showNotification(item, message, "errorMessage");
+}
+
+// The pipeline clears the bar once a signature has settled. A lapsed plan must
+// survive that: a signature may well have been written from cache, and the
+// message is about the account, not about this mail.
+function settleNotification(item) {
+    if (_plan.isExpired()) {
+        showNotification(item, _plan.message(), "errorMessage");
+        return;
+    }
+    removeNotification(item);
 }
 
 // ─── Manual override (taskpane selection) ─────────────────────────────────────
 
 function loadCustomProps(item, cb) {
     if (!item || typeof item.loadCustomPropertiesAsync !== "function") { cb(null); return; }
+    const done = once(CONFIG.ASYNC_STEP_TIMEOUT_MS, "loadCustomProps", function (props) {
+        cb(props || null);
+    });
     try {
         item.loadCustomPropertiesAsync(function (res) {
-            cb(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null);
+            done(res.status === Office.AsyncResultStatus.Succeeded ? res.value : null);
         });
-    } catch (e) { _diag.warn("loadCustomProps threw: " + e.message); cb(null); }
+    } catch (e) { _diag.step("loadCustomProps:threw", e.message); done(null); }
 }
 
+// Fire-and-forget: never on the critical path, and never inside the write's
+// settle callback — a second awaited round trip inside the send budget is a real
+// cost. The pane drops its own CustomProperties handle after every save, so it
+// picks this up on its next read.
+function setItemProps(item, kv) {
+    loadCustomProps(item, function (props) {
+        if (!props) return;
+        try {
+            for (const k in kv) {
+                if (!Object.prototype.hasOwnProperty.call(kv, k)) continue;
+                if (kv[k] === null) props.remove(k);
+                else props.set(k, String(kv[k]));
+            }
+            props.saveAsync(function (r) {
+                if (r.status !== Office.AsyncResultStatus.Succeeded) {
+                    _diag.step("setItemProps:save-failed", (r.error && r.error.message) || "?");
+                }
+            });
+        } catch (e) { _diag.step("setItemProps:threw", e.message); }
+    });
+}
+
+// function getManualOverride(item, cb) {
+//     loadCustomProps(item, function (props) {
+//         let id = null;
+//         try { id = props ? props.get(CONFIG.MANUAL_OVERRIDE_PROP) : null; }
+//         catch (_) { id = null; }
+//         _diag.step("getManualOverride", id ? "id=" + id : "none");
+//         cb(id ? String(id) : null);
+//     });
+// }
 function getManualOverride(item, cb) {
     loadCustomProps(item, function (props) {
         let id = null;
         try { id = props ? props.get(CONFIG.MANUAL_OVERRIDE_PROP) : null; }
         catch (_) { id = null; }
-        cb(id ? String(id) : null);
+        const s = id == null ? "" : String(id).trim();
+        // An unresolvable pin would beat every rule and then fail to fetch,
+        // leaving whatever is already on the body. Treat it as no pin at all.
+        if (s === "" || s === "null" || s === "undefined") {
+            if (s !== "") _diag.step("getManualOverride:unresolvable-ignored", "id=" + s);
+            cb(null);
+            return;
+        }
+        _diag.step("getManualOverride", "id=" + s);
+        cb(s);
     });
 }
 
-// Resolves an override id to HTML: "default" → cached default sig,
-// otherwise cache-first then network fallback for a rule signature.
-// cb(html, failKind)
+// function resolveOverrideHtml(overrideId, cb) {
+//     if (overrideId === "default") {
+//         getCachedSignature(function (html) {
+//             if (html) { cb(html); return; }
+//             fetchDefaultSignature(cb);
+//         });
+//         return;
+//     }
+//     getOrFetchSignatureById(overrideId, cb);
+// }
+
 function resolveOverrideHtml(overrideId, cb) {
-    if (overrideId === "default") {
-        getCachedSignature(function (html) { cb(html, html ? null : "unassigned"); });
+    if (overrideId === CONFIG.DEFAULT_ID) {
+        getCachedSignature(function (html) {
+            if (html) { cb(html); return; }
+            fetchDefaultSignature(cb);
+        });
         return;
     }
     getOrFetchSignatureById(overrideId, cb);
 }
 
-// ─── Guarded event.completed ──────────────────────────────────────────────────
-//
-//  FIX 5. The guard now knows how it is supposed to complete, so a timeout at
-//  send still passes { allowEvent: true } instead of silently blocking the
-//  user's mail — v3 called event.completed() bare. It also reports a failure if
-//  it fires before anything else has spoken.
-// ─────────────────────────────────────────────────────────────────────────────
-
-function makeGuardedEvent(event, timeoutMs, opts) {
-    const isSend = !!(opts && opts.isSendTime);
-    const defaultArgs = isSend ? { allowEvent: true } : null;
-    let done = false;
-    let itemRef = null;
-
-    const timer = setTimeout(function () {
-        if (done) return;
-        _diag.warn("Guard timeout (" + timeoutMs + "ms) — forcing complete");
-        // Nothing finished in time, so nothing was applied. Say so, unless the
-        // run has already reported an outcome.
-        if (itemRef && !wasReported()) {
-            if (!hasFailure()) recordFailure("offline", "guard timeout after " + timeoutMs + "ms");
-            reportOutcome(itemRef, "failed");
+/**
+ * Apply a pinned signature. Goes through writeSignatureIfChanged, so a draft
+ * the pane already wrote correctly is verified and left alone — and one where
+ * the pane's body write failed gets repaired instead of being trusted.
+ * cb(true) = handled, cb(false) = could not resolve, caller should fall through.
+ */
+function applyOverride(item, overrideId, cb) {
+    resolveOverrideHtml(overrideId, function (html) {
+        if (!html) {
+            _diag.step("applyOverride:html-unavailable", "id=" + overrideId);
+            cb(false);
+            return;
         }
-        complete(defaultArgs);
-    }, timeoutMs);
-
-    function complete(args) {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        const finalArgs = args || defaultArgs;
-        try { if (finalArgs) event.completed(finalArgs); else event.completed(); }
-        catch (e) { _diag.error("event.completed threw: " + e.message); }
-    }
-
-    return {
-        completed: complete,
-        // Handlers resolve the item after the guard is armed; hand it over so a
-        // timeout can still notify.
-        attach: function (item) { itemRef = item; },
-    };
-}
-
-// ─── Backend fetchers ─────────────────────────────────────────────────────────
-//
-//  No fetcher notifies. Each reports WHAT went wrong to its caller as a ledger
-//  kind, and the caller decides whether it is worth telling the user about.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// cb(html, failKind)
-function fetchDefaultSignature(cb) {
-    const email = getUserEmail();
-    if (!email) { _diag.error("fetchDefaultSignature: no email"); cb(null, "server"); return; }
-
-    const encrypted = encryptEmail(email);
-    if (!encrypted) { _diag.error("fetchDefaultSignature: encrypt failed"); cb(null, "server"); return; }
-
-    const url = CONFIG.BASE_URL + "/html/outlook/get-active";
-    const headers = { "username": encrypted, "X-Platform": getXPlatform() };
-
-    _diag.info("fetchDefaultSignature: GET " + url);
-
-    xhrGet(url, headers, function (raw, failure) {
-        if (!raw) { cb(null, _kindFor(failure)); return; }
-
-        const plaintext = decryptResponse(raw);
-        if (!plaintext) { _diag.error("fetchDefaultSignature: decrypt failed"); cb(null, "server"); return; }
-
-        let parsed;
-        try { parsed = JSON.parse(plaintext); }
-        catch (e) { _diag.error("fetchDefaultSignature: JSON parse error: " + e.message); cb(null, "server"); return; }
-
-        const html = parsed && parsed.html;
-        // A 2xx with no html field is a definitive "nothing assigned".
-        if (!html) { _diag.warn("fetchDefaultSignature: no html field"); cb(null, "unassigned"); return; }
-
-        _diag.info("fetchDefaultSignature: success, length=" + html.length);
-        cb(html, null);
+        writeSignatureIfChanged(item, html, "override:" + overrideId, function () { cb(true); });
     });
 }
 
-// cb(rulesJson, failKind). Also notes the reason on the ledger's rules channel,
-// so a caller that recovers from a cached ruleset can stay silent.
-function fetchRulesConfig(cb) {
-    const email = getUserEmail();
-    if (!email) { noteRulesFetchError("server"); cb(null, "rules_error"); return; }
+// ─── Guarded event.completed ──────────────────────────────────────────────────
+//
+// The guard now refuses to fire while a setSignatureAsync callback is
+// outstanding. Completing the event mid-write ends the add-in operation and
+// the write is lost — which is exactly the failure that looked like
+// "signature missing until pop out".
 
-    const encrypted = encryptEmail(email);
-    if (!encrypted) { noteRulesFetchError("server"); cb(null, "rules_error"); return; }
+let _injecting = false;
+
+function makeGuardedEvent(event, timeoutMs) {
+    let done = false;
+    let timer = null;
+
+    function arm(ms) {
+        timer = setTimeout(function () {
+            if (done) return;
+            if (_injecting) {
+                _diag.step("guard:deferred-write-in-flight", "grace=" + CONFIG.GUARD_INJECT_GRACE_MS + "ms");
+                arm(CONFIG.GUARD_INJECT_GRACE_MS);
+                return;
+            }
+            _diag.step("guard:timeout-forcing-complete", "after " + ms + "ms");
+            complete();
+        }, ms);
+    }
+
+    function complete(opts) {
+        if (done) { _diag.step("guard:complete-ignored-already-done"); return; }
+        done = true;
+        if (timer) clearTimeout(timer);
+        _diag.step("guard:complete", "opts=" + (opts ? JSON.stringify(opts) : "null"));
+        flushDiagnostics(_lastItemForDiag, function () {
+            try { if (opts) event.completed(opts); else event.completed(); }
+            catch (e) { _diag.step("event.completed:threw", e.message); }
+        });
+    }
+
+    _diag.step("makeGuardedEvent:armed", "timeoutMs=" + timeoutMs);
+    arm(timeoutMs);
+    return { completed: complete, isDone: function () { return done; } };
+}
+
+// ─── Backend fetchers ─────────────────────────────────────────────────────────
+
+// Dedupe concurrent default-signature requests from this runtime. Overlapping
+// get-active calls are a plausible trigger for the observed 409.
+let _defaultSigInFlight = null;
+
+function fetchDefaultSignature(cb) {
+    if (_defaultSigInFlight) {
+        _diag.step("fetchDefaultSignature:joining-in-flight");
+        _defaultSigInFlight.push(cb);
+        return;
+    }
+    _defaultSigInFlight = [cb];
+
+    function finish(html) {
+        const waiters = _defaultSigInFlight || [];
+        _defaultSigInFlight = null;
+        waiters.forEach(function (w) { try { w(html); } catch (e) { _diag.step("fetchDefaultSignature:cb-threw", e.message); } });
+    }
+
+    _diag.step("fetchDefaultSignature:enter");
+
+    const headers = authHeaders();
+    if (!headers) { _diag.step("fetchDefaultSignature:no-auth-headers"); finish(null); return; }
+
+    const url = CONFIG.BASE_URL + "/html/outlook/get-active";
+    _diag.step("fetchDefaultSignature:request", url);
+
+    xhrGet(url, headers, function (raw) {
+        if (!raw) { _diag.step("fetchDefaultSignature:empty-response"); finish(null); return; }
+
+        const plaintext = decryptResponse(raw);
+        if (!plaintext) { _diag.step("fetchDefaultSignature:decrypt-failed"); finish(null); return; }
+
+        let parsed;
+        try { parsed = JSON.parse(plaintext); }
+        catch (e) { _diag.step("fetchDefaultSignature:json-parse-error", e.message); finish(null); return; }
+
+        const html = parsed && parsed.html;
+        if (!html) { _diag.step("fetchDefaultSignature:no-html-field"); finish(null); return; }
+
+        _diag.step("fetchDefaultSignature:success", "len=" + html.length);
+        setCachedSignature(html, function () { finish(html); });
+    });
+}
+
+function fetchRulesConfig(cb) {
+    _diag.step("fetchRulesConfig:enter");
+
+    const headers = authHeaders({ "Content-Type": "application/json" });
+    if (!headers) { _diag.step("fetchRulesConfig:no-auth-headers"); cb(null); return; }
 
     const url = CONFIG.BASE_URL + "/rules-config/get-active";
-    const headers = { "Content-Type": "application/json", "username": encrypted, "X-Platform": getXPlatform() };
+    _diag.step("fetchRulesConfig:request", url);
 
-    xhrGet(url, headers, function (raw, failure) {
-        if (!raw) {
-            noteRulesFetchError(failure && failure.kind === "offline" ? "offline" : "server");
-            cb(null, rulesFailureKind());
-            return;
-        }
+    xhrGet(url, headers, function (raw) {
+        if (!raw) { _diag.step("fetchRulesConfig:empty-response"); cb(null); return; }
 
         let parsed;
         try { parsed = JSON.parse(raw); }
         catch (e) {
-            _diag.error("fetchRulesConfig: JSON parse: " + e.message);
-            noteRulesFetchError("server");
-            cb(null, rulesFailureKind());
-            return;
+            const pt = decryptResponse(raw);
+            try { parsed = pt ? JSON.parse(pt) : null; }
+            catch (_) { parsed = null; }
+            if (!parsed) { _diag.step("fetchRulesConfig:json-parse-error", e.message); cb(null); return; }
         }
 
         const rulesJson = parsed && parsed.rulesJson;
-        if (!rulesJson) {
-            _diag.warn("fetchRulesConfig: no rulesJson field");
-            noteRulesFetchError("server");
-            cb(null, rulesFailureKind());
-            return;
-        }
+        if (!rulesJson) { _diag.step("fetchRulesConfig:no-rulesJson-field"); cb(null); return; }
 
-        setCachedRules(rulesJson, function () {
-            _diag.info("fetchRulesConfig: cached");
-        });
-        cb(rulesJson, null);
+        const count = ((rulesJson && rulesJson.rulesList) || []).length;
+        _diag.step("fetchRulesConfig:success", "rules=" + count);
+        if (count === 0) _diag.step("fetchRulesConfig:WARNING-zero-rules-returned");
+
+        setCachedRules(rulesJson, function () { _diag.step("fetchRulesConfig:cached"); });
+        cb(rulesJson);
     });
 }
 
-// cb(html, failKind)
 function fetchSignatureById(signatureId, cb) {
-    const email = getUserEmail();
-    if (!email) { cb(null, "server"); return; }
+    _diag.step("fetchSignatureById:enter", "id=" + signatureId);
 
-    const encrypted = encryptEmail(email);
-    if (!encrypted) { cb(null, "server"); return; }
+    const headers = authHeaders();
+    if (!headers) { cb(null); return; }
 
     const url = CONFIG.BASE_URL + "/rules-config/get/" + signatureId;
-    const headers = { "username": encrypted, "X-Platform": getXPlatform() };
 
-    _diag.info("fetchSignatureById: id=" + signatureId);
-
-    xhrGet(url, headers, function (raw, failure) {
-        if (!raw) { cb(null, _kindFor(failure)); return; }
+    xhrGet(url, headers, function (raw) {
+        if (!raw) { _diag.step("fetchSignatureById:empty-response", "id=" + signatureId); cb(null); return; }
 
         let parsed;
         try { parsed = JSON.parse(raw); }
@@ -7418,26 +8719,19 @@ function fetchSignatureById(signatureId, cb) {
         }
 
         const html = parsed && parsed.html;
-        if (!html) {
-            _diag.warn("fetchSignatureById: no html for id=" + signatureId);
-            cb(null, "unassigned");
-            return;
-        }
+        if (!html) { _diag.step("fetchSignatureById:no-html", "id=" + signatureId); cb(null); return; }
 
+        _diag.step("fetchSignatureById:success", "id=" + signatureId + " len=" + html.length);
         setSigById(signatureId, html, function () { });
-        cb(html, null);
+        cb(html);
     });
 }
 
-// cb(html, failKind)
 function getOrFetchSignatureById(signatureId, cb) {
+    if (signatureId === null || signatureId === undefined) { cb(null); return; }
     getSigById(signatureId, function (cached) {
-        if (cached) {
-            _diag.info("getOrFetchSignatureById: cache hit id=" + signatureId);
-            cb(cached, null);
-            return;
-        }
-        _diag.info("getOrFetchSignatureById: cache miss, fetching id=" + signatureId);
+        if (cached) { _diag.step("getOrFetchSignatureById:cache-hit", "id=" + signatureId); cb(cached); return; }
+        _diag.step("getOrFetchSignatureById:cache-miss", "id=" + signatureId);
         fetchSignatureById(signatureId, cb);
     });
 }
@@ -7449,26 +8743,34 @@ function getDomain(email) {
     return at === -1 ? "" : email.slice(at + 1).toLowerCase();
 }
 
-function getRecipientsAsync(field, cb) {
-    if (typeof field.getAsync !== "function") { cb([]); return; }
-    field.getAsync(function (result) {
-        if (result.status === Office.AsyncResultStatus.Succeeded) {
-            cb(result.value || []);
-        } else {
-            cb([]);
-        }
-    });
+function getRecipientsAsync(field, label, cb) {
+    if (!field || typeof field.getAsync !== "function") { _diag.step("getRecipientsAsync:unavailable", label); cb([]); return; }
+    _diag.step("getRecipientsAsync:enter", label);
+    try {
+        field.getAsync(function (result) {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+                const v = result.value || [];
+                _diag.step("getRecipientsAsync:ok", label + " count=" + v.length);
+                cb(v);
+            } else {
+                _diag.step("getRecipientsAsync:failed", label + " " + ((result.error && result.error.message) || "?"));
+                cb([]);
+            }
+        });
+    } catch (e) { _diag.step("getRecipientsAsync:threw", label + " " + e.message); cb([]); }
 }
 
 function getAllRecipientEmails(item, cb) {
-    getRecipientsAsync(item.to, function (toList) {
-        getRecipientsAsync(item.cc, function (ccList) {
+    _diag.step("getAllRecipientEmails:enter");
+    getRecipientsAsync(item.to, "to", function (toList) {
+        getRecipientsAsync(item.cc, "cc", function (ccList) {
             const all = [];
             const seen = {};
             (toList || []).concat(ccList || []).forEach(function (r) {
-                const e = (r.emailAddress || "").toLowerCase();
+                const e = ((r && r.emailAddress) || "").toLowerCase();
                 if (e && !seen[e]) { seen[e] = true; all.push(e); }
             });
+            _diag.step("getAllRecipientEmails:done", "unique=" + all.length + " [" + all.join(",") + "]");
             cb(all);
         });
     });
@@ -7483,54 +8785,165 @@ function recipientTypeMatches(recipientType, hasInternal, hasExternal) {
     return true;
 }
 
-function senderMatches(rule) {
-    const senders = (rule && Array.isArray(rule.Senders)) ? rule.Senders : null;
-    if (!senders || senders.length === 0) return true;
-    if (senders.indexOf("*") !== -1) return true;
-    const me = getUserEmail().toLowerCase();
-    if (!me) return false;
-    for (let i = 0; i < senders.length; i++) {
-        if ((senders[i] || "").trim().toLowerCase() === me) return true;
+// Rule sender lists have appeared under several property names and entry
+// shapes. Read all of them rather than silently treating an unrecognised
+// shape as "no restriction".
+function _ruleSenders(rule) {
+    if (!rule) return null;
+    const candidates = ["Senders", "senders", "SenderEmails", "senderEmails",
+        "senderList", "SenderList", "Sender", "sender"];
+    for (let i = 0; i < candidates.length; i++) {
+        const v = rule[candidates[i]];
+        if (Array.isArray(v)) return { key: candidates[i], list: v };
+        if (typeof v === "string" && v.trim() !== "") return { key: candidates[i], list: [v] };
     }
+    return null;
+}
+
+// Accepts "a@b.com", {email|emailAddress|address|smtpAddress|userPrincipalName},
+// "*", "*@b.com", "@b.com" and a bare "b.com".
+function _senderEntryMatches(entry, me, myDomain) {
+    let s = "";
+    if (typeof entry === "string") s = entry;
+    else if (entry && typeof entry === "object") {
+        s = entry.email || entry.emailAddress || entry.address ||
+            entry.smtpAddress || entry.userPrincipalName || entry.upn || "";
+    }
+    s = String(s || "").trim().toLowerCase();
+    if (!s) return false;
+
+    if (s === "*" || s === "all") return true;
+    if (s === me) return true;
+
+    if (s.indexOf("*@") === 0) return myDomain && s.slice(2) === myDomain;
+    if (s.indexOf("@") === 0) return myDomain && s.slice(1) === myDomain;
+    if (s.indexOf("@") === -1) return myDomain && s === myDomain;
+
+    return false;
+}
+
+function senderMatches(rule) {
+    const found = _ruleSenders(rule);
+    const me = getUserEmail().toLowerCase();
+    const myDomain = getDomain(me);
+
+    if (!found || found.list.length === 0) {
+        _diag.step("senderMatches:no-sender-list",
+            "priority=" + (rule && rule.priority) +
+            " ruleKeys=[" + (rule ? Object.keys(rule).join(",") : "") + "] \u2192 unrestricted");
+        return true;
+    }
+
+    for (let i = 0; i < found.list.length; i++) {
+        if (_senderEntryMatches(found.list[i], me, myDomain)) return true;
+    }
+
+    // The decisive line: shows exactly what the rule wanted vs who we are.
+    _diag.step("senderMatches:NO-MATCH",
+        "priority=" + (rule && rule.priority) +
+        " via=" + found.key +
+        " me=" + me +
+        " list=" + _diag.truncate(JSON.stringify(found.list), 300));
     return false;
 }
 
 function contextMatches(ruleContext, composeType) {
-    if (!ruleContext || ruleContext.trim() === "") return true;
-    const rc = ruleContext.toLowerCase();
+    const rc = normalizeContext(ruleContext);
     if (rc === "all") return true;
+
     if (composeType === null || composeType === undefined) {
-        _diag.warn("contextMatches: null composeType — conservative fallback");
+        _diag.step("contextMatches:null-composeType-conservative-fail");
         return false;
     }
-    return rc === composeType.toLowerCase();
+    const ct = normalizeContext(composeType);
+
+    if (rc === ct) return true;
+
+    // A rule written for replies covers forwards unless a forward-specific
+    // rule exists. Turn this off if your rule set distinguishes them strictly.
+    if (CONFIG.TREAT_FORWARD_AS_REPLY && rc === "reply" && ct === "forward") {
+        _diag.step("contextMatches:forward-accepted-by-reply-rule");
+        return true;
+    }
+    return false;
 }
 
 // ─── Compose type detection with fallbacks ───────────────────────────────────
+//
+// Returns "compose" | "reply" | "forward". Forward used to be collapsed into
+// "reply" here, which meant a rule with context "forward" could never match
+// and quietly fell through to the default signature.
+
+// A rule with no signatureId is not usable: it would match, resolve to
+// nothing, and — worse — shadow the lower-priority rule that should have
+// applied. Priority is coerced because a missing one yields NaN, and a
+// comparator that returns NaN lets Array#sort order however it likes, i.e.
+// an arbitrary "highest priority" match.
+function enabledRulesWithSignatures(rules) {
+    const all = ((rules && rules.rulesList) || []).filter(function (r) { return r && r.enabled; });
+    const usable = all.filter(function (r) {
+        return r.signatureId !== null && r.signatureId !== undefined &&
+            String(r.signatureId).trim() !== "";
+    });
+    const dropped = all.length - usable.length;
+    if (dropped) {
+        _diag.step("enabledRulesWithSignatures:dropped",
+            dropped + " enabled rule(s) have no signatureId \u2014 ignored");
+    }
+    return usable.sort(function (a, b) {
+        return (Number(a.priority) || 0) - (Number(b.priority) || 0);
+    });
+}
+
+function normalizeContext(v) {
+    const s = (v || "").trim().toLowerCase();
+    if (s === "" || s === "all" || s === "any") return "all";
+    if (s === "compose" || s === "new" || s === "newmail" || s === "newmessage") return "compose";
+    if (s === "reply" || s === "replyall" || s === "reply-all") return "reply";
+    if (s === "forward" || s === "fwd") return "forward";
+    return s;
+}
 
 function detectComposeType(item, cb) {
     if (typeof item.getComposeTypeAsync === "function") {
-        item.getComposeTypeAsync(function (result) {
-            if (result.status === Office.AsyncResultStatus.Succeeded) {
-                const raw = ((result.value && result.value.composeType) || "").toLowerCase();
-                _diag.info("getComposeTypeAsync raw=" + raw);
-                if (raw === "reply" || raw === "forward") { cb("reply"); return; }
-                if (raw === "newmail") { cb("compose"); return; }
-            }
-            _trySubjectFallback(item, cb);
-        });
-        return;
+        try {
+            item.getComposeTypeAsync(function (result) {
+                if (result.status === Office.AsyncResultStatus.Succeeded) {
+                    const raw = ((result.value && result.value.composeType) || "").toLowerCase();
+                    _diag.step("detectComposeType:getComposeTypeAsync", "raw=" + raw);
+                    if (raw === "forward") { cb("forward"); return; }
+                    if (raw === "reply") { cb("reply"); return; }
+                    if (raw === "newmail") { cb("compose"); return; }
+                    _diag.step("detectComposeType:unrecognised-raw-value", raw);
+                } else {
+                    _diag.step("detectComposeType:getComposeTypeAsync-failed",
+                        (result.error && result.error.message) || "?");
+                }
+                _trySubjectFallback(item, cb);
+            });
+            return;
+        } catch (e) { _diag.step("detectComposeType:threw", e.message); }
     }
     _trySubjectFallback(item, cb);
 }
 
+// Multi-letter reply/forward prefixes across locales. Bare "R:"/"I:" are
+// deliberately absent — a false positive misclassifies a new mail as a reply.
+const REPLY_PREFIX_RE = /^\s*(re|aw|sv|vs|antw|res|ref|odp|回复)\s*(\[\d+\])?\s*:/i;
+const FORWARD_PREFIX_RE = /^\s*(fw|fwd|wg|tr|vb|rv|enc|转发)\s*(\[\d+\])?\s*:/i;
+
 function _trySubjectFallback(item, cb) {
-    if (typeof item.subject !== "undefined" && typeof item.subject.getAsync === "function") {
+    if (item.subject && typeof item.subject.getAsync === "function") {
         item.subject.getAsync(function (res) {
             if (res.status === Office.AsyncResultStatus.Succeeded) {
-                const subj = (res.value || "").toLowerCase().trim();
-                if (subj.indexOf("re:") === 0 || subj.indexOf("fw:") === 0 || subj.indexOf("fwd:") === 0) {
-                    _diag.info("detectComposeType: reply/forward via subject prefix");
+                const subj = String(res.value || "");
+                if (FORWARD_PREFIX_RE.test(subj)) {
+                    _diag.step("detectComposeType:forward-via-subject-prefix");
+                    cb("forward");
+                    return;
+                }
+                if (REPLY_PREFIX_RE.test(subj)) {
+                    _diag.step("detectComposeType:reply-via-subject-prefix");
                     cb("reply");
                     return;
                 }
@@ -7542,21 +8955,24 @@ function _trySubjectFallback(item, cb) {
     _tryInReplyToFallback(item, cb);
 }
 
+// Returning "compose" here was a guess, and it is the wrong guess to make: on
+// a reply where getComposeTypeAsync returns "" and the subject is not yet
+// populated, guessing "compose" lets compose-scoped rules win a reply and
+// skips every context:"reply" rule. null means "unknown" — context-agnostic
+// rules still match, context-scoped ones cannot.
 function _tryInReplyToFallback(item, cb) {
     try {
         if (item.inReplyToId) {
-            _diag.info("detectComposeType: reply/forward via inReplyToId");
+            _diag.step("detectComposeType:reply-via-inReplyToId");
             cb("reply");
             return;
         }
-    } catch (e) { }
-    _diag.info("detectComposeType: defaulting to compose");
-    cb("compose");
+    } catch (_) { }
+    _diag.step("detectComposeType:UNDETERMINED", "\u2192 context-scoped rules cannot match");
+    cb(null);
 }
 
-function getComposeType(item, cb) {
-    detectComposeType(item, cb);
-}
+function getComposeType(item, cb) { detectComposeType(item, cb); }
 
 // ─── findMatchingRule ────────────────────────────────────────────────────────
 
@@ -7566,7 +8982,7 @@ function findMatchingRule(item, rules, cb) {
 
     getAllRecipientEmails(item, function (emails) {
         if (emails.length === 0) {
-            _diag.warn("findMatchingRule: no recipients — fallback to default");
+            _diag.step("findMatchingRule:no-recipients", "\u2192 no rule");
             cb(null);
             return;
         }
@@ -7575,26 +8991,35 @@ function findMatchingRule(item, rules, cb) {
         let hasExternal = false;
         const recipientDomains = [];
 
+        if (!senderDomain) {
+            _diag.step("findMatchingRule:NO-SENDER-DOMAIN",
+                "cannot classify internal/external \u2014 recipient-scoped rules will not match");
+        }
+
         emails.forEach(function (e) {
             const d = getDomain(e);
-            if (d && recipientDomains.indexOf(d) === -1) recipientDomains.push(d);
+            if (!d) return;   // unparseable address classifies as neither
+            if (recipientDomains.indexOf(d) === -1) recipientDomains.push(d);
             if (senderDomain && d === senderDomain) hasInternal = true;
-            else hasExternal = true;
+            else if (senderDomain) hasExternal = true;
         });
 
         getComposeType(item, function (composeType) {
-            const ruleList = ((rules && rules.rulesList) || [])
-                .filter(function (r) { return r.enabled; })
-                .sort(function (a, b) { return a.priority - b.priority; });
+            try {
+                _diag.step("findMatchingRule:raw-rules",
+                    _diag.truncate(JSON.stringify(rules), 2000));
+            } catch (e) { _diag.step("findMatchingRule:raw-rules-unserializable", e.message); }
 
-            _diag.info("findMatchingRule:"
-                + " senderEmail=" + senderEmail
-                + " senderDomain=" + senderDomain
-                + " composeType=" + composeType
-                + " hasInternal=" + hasInternal
-                + " hasExternal=" + hasExternal
-                + " recipDomains=" + recipientDomains.join(",")
-                + " totalRules=" + ruleList.length);
+            const ruleList = enabledRulesWithSignatures(rules);
+
+            _diag.step("findMatchingRule:context",
+                "sender=" + senderEmail +
+                " senderDomain=" + senderDomain +
+                " composeType=" + composeType +
+                " hasInternal=" + hasInternal +
+                " hasExternal=" + hasExternal +
+                " recipDomains=" + recipientDomains.join(",") +
+                " enabledRules=" + ruleList.length);
 
             let matched = null;
             for (let i = 0; i < ruleList.length; i++) {
@@ -7603,412 +9028,763 @@ function findMatchingRule(item, rules, cb) {
                 const contextOk = contextMatches(r.context, composeType);
                 const recipOk = recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
 
-                _diag.info(
-                    (senderOk && contextOk && recipOk ? ">>> MATCH" : "    skip ") +
-                    " | priority=" + r.priority +
-                    " | sender(ok=" + senderOk + ")" +
-                    " | context=" + r.context + "(ok=" + contextOk + ")" +
-                    " | recipientType=" + r.recipientType + "(ok=" + recipOk + ")" +
-                    " | sigId=" + (r.signatureId || "NULL")
+                _diag.step(
+                    (senderOk && contextOk && recipOk ? "findMatchingRule:MATCH" : "findMatchingRule:skip"),
+                    "priority=" + r.priority +
+                    " senderOk=" + senderOk +
+                    " context=" + r.context + "(" + contextOk + ")" +
+                    " recipientType=" + r.recipientType + "(" + recipOk + ")" +
+                    " sigId=" + (r.signatureId || "NULL")
                 );
 
-                if (senderOk && contextOk && recipOk) {
-                    matched = r;
-                    break;
-                }
+                if (senderOk && contextOk && recipOk) { matched = r; break; }
             }
 
-            if (matched) _diag.info("findMatchingRule: winner sigId=" + matched.signatureId);
-            else _diag.warn("findMatchingRule: no rule matched");
+            if (matched) _diag.step("findMatchingRule:winner", "sigId=" + matched.signatureId);
+            else _diag.step("findMatchingRule:none-matched");
             cb(matched);
         });
     });
 }
 
-// ─── Signature injection ──────────────────────────────────────────────────────
+// ─── Signature verification (tamper detection) ────────────────────────────────
+//
+// Ported from event-handler.js v7.5. The comparison itself is the shared
+// html-content-signature module prepended to this file — it is a pure string
+// tokenizer with no DOMParser dependency, so classic (mshtml) and new Outlook
+// (WebView2) produce byte-identical signatures for the same HTML.
+//
+// WHY A WRAPPER IS NEEDED: there is no Office API for "give me the signature
+// block". body.getAsync returns the whole draft, so the block has to be found
+// by an anchor we put there ourselves.
+//
+// WHY THE LIVE AREA ONLY: a reply or forward carries the quoted thread, which
+// very often holds an intact copy of the same signature from an earlier mail
+// we signed. Searching the whole body lets that copy answer "is it intact?" on
+// behalf of the live one, so an edited or deleted live signature reads as
+// identical and never gets repaired. verifyInDraft splits at the quote
+// boundary and only inspects the live part.
 
-// Records instead of notifying — the caller reports once, at the end.
-function writeSignature(item, html, onDone) {
-    if (!item.body || typeof item.body.setSignatureAsync !== "function") {
-        _diag.error("writeSignature: setSignatureAsync not available");
-        recordFailure("write_failed", "setSignatureAsync unavailable");
-        onDone(false);
+const HCS = typeof HtmlContentSignature !== "undefined" ? HtmlContentSignature : null;
+const SIG_PROFILE = HCS ? HCS.PROFILES.body : null;
+
+function escAttr(v) {
+    return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+// The decision key ("default", "rule:123", "override:123") is internal to this
+// file — it namespaces the last-applied record. The MARKER written into the body
+// must be the resolvable signature id, because the taskpane and the New Outlook
+// build both wrap with the bare id and only know the id. Marking "override:123"
+// makes every pane-applied signature verify as id-changed and get rewritten on
+// every activation. "default" has no prefix and passes through unchanged.
+function sigIdOf(sigKey) {
+    const s = String(sigKey == null ? "" : sigKey);
+    const c = s.indexOf(":");
+    return c === -1 ? s : s.slice(c + 1);
+}
+
+// A bare <div> with one data attribute: no id (would collide if a mail somehow
+// carried two), no class, no styling that could alter layout.
+function wrapSignature(html, sigKey) {
+    return "<div " + CONFIG.SIG_MARK_ATTR + "=\"" + escAttr(sigIdOf(sigKey)) + "\">" + html + "</div>";
+}
+
+function sigDigest(html) {
+    if (!HCS || html == null) return null;
+    try { return HCS.digest(html, SIG_PROFILE); }
+    catch (e) { _diag.step("sigDigest:threw", e.message); return null; }
+}
+
+// cb(htmlOrNull). null = could not read; "" is a legitimate empty draft body.
+function readBodyHtml(item, cb) {
+    if (!item || !item.body || typeof item.body.getAsync !== "function") {
+        _diag.step("readBodyHtml:getAsync-unavailable");
+        cb(null);
+        return;
+    }
+    const done = once(CONFIG.BODY_READ_TIMEOUT_MS, "readBodyHtml", function (value, timedOut) {
+        if (timedOut) { cb(null); return; }
+        cb(value === undefined ? null : value);
+    });
+    try {
+        item.body.getAsync(Office.CoercionType.Html, function (res) {
+            if (res.status === Office.AsyncResultStatus.Succeeded) {
+                const s = String(res.value == null ? "" : res.value);
+                _diag.step("readBodyHtml:ok", "len=" + s.length);
+                done(s);
+            } else {
+                _diag.step("readBodyHtml:failed", (res.error && res.error.message) || "?");
+                done(undefined);
+            }
+        });
+    } catch (e) {
+        _diag.step("readBodyHtml:threw", e.message);
+        done(undefined);
+    }
+}
+
+/**
+ * Is `expectedHtml` still intact on the draft?
+ *
+ * cb({ verdict, reason, note })
+ *   identical  — untouched. The ONLY verdict that suppresses a write.
+ *   modified   — recognisably our signature, edited.
+ *   absent     — not in the live area (deleted, or never written).
+ *   duplicate  — more than one signature block in the live area.
+ *   id-changed — the live block belongs to a different signature key.
+ *   unknown    — could not tell. Treated as "write it".
+ */
+function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
+    if (!CONFIG.VERIFY_BEFORE_WRITE) { cb({ verdict: "unknown", reason: "verification disabled", note: "" }); return; }
+    if (!HCS) {
+        _diag.step("verifySignatureOnBody:HCS-NOT-LOADED",
+            "html-content-signature module missing from the bundle");
+        cb({ verdict: "unknown", reason: "signature module not loaded", note: "" });
         return;
     }
 
-    item.body.setSignatureAsync(html, { coercionType: Office.CoercionType.Html }, function (r) {
-        if (r.status === Office.AsyncResultStatus.Succeeded) {
-            _diag.info("setSignatureAsync: success");
-            onDone(true);
-        } else {
-            const m = (r.error && r.error.message) || "unknown";
-            _diag.warn("setSignatureAsync failed: " + m);
-            recordFailure("write_failed", m);
-            onDone(false);
-        }
-    });
-}
+    readBodyHtml(item, function (body) {
+        if (body === null) { cb({ verdict: "unknown", reason: "body unreadable on this host", note: "" }); return; }
 
-function writeDiagnostics(item, onDone) {
-    if (!CONFIG.DIAG_ENABLED || typeof item.body.prependAsync !== "function") { onDone(); return; }
-    item.body.prependAsync(_diag.html(), { coercionType: Office.CoercionType.Html }, function () { onDone(); });
-}
+        // Did the expected copy itself change since we applied it? If so, a
+        // mismatch below is an admin edit propagating, not a user tampering.
+        getLastApplied(item, function (last) {
+            let note = "";
+            const nowDigest = sigDigest(expectedHtml);
+            if (last && last.digest && nowDigest && last.digest !== nowDigest) {
+                note = "expected copy changed since compose (server-side update, not an edit)";
+            }
 
-// ─── Orchestration helpers ────────────────────────────────────────────────────
+            let r;
+            const opt = {};
+            for (const k in SIG_PROFILE) {
+                if (Object.prototype.hasOwnProperty.call(SIG_PROFILE, k)) opt[k] = SIG_PROFILE[k];
+            }
+            opt.markAttr = CONFIG.SIG_MARK_ATTR;
+            opt.sigId = sigIdOf(sigKey);
 
-// No progress notification: the bar stays empty until there is an outcome.
-function injectSignature(item, html, guarded, opts) {
-    writeSignature(item, html, function (ok) {
-        finishRun(item, guarded, ok ? "applied" : "failed", opts);
-    });
-}
-
-function injectDefaultSignature(item, guarded, opts) {
-    fetchDefaultSignature(function (html, failKind) {
-        if (html) {
-            setCachedSignature(html, function () {
-                _diag.info("injectDefaultSignature: fetched and cached");
-                injectSignature(item, html, guarded, opts);
-            });
-            return;
-        }
-
-        _diag.warn("injectDefaultSignature: fetch failed (" + failKind + ") — checking cache");
-        getCachedSignature(function (cached) {
-            if (cached) {
-                // RECOVERED. The user has the right signature, so the failure
-                // is a log line and nothing more — this is exactly the case v3
-                // used to flash an error for.
-                _diag.info("injectDefaultSignature: cache served it — not reporting the fetch failure");
-                injectSignature(item, cached, guarded, opts);
+            try {
+                // Classic writes through Word's HTML engine, which rewrites the
+                // markup on insertion and routinely DROPS unknown attributes —
+                // so data-cb-sig is often gone from the draft even though the
+                // signature is untouched. With no marked region, verifyInDraft
+                // can only say "absent", and every send would rewrite.
+                //
+                // Fall back to a marker-free token search of the live area:
+                // verifyRegion looks for the expected token run inside the
+                // container, which is what the marker was only ever an
+                // optimisation for. A genuinely deleted signature still comes
+                // back absent, so the safe direction is preserved.
+                const marked = HCS.extractMarkedRegions(body, CONFIG.SIG_MARK_ATTR);
+                if (!marked.length) {
+                    const split = HCS.splitDraftAtQuote(body);
+                    const scope = split.boundary < body.length ? "live-of-reply" : "whole-body";
+                    const rr = HCS.verifyRegion(expectedHtml, split.live, opt);
+                    _diag.step("verifySignatureOnBody:marker-absent-fallback",
+                        "verdict=" + rr.verdict + " scope=" + scope +
+                        " overlap=" + rr.overlap + " (Word likely stripped " + CONFIG.SIG_MARK_ATTR + ")");
+                    cb({ verdict: rr.verdict, reason: scope + ": marker-free token match", note: note });
+                    return;
+                }
+                r = HCS.verifyInDraft(expectedHtml, body, opt);
+            } catch (e) {
+                // The comparison must never take the send down with it.
+                _diag.step("verifyInDraft:threw", e.message);
+                cb({ verdict: "unknown", reason: "comparison failed: " + e.message, note: note });
                 return;
             }
-            _diag.error("injectDefaultSignature: no signature available");
-            recordFailure(failKind || "offline", "default signature unavailable");
-            finishRun(item, guarded, "failed", opts);
+
+            _diag.step("verifySignatureOnBody:" + r.verdict,
+                "sigKey=" + sigKey + " scope=" + r.scope + " reason=" + r.reason +
+                (r.quotedCopy ? " quotedCopy=yes" : "") + (note ? " note=" + note : ""));
+            cb({ verdict: r.verdict, reason: r.scope + ": " + r.reason, note: note });
         });
     });
 }
 
-function injectRuleSignature(item, matched, guarded, opts) {
-    _diag.info("injectRuleSignature: rule matched id=" + matched.signatureId);
-    getOrFetchSignatureById(matched.signatureId, function (html, failKind) {
-        if (html) {
-            injectSignature(item, html, guarded, opts);
-            return;
-        }
-        // The rule matched but its signature could not be loaded, so whatever we
-        // apply next is NOT what the rule asked for. Degradation, not silence.
-        _diag.warn("injectRuleSignature: rule html null (" + failKind + ") — falling back to default");
-        recordFailure("rule_sig_unavailable", "sigId=" + matched.signatureId + " " + (failKind || ""));
-        injectDefaultSignature(item, guarded, opts);
-    });
-}
+// ─── Signature write ──────────────────────────────────────────────────────────
 
-// ─── Prefetch rule signatures ─────────────────────────────────────────────────
-//
-//  Speculative warm-up. Failures here are NOT recorded: nothing on the mail
-//  depends on it, and if the id is needed later it will be fetched again — that
-//  failure is the one worth showing.
-// ─────────────────────────────────────────────────────────────────────────────
-
-function prefetchAllRuleSignatures(rules) {
-    const list = ((rules && rules.rulesList) || []).filter(function (r) {
-        return r.enabled && r.signatureId != null && senderMatches(r);
-    });
-    if (list.length === 0) {
-        _diag.info("prefetchAllRuleSignatures: no sender-eligible rules");
+function writeSignature(item, html, sigKey, onDone) {
+    if (!item || !item.body || typeof item.body.setSignatureAsync !== "function") {
+        _diag.step("writeSignature:setSignatureAsync-unavailable");
+        // showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+        notifyFailure(item, "Signature could not be applied. Please contact Admin.");
+        onDone(false);
         return;
     }
 
-    _diag.info("prefetchAllRuleSignatures: " + list.length + " sender-eligible rule(s)");
+    _injecting = true;
+    // Wrap so send time can find this block again. The RAW html length is what
+    // gets recorded, so the redundant-write comparison stays consistent.
+    const payload = wrapSignature(html, sigKey);
+    _diag.step("writeSignature:begin",
+        "sigKey=" + sigKey + " len=" + (html ? html.length : 0) + " payload=" + payload.length);
 
+    let settled = false;
+    function settle(ok, why) {
+        if (settled) return;
+        settled = true;
+        _injecting = false;
+        _diag.step("writeSignature:end", "ok=" + ok + (why ? " " + why : ""));
+        onDone(ok);
+    }
+
+    try {
+        item.body.setSignatureAsync(
+            payload,
+            { coercionType: Office.CoercionType.Html },
+            function (r) {
+                if (r.status === Office.AsyncResultStatus.Succeeded) {
+                    _diag.step("setSignatureAsync:success", "sigKey=" + sigKey);
+                    setItemProps(item, {
+                        [CONFIG.P_ACTIVE_SIG]: sigIdOf(sigKey),
+                        [CONFIG.P_SIG_DIGEST]: sigDigest(html)
+                    });
+                    setLastApplied(item, sigKey, html ? html.length : 0, function () { settle(true); },
+                        sigDigest(html));
+                } else {
+                    const msg = (r.error && r.error.message) || "?";
+                    _diag.step("setSignatureAsync:failed", msg);
+                    showNotification(item, "Signature could not be applied. Please contact Admin.", "errorMessage");
+                    settle(false, msg);
+                }
+            }
+        );
+    } catch (e) {
+        _diag.step("setSignatureAsync:threw", e.message);
+        settle(false, e.message);
+    }
+}
+
+// Decides whether a write is needed at all.
+//
+//   1. Same key written moments ago  → skip, no body read (recipient storms).
+//   2. Otherwise VERIFY: read the draft and compare. Identical → skip.
+//
+// Verification now runs at COMPOSE too, not only at send. Two reasons: the
+// draft is the only reliable record of what is actually on the message (the
+// last-applied key is stored per conversation, so a second reply in the same
+// thread inherits a key describing a signature that is not on THIS draft), and
+// it is what stops the repeated insert-and-replace cycle — an untouched draft
+// carrying the right signature is left alone instead of being rewritten on
+// every activation.
+function writeSignatureIfChanged(item, html, sigKey, onDone) {
+    if (!html) { _diag.step("writeSignatureIfChanged:no-html", "sigKey=" + sigKey); onDone(false); return; }
+
+    getLastApplied(item, function (last) {
+        if (last && last.sigKey === String(sigKey) &&
+            last.htmlLen === html.length &&
+            Date.now() - last.ts < CONFIG.REDUNDANT_WRITE_WINDOW_MS) {
+            _diag.step("writeSignatureIfChanged:suppressed-redundant", "sigKey=" + sigKey + " (no body read)");
+            onDone(true);
+            return;
+        }
+
+        if (!CONFIG.VERIFY_BEFORE_WRITE) {
+            writeSignature(item, html, sigKey, onDone);
+            return;
+        }
+
+        verifySignatureOnBody(item, html, sigKey, function (v) {
+            if (v.verdict === "identical") {
+                _diag.step("writeSignatureIfChanged:draft-verified-clean",
+                    "sigKey=" + sigKey + " \u2192 body untouched");
+                // Refresh the record so the fast path can suppress next time.
+                setLastApplied(item, sigKey, html.length, function () { onDone(true); }, sigDigest(html));
+                return;
+            }
+            _diag.step("writeSignatureIfChanged:writing", "verdict=" + v.verdict);
+            writeSignature(item, html, sigKey, onDone);
+        });
+    });
+}
+
+// ─── Diagnostics flush ────────────────────────────────────────────────────────
+
+let _lastItemForDiag = null;
+
+function flushDiagnostics(item, onDone) {
+    if (!CONFIG.DIAG_ENABLED) { onDone(); return; }
+    _diag.step("flushDiagnostics:begin", "lastStep=" + _diag.lastStep());
+    if (!item || !item.body || typeof item.body.prependAsync !== "function") { onDone(); return; }
+    try {
+        item.body.prependAsync(_diag.html(), { coercionType: Office.CoercionType.Html }, function () { onDone(); });
+    } catch (e) { onDone(); }
+}
+
+// =============================================================================
+//  THE PIPELINE — default first, then rules
+// =============================================================================
+
+/**
+ * Phase 1: get the default signature onto the item as fast as possible.
+ * Cache first (no network on the critical path); network only on a miss.
+ * onDone(appliedHtmlOrNull)
+ */
+function applyDefaultSignature(item, onDone) {
+    _diag.step("PHASE1:applyDefaultSignature:enter");
+    notifyFailure(item, "Signature not available. Please contact Admin.");
+
+    getCachedSignature(function (cached) {
+        if (cached) {
+            _diag.step("PHASE1:cache-hit-writing-immediately");
+            writeSignatureIfChanged(item, cached, "default", function (ok) {
+                _diag.step("PHASE1:done", "fromCache=true ok=" + ok);
+                onDone(ok ? cached : null);
+            });
+            // Refresh the cached copy in the background for the next compose.
+            fetchDefaultSignature(function (fresh) {
+                if (fresh && fresh !== cached) _diag.step("PHASE1:background-refresh-updated-cache");
+            });
+            return;
+        }
+
+        _diag.step("PHASE1:cache-miss-fetching");
+        showNotification(item, "Fetching signature...", "informationalMessage");
+
+        fetchDefaultSignature(function (html) {
+            if (!html) {
+                _diag.step("PHASE1:fetch-failed", "\u2192 trying last-known-good");
+                getLastKnownGoodSignature(function (stale) {
+                    if (!stale) {
+                        _diag.step("PHASE1:NO-DEFAULT-AVAILABLE", "no cache, no LKG, backend returned nothing");
+                        showNotification(item, "Signature not available. Please contact Admin.", "errorMessage");
+                        onDone(null);
+                        return;
+                    }
+                    writeSignatureIfChanged(item, stale, "default", function (ok) {
+                        // if (ok) removeNotification(item);
+                        if (ok) settleNotification(item);
+                        _diag.step("PHASE1:done", "source=last-known-good ok=" + ok);
+                        onDone(ok ? stale : null);
+                    });
+                });
+                return;
+            }
+            writeSignatureIfChanged(item, html, "default", function (ok) {
+                if (ok) removeNotification(item);
+                _diag.step("PHASE1:done", "fromCache=false ok=" + ok);
+                onDone(ok ? html : null);
+            });
+        });
+    });
+}
+
+/**
+ * Resolves the default signature HTML: cache first, network on miss.
+ */
+function resolveDefaultHtml(cb) {
+    getCachedSignature(function (cached) {
+        if (cached) { cb(cached); return; }
+        fetchDefaultSignature(function (fetched) {
+            if (fetched) { cb(fetched); return; }
+            _diag.step("resolveDefaultHtml:fetch-failed", "\u2192 trying last-known-good");
+            getLastKnownGoodSignature(cb);
+        });
+    });
+}
+
+/**
+ * Decides which signature SHOULD be on the item right now, given the current
+ * recipients. Returns { key, ruleId } where key is "default" or "rule:<id>".
+ */
+function determineTarget(item, cb) {
+    function withRules(rules) {
+        const count = ((rules && rules.rulesList) || []).length;
+        if (!rules || count === 0) {
+            _diag.step("determineTarget:no-rules", "\u2192 target=default");
+            cb({ key: "default", ruleId: null });
+            return;
+        }
+        findMatchingRule(item, rules, function (matched) {
+            if (!matched) {
+                _diag.step("determineTarget:no-match", "\u2192 target=default");
+                cb({ key: "default", ruleId: null });
+                return;
+            }
+            _diag.step("determineTarget:matched", "\u2192 target=rule:" + matched.signatureId);
+            cb({ key: "rule:" + matched.signatureId, ruleId: matched.signatureId });
+        });
+    }
+
+    getCachedRules(function (rules) {
+        if (rules) { withRules(rules); return; }
+        fetchRulesConfig(withRules);
+    });
+}
+
+/**
+ * Phase 2: reconcile what IS on the item with what SHOULD be on it.
+ *
+ * This replaces the old applyRuleSignature, which only ever escalated from
+ * default to rule. It compared against the HTML it was handed rather than
+ * against what was actually written, so clearing the recipients left the rule
+ * signature stranded on the message. Comparison is now against the recorded
+ * last-applied key, so default→rule, rule→rule and rule→default all work.
+ *
+ * onDone(finalKeyOrNull)
+ */
+function reconcileSignature(item, onDone) {
+    _diag.step("PHASE2:reconcileSignature:enter");
+
+    determineTarget(item, function (target) {
+        getLastApplied(item, function (last) {
+            const current = last ? last.sigKey : "(nothing)";
+            _diag.step("PHASE2:compare", "lastRecorded=" + current + " target=" + target.key);
+
+            // No early return on lastRecorded === target: that record is keyed
+            // per conversation, so a second reply in the same thread inherits a
+            // key describing a signature that is not on THIS draft, and the
+            // message would go out unsigned. writeSignatureIfChanged verifies
+            // against the actual body and skips the write if it is already
+            // correct, which is both safer and just as cheap.
+
+            function writeDefault(reason) {
+                resolveDefaultHtml(function (html) {
+                    if (!html) {
+                        _diag.step("PHASE2:default-unavailable", reason + " \u2014 nothing to write");
+                        onDone(null);
+                        return;
+                    }
+                    _diag.step("PHASE2:reverting-to-default", reason);
+                    writeSignatureIfChanged(item, html, "default", function (ok) {
+                        onDone(ok ? "default" : null);
+                    });
+                });
+            }
+
+            if (target.ruleId === null) {
+                writeDefault("target=default");
+                return;
+            }
+
+            getOrFetchSignatureById(target.ruleId, function (ruleHtml) {
+                if (!ruleHtml) {
+                    _diag.step("PHASE2:rule-html-unavailable", "id=" + target.ruleId);
+                    writeDefault("rule html missing");
+                    return;
+                }
+                _diag.step("PHASE2:applying-rule-sig", "id=" + target.ruleId);
+                writeSignatureIfChanged(item, ruleHtml, target.key, function (ok) {
+                    onDone(ok ? target.key : null);
+                });
+            });
+        });
+    });
+}
+
+/**
+ * Phase 3: warm the per-id cache for the next activation. Fire and forget,
+ * strictly after event.completed().
+ */
+function prefetchAllRuleSignatures(rules, onDone) {
+    const done = onDone || function () { };
+    const list = ((rules && rules.rulesList) || []).filter(function (r) {
+        return r && r.enabled && r.signatureId !== null && r.signatureId !== undefined && senderMatches(r);
+    });
+    if (list.length === 0) { _diag.step("prefetch:none-eligible"); done(); return; }
+
+    _diag.step("prefetch:enter", list.length + " sender-eligible rule(s)");
     let i = 0;
     function next() {
-        if (i >= list.length) return;
+        if (i >= list.length) { _diag.step("prefetch:done"); done(); return; }
         const r = list[i++];
         getOrFetchSignatureById(r.signatureId, function () { next(); });
     }
     next();
 }
 
-// =============================================================================
-//  applySignature (OnNewMessageCompose)
-//  Evaluates rules with current recipients and injects the correct signature.
-// =============================================================================
+/**
+ * Full sequence: override → default → rules → complete → prefetch.
+ */
+function runPipeline(item, guarded, opts) {
+    const options = opts || {};
 
-function applySignature(event) {
-    _beginRun();
-    const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
-    _diag.info("=== applySignature START ===");
+    getManualOverride(item, function (overrideId) {
+        // if (overrideId) {
+        //     _diag.step("PIPELINE:manual-override-wins", "id=" + overrideId);
+        //     resolveOverrideHtml(overrideId, function (html) {
+        //         if (html) {
+        //             writeSignatureIfChanged(item, html, "override:" + overrideId, function () {
+        //                 guarded.completed(options.completeOpts);
+        //             });
+        //         } else {
+        //             _diag.step("PIPELINE:override-html-unavailable", "\u2192 falling through to default+rules");
+        //             _defaultThenRules(item, guarded, options);
+        //         }
+        //     });
+        //     return;
+        // }
 
-    checkSessionAndClearCaches(function () {
-        const item = _safeGetItem();
-        if (!item) {
-            _diag.error("applySignature: no item");
-            guarded.completed();
+        if (overrideId) {
+            _diag.step("PIPELINE:manual-override-wins", "id=" + overrideId);
+            applyOverride(item, overrideId, function (handled) {
+                if (handled) { guarded.completed(options.completeOpts); return; }
+                _diag.step("PIPELINE:override-unresolvable", "\u2192 falling through to default+rules");
+                _defaultThenRules(item, guarded, options);
+            });
             return;
         }
-        guarded.attach(item);
 
-        // Get rules (cached or fresh)
-        getCachedRules(function (rules) {
-            if (rules) {
-                _diag.info("applySignature: rules cache valid");
-                _evaluateAndInject(item, rules, guarded);
-            } else {
-                _diag.info("applySignature: rules cache missing/expired — fetching");
-                fetchRulesConfig(function (freshRules, failKind) {
-                    if (freshRules) {
-                        _evaluateAndInject(item, freshRules, guarded);
-                    } else {
-                        // A signature still gets applied, so this is a
-                        // degradation: the rules were never consulted.
-                        _diag.warn("applySignature: rules fetch failed — using default");
-                        recordFailure(failKind || rulesFailureKind(), "rules unavailable at compose");
-                        injectDefaultSignature(item, guarded);
-                    }
-                });
-            }
-        });
+        _defaultThenRules(item, guarded, options);
     });
 }
 
-/**
- * Evaluates rules with current recipients, injects rule signature if matched,
- * otherwise injects default. Then prefetches rule signatures in background.
- */
-function _evaluateAndInject(item, rules, guarded, opts) {
-    // Prefetch rule signatures (fire-and-forget, silent by design)
-    prefetchAllRuleSignatures(rules);
+function _defaultThenRules(item, guarded, options) {
+    function thenReconcile(appliedHtml) {
+        reconcileSignature(item, function (finalKey) {
+            if (finalKey) {
+                _diag.step("PIPELINE:settled", "sigKey=" + finalKey);
+                // removeNotification(item);
+                settleNotification(item);
+            } else if (!appliedHtml) {
+                _diag.step("PIPELINE:NO-SIGNATURE-APPLIED", "neither default nor rule produced HTML");
+                notifyFailure(item, "Signature not available. Please contact Admin.");
+            }
 
-    getAllRecipientEmails(item, function (emails) {
-        if (emails.length === 0) {
-            _diag.info("applySignature: no recipients yet — applying default");
-            injectDefaultSignature(item, guarded, opts);
+            // Prefetch BEFORE completing. Code after event.completed() is not
+            // guaranteed to run — the runtime can be torn down immediately —
+            // so warming the cache there was unreliable.
+            getCachedRules(function (rules) {
+                if (rules) prefetchAllRuleSignatures(rules, function () {
+                    guarded.completed(options.completeOpts);
+                });
+                else guarded.completed(options.completeOpts);
+            });
+        });
+    }
+
+    // Phase 1 exists to put SOMETHING on a cold draft fast while the rules
+    // resolve. It must not run when a signature has already been decided for
+    // this item, and it must never run at send: doing so wrote the default and
+    // then let Phase 2 replace it with the rule signature — two writes in
+    // sequence, which is the insert-and-replace cycle. When Phase 1 is skipped,
+    // reconcileSignature still applies the default if that is the right target.
+    if (options.skipDefaultPhase) {
+        _diag.step("PHASE1:skipped", "send-time \u2014 reconcile decides in one write");
+        thenReconcile(null);
+        return;
+    }
+
+    getLastApplied(item, function (last) {
+        if (last) {
+            _diag.step("PHASE1:skipped", "already decided for this item (sigKey=" + last.sigKey + ")");
+            thenReconcile(null);
             return;
         }
+        applyDefaultSignature(item, thenReconcile);
+    });
+}
 
-        findMatchingRule(item, rules, function (matched) {
-            if (matched) {
-                _diag.info("applySignature: rule matched on open");
-                injectRuleSignature(item, matched, guarded, opts);
-            } else {
-                _diag.info("applySignature: no rule matched — applying default");
-                injectDefaultSignature(item, guarded, opts);
-            }
-        });
+// ─── Compose item resolution (with retry) ────────────────────────────────────
+
+function _rawItem() {
+    try { return (Office && Office.context && Office.context.mailbox) ? Office.context.mailbox.item : null; }
+    catch (_) { return null; }
+}
+
+function _safeGetItem() { return _rawItem(); }
+
+/**
+ * In the reading pane, Office.context.mailbox.item can briefly resolve to
+ * something that has no body.setSignatureAsync. Retry briefly instead of
+ * failing outright.
+ */
+function resolveComposeItem(cb) {
+    let attempts = 0;
+
+    function attempt() {
+        attempts++;
+        const item = _rawItem();
+        if (item && item.body && typeof item.body.setSignatureAsync === "function") {
+            _diag.step("resolveComposeItem:ok", "attempt=" + attempts);
+            _lastItemForDiag = item;
+            cb(item);
+            return;
+        }
+        if (attempts >= CONFIG.ITEM_RETRY_ATTEMPTS) {
+            _diag.step("resolveComposeItem:FAILED", "attempts=" + attempts + " itemPresent=" + (!!item));
+            _lastItemForDiag = item;
+            cb(null);
+            return;
+        }
+        _diag.step("resolveComposeItem:retrying", "attempt=" + attempts);
+        setTimeout(attempt, CONFIG.ITEM_RETRY_DELAY_MS);
+    }
+
+    attempt();
+}
+
+// =============================================================================
+//  applySignature (OnNewMessageCompose + "Apply Signature" ribbon button)
+// =============================================================================
+
+function applySignature(event) {
+    _diag.step("applySignature:ENTRY");
+    _plan.reset();
+    const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
+
+    resolveComposeItem(function (item) {
+        if (!item) {
+            _diag.step("applySignature:no-compose-item");
+            guarded.completed();
+            return;
+        }
+        resolveSender(item, function () { runPipeline(item, guarded, {}); });
     });
 }
 
 // =============================================================================
 //  onRecipientsChangedHandler (OnMessageRecipientsChanged)
-//  Fires every time the user changes To/Cc/Bcc recipients.
-//  Each invocation is a fresh JSRuntime — reads rules from storage cache.
+//  Recipients drive rule selection, so re-run the sequence. Phase 1 is a
+//  cache hit here and writeSignatureIfChanged suppresses the redundant write,
+//  so the practical effect is "re-evaluate rules only".
 // =============================================================================
 
 function onRecipientsChangedHandler(event) {
-    _beginRun();
+    _diag.step("onRecipientsChangedHandler:ENTRY");
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
-    _diag.info("=== onRecipientsChangedHandler START ===");
 
-    const item = _safeGetItem();
-    if (!item) {
-        _diag.warn("onRecipientsChangedHandler: no item");
-        guarded.completed();
-        return;
-    }
-    guarded.attach(item);
-
-    getManualOverride(item, function (overrideId) {
-        if (overrideId) {
-            // The user picked this signature themselves. No news, no complaint —
-            // leave the bar exactly as it is.
-            _diag.info("onRecipientsChangedHandler: manual override active (id=" + overrideId + ") — skipping rule re-eval");
+    resolveComposeItem(function (item) {
+        if (!item) {
+            _diag.step("onRecipientsChangedHandler:no-compose-item");
             guarded.completed();
             return;
         }
 
-        getCachedRules(function (rules) {
-            if (!rules) {
-                _diag.warn("onRecipientsChangedHandler: no rules cached — fetching");
-                fetchRulesConfig(function (freshRules, failKind) {
-                    if (freshRules) {
-                        _evaluateAndInject(item, freshRules, guarded);
-                    } else {
-                        // Nothing is re-injected here, so whatever is already on
-                        // the body stays. Still worth saying the rules were not
-                        // checked — "quiet" surfaces the recorded degradation and
-                        // nothing else.
-                        _diag.error("onRecipientsChangedHandler: rules unavailable");
-                        recordFailure(failKind || rulesFailureKind(), "rules unavailable on recipient change");
-                        finishRun(item, guarded, "quiet");
-                    }
+        resolveSender(item, function () {
+            getManualOverride(item, function (overrideId) {
+                // if (overrideId) {
+                //     _diag.step("onRecipientsChangedHandler:override-active-skipping", "id=" + overrideId);
+                //     guarded.completed();
+                //     return;
+                // }
+                if (overrideId) {
+                    // Do not just skip: if the pane's body write failed, or the
+                    // user edited the pinned signature, the draft is wrong and
+                    // this is the only event that will notice before send.
+                    // writeSignatureIfChanged verifies first, so a clean draft
+                    // costs one body read and no write.
+                    _diag.step("onRecipientsChangedHandler:override-active-verifying", "id=" + overrideId);
+                    applyOverride(item, overrideId, function () { guarded.completed(); });
+                    return;
+                }
+
+                // Pure reconcile. Adding recipients can promote default → rule,
+                // clearing them demotes rule → default, and swapping them moves
+                // rule → rule. No Phase 1 here: re-writing the default first
+                // would make the signature visibly flicker on every keystroke.
+                reconcileSignature(item, function (finalKey) {
+                    _diag.step("onRecipientsChangedHandler:done", "sigKey=" + (finalKey || "none"));
+                    if (_plan.isExpired()) notifyFailure(item, "");
+                    guarded.completed();
                 });
-                return;
-            }
-            _evaluateAndInject(item, rules, guarded);
+            });
         });
     });
 }
 
 // =============================================================================
-//  onSendHandler (OnMessageSend)
-//  Re-evaluates rules and injects correct signature before send.
-//  Failures only: the item is closing, and the send is never blocked.
+//  onSendHandler (OnMessageSend, SoftBlock)
+//  Last chance to get it right. Always allowEvent:true.
 // =============================================================================
-
-const SEND_OPTS = { isSendTime: true };
 
 function onSendHandler(event) {
-    _beginRun();
+    _diag.step("onSendHandler:ENTRY");
     const guarded = makeGuardedEvent(
         event || { completed: function () { } },
-        CONFIG.SEND_HANDLER_TIMEOUT_MS,
-        SEND_OPTS
+        CONFIG.SEND_HANDLER_TIMEOUT_MS
     );
-    _diag.info("=== onSendHandler START ===");
+    const opts = { completeOpts: { allowEvent: true }, skipDefaultPhase: true };
 
-    const item = _safeGetItem();
-    if (!item) {
-        _diag.warn("onSendHandler: no item — allowing send");
-        guarded.completed({ allowEvent: true });
-        return;
-    }
-    guarded.attach(item);
-
-    // Manual taskpane selection wins at send time.
-    getManualOverride(item, function (overrideId) {
-        if (overrideId) {
-            _diag.info("onSendHandler: manual override active id=" + overrideId);
-            resolveOverrideHtml(overrideId, function (html, failKind) {
-                if (html) {
-                    _diag.info("onSendHandler: injecting manual override sig");
-                    injectSignature(item, html, guarded, SEND_OPTS);
-                } else {
-                    _diag.warn("onSendHandler: override id set but html unavailable — falling back to rules");
-                    recordFailure("rule_sig_unavailable", "override id=" + overrideId + " " + (failKind || ""));
-                    _onSendRuleFlow(item, guarded);
-                }
-            });
+    resolveComposeItem(function (item) {
+        if (!item) {
+            _diag.step("onSendHandler:no-compose-item-allowing-send");
+            guarded.completed({ allowEvent: true });
             return;
         }
-        _onSendRuleFlow(item, guarded);
-    });
-}
-
-// Rule/default flow, unchanged in behaviour apart from reporting.
-function _onSendRuleFlow(item, guarded) {
-    getCachedRules(function (rules) {
-        if (!rules) {
-            _diag.warn("onSendHandler: no rules in cache — injecting default");
-            recordFailure(rulesFailureKind(), "no rules cached at send");
-            _injectDefaultAtSend(item, guarded);
-            return;
-        }
-
-        findMatchingRule(item, rules, function (matched) {
-            if (!matched) {
-                _diag.info("onSendHandler: no rule matched — injecting default");
-                _injectDefaultAtSend(item, guarded);
-                return;
-            }
-
-            _diag.info("onSendHandler: rule matched id=" + matched.signatureId);
-            getOrFetchSignatureById(matched.signatureId, function (html, failKind) {
-                if (html) {
-                    _diag.info("onSendHandler: injecting rule sig");
-                    injectSignature(item, html, guarded, SEND_OPTS);
-                } else {
-                    _diag.warn("onSendHandler: rule sig unavailable — fallback");
-                    recordFailure("rule_sig_unavailable", "sigId=" + matched.signatureId + " " + (failKind || ""));
-                    _injectDefaultAtSend(item, guarded);
-                }
-            });
-        });
-    });
-}
-
-// Cache-only on purpose: the send budget (SEND_HANDLER_TIMEOUT_MS) has no room
-// for a round trip. If the cache is empty there is nothing to apply, and that IS
-// worth reporting even though the send proceeds.
-function _injectDefaultAtSend(item, guarded) {
-    getCachedSignature(function (cached) {
-        if (!cached) {
-            _diag.warn("_injectDefaultAtSend: no cached default");
-            recordFailure("offline", "no cached default signature at send");
-            finishRun(item, guarded, "failed", SEND_OPTS);
-            return;
-        }
-        _diag.info("_injectDefaultAtSend: injecting default sig");
-        injectSignature(item, cached, guarded, SEND_OPTS);
+        resolveSender(item, function () { runPipeline(item, guarded, opts); });
     });
 }
 
 // =============================================================================
 //  onFromChangedHandler (OnMessageFromChanged)
-//  Account switched — clear caches and re-evaluate with new sender context.
+//  The one legitimate place to clear caches: identity changed, so the cached
+//  signature and rules belong to the wrong account.
 // =============================================================================
 
 function onFromChangedHandler(event) {
-    _beginRun();
+    _diag.step("onFromChangedHandler:ENTRY");
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS);
 
-    const item = _safeGetItem();
-    if (!item) { guarded.completed(); return; }
-    guarded.attach(item);
+    resolveComposeItem(function (item) {
+        if (!item) {
+            _diag.step("onFromChangedHandler:no-compose-item");
+            guarded.completed();
+            return;
+        }
 
-    _diag.info("onFromChangedHandler: account changed — clearing caches");
+        // Storage is namespaced per account, so there is nothing to purge —
+        // re-resolving the sender switches the whole pipeline to the new
+        // account's namespace. Only the in-memory copies, which belong to the
+        // previous account, have to be dropped.
+        _diag.step("onFromChangedHandler:dropping-in-memory-caches");
+        _memSig = null;
+        _memSigOwner = null;
+        _memRules = null;
+        _memRulesOwner = null;
+        _memLastApplied = null;
+        _senderEmail = "";
 
-    _memSig = null;
-    _memRules = null;
-    clearCachedSignature(function () {
-        _storageRemove(CONFIG.RULES_CACHE_KEY, function () {
-            fetchRulesConfig(function (rules, failKind) {
-                if (!rules) {
-                    _diag.warn("onFromChangedHandler: rules unavailable for the new account");
-                    recordFailure(failKind || rulesFailureKind(), "rules unavailable after account switch");
-                    injectDefaultSignature(item, guarded);
-                    return;
-                }
-                _evaluateAndInject(item, rules, guarded);
-            });
+        resolveSender(item, function (email) {
+            _diag.step("onFromChangedHandler:new-sender", email);
+            runPipeline(item, guarded, {});
         });
     });
 }
 
-// ─── Utilities ────────────────────────────────────────────────────────────────
-
-function _safeGetItem() {
-    try { return Office && Office.context && Office.context.mailbox ? Office.context.mailbox.item : null; }
-    catch (_) { return null; }
-}
-
 // ─── Registration ─────────────────────────────────────────────────────────────
+//
+// Office.initialize and Office.onReady do NOT run when a manifest-declared
+// event handler executes in the classic JS-only runtime, so associate
+// unconditionally at top level rather than gating on Office.actions.
 
 (function registerHandlers() {
-    function doRegister() {
+    if (typeof Office === "undefined") {
+        try { console.error("[CardByte] Office is undefined — JSRuntime load failed"); } catch (_) { }
+        return;
+    }
+
+    function doRegister(source) {
         try {
             Office.actions.associate("applySignature", applySignature);
             Office.actions.associate("onSendHandler", onSendHandler);
             Office.actions.associate("onFromChangedHandler", onFromChangedHandler);
             Office.actions.associate("onRecipientsChangedHandler", onRecipientsChangedHandler);
-            _diag.info("Handlers registered: applySignature, onSendHandler, onFromChangedHandler, onRecipientsChangedHandler");
+            _diag.step("registerHandlers:associated",
+                "via=" + source + " :: applySignature, onSendHandler, onFromChangedHandler, onRecipientsChangedHandler");
         } catch (e) {
-            _diag.error("Office.actions.associate threw: " + e.message);
+            _diag.step("registerHandlers:associate-threw", e.message);
         }
     }
 
-    if (typeof Office === "undefined") {
-        _diag.error("Office is undefined — JSRuntime load failed");
-        return;
-    }
+    _diag.step("registerHandlers:enter", "Office.actions=" + (typeof Office.actions));
 
-    Office.initialize = function () {
-        doRegister();
-    };
+    // Primary path.
+    doRegister("top-level");
 
-    if (Office.actions) {
-        doRegister();
+    // Belt and braces for hosts that populate Office.actions later.
+    if (!Office.actions) {
+        Office.initialize = function () { doRegister("Office.initialize"); };
+        try {
+            if (typeof Office.onReady === "function") {
+                Office.onReady(function () { doRegister("Office.onReady"); });
+            }
+        } catch (_) { }
     }
 })();
