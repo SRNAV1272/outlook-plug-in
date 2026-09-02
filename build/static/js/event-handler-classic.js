@@ -7772,7 +7772,7 @@ const CONFIG = {
     BASE_URL: "https://ns-enterprise.cardbyte.ai/email-signature",
 
     // Network
-    XHR_TIMEOUT_MS: 8000,
+    XHR_TIMEOUT_MS: 5000,
     XHR_MAX_ATTEMPTS: 2,
     XHR_RETRY_DELAY_MS: 600,
     XHR_LOG_BODY_CHARS: 400,
@@ -7780,8 +7780,8 @@ const CONFIG = {
     // Handler budgets. Platform allows ~300s and resets per event; the old
     // 10000 / 3500 values were the reason writes were being abandoned.
     COMPOSE_HANDLER_TIMEOUT_MS: 45000,
-    SEND_HANDLER_TIMEOUT_MS: 8000,
-    GUARD_INJECT_GRACE_MS: 8000,
+    SEND_HANDLER_TIMEOUT_MS: 5000,
+    GUARD_INJECT_GRACE_MS: 5000,
 
     // Compose item resolution
     ITEM_RETRY_ATTEMPTS: 6,
