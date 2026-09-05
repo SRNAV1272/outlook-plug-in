@@ -1,7 +1,51 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v7.6.0)
+//  CardByte Outlook Add-in — event-handler.js (v7.7.0)
+//
+// -----------------------------------------------------------------------------
+//  CHANGES IN v7.7.0 — ONE MAILBOX, MANY ACCOUNTS
+//
+//  1. STORAGE IS NAMESPACED BY SENDING ACCOUNT. localStorage is shared by every
+//     account signed in to the same Outlook profile, and every key in this file
+//     (signature cache, rules, rules ts, active id) was unscoped. Account A's
+//     cached HTML and rules were served to account B until the 5-minute TTL
+//     lapsed — and onFromChangedHandler only helped when the From line changed
+//     INSIDE one compose. Every store key now carries ":<sender>" and the memo
+//     layer is dropped whenever the sender changes. Roamed keys are suffixed
+//     the same way so a shared mailbox alias cannot bleed into another.
+//
+//  2. THE SENDER IS item.from, NOT userProfile. userProfile.emailAddress is the
+//     mailbox the add-in runs against, not the address selected in the From
+//     dropdown. resolveSender() reads item.from (profile fallback) once per
+//     activation and that address drives the API header, rule sender matching
+//     and the storage namespace. Classic parity.
+//
+//  3. NO RECIPIENTS => DEFAULT, ALWAYS. The product rule is "default signature
+//     until someone is addressed". With an empty To/Cc a sender-only rule with
+//     recipientType "all" could previously win the empty set; it no longer can
+//     (EMPTY_RECIPIENTS_MEANS_DEFAULT). Both builds now agree.
+//
+//  4. SEND-TIME VERIFICATION HAS A MARKER-FREE FALLBACK. Word (Classic) strips
+//     unknown attributes from inserted HTML, and New Outlook drafts round-trip
+//     through the same store when a mail is reopened — so data-cb-sig can be
+//     gone from an untouched signature. With no marked region verifyInDraft can
+//     only say "absent" and every send rewrote. Now: no marker => token-run
+//     search of the live area. Deleted signatures still come back "absent".
+//
+//  5. A SEND THAT OVERRUNS ITS BUDGET CANNOT WRITE AFTER COMPLETING. The
+//     timeout path now retires the write token, so a straggling applyById
+//     drops its write instead of touching a mail that is already leaving.
+//     The send is allowed in every path — allowEvent:true is the only value
+//     this file ever passes to OnMessageSend.
+//
+//  6. Office.onReady is guarded (it threw at load when Office was undefined);
+//     the legacy unscoped default key is still migrated once.
+//
+//  CACHE POLICY (unchanged in intent, now stated in one place): every cached
+//  artefact is FRESH for CACHE_TTL_MS = 5 minutes. After that it is refetched;
+//  the aged copy is kept only as the offline/failure fallback for at most
+//  SIG_PURGE_MS. See resolveSigHtml.
 //
 //  ARCHITECTURE: THE SIGNATURE ID IS THE STATE. THE HTML IS A DISPOSABLE CACHE.
 //
@@ -313,7 +357,7 @@
 //      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v7.6.0";
+const CB_VERSION = "v7.7.0";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -321,7 +365,7 @@ const CB_VERSION = "v7.6.0";
 
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-const BASE_URL = "https://enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://ns-enterprise.cardbyte.ai/email-signature";
 
 // The backend's one account-level refusal: HTTP 412 + PlanExpiredException.
 // Distinct from every other non-2xx because it is definitive, global to the
@@ -372,8 +416,10 @@ const R_RULES_MAX_BYTES = 20 * 1024;
 // FRESHNESS. These are now actually enforced on the read path — see v7.6 (α).
 // Lower them and signatures refresh sooner at the cost of more requests; the
 // in-flight dedupe map and the HTTP cache buster together keep that bounded.
-const SIG_TTL_MS = 5 * 60 * 1000;
-const RULES_TTL_MS = 5 * 60 * 1000;
+// v7.7: ONE freshness window for everything this file caches.
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const SIG_TTL_MS = CACHE_TTL_MS;
+const RULES_TTL_MS = CACHE_TTL_MS;
 const ACTIVE_SIG_MAX_AGE_MS = 1 * 60 * 1000;
 
 // EVICTION, NOT FRESHNESS. v7.6 (α): this was 5 min, i.e. equal to SIG_TTL_MS,
@@ -460,6 +506,11 @@ const X_PLATFORM_MAP = { MAC: "MAC", MOBILE: "MAC", OWA: "WINDOWS" };
 // false, so neither "internal" nor "external" matches and only an "all" rule
 // (or the default) can win. That is deliberate — see (E) and (F).
 const INTERNAL_REQUIRES_NO_EXTERNAL = false;
+
+// v7.7 (3). PRODUCT DECISION: with no recipients at all, the DEFAULT signature
+// applies — no rule is consulted. Set false to let sender-only "all" rules win
+// an empty recipient set (pre-7.7 behaviour).
+const EMPTY_RECIPIENTS_MEANS_DEFAULT = true;
 
 const NOTIF_KEY = "cardbyte_sig_status";
 
@@ -926,23 +977,66 @@ async function encryptEmail(email = "") {
 
 const _mem = new Map();
 
+// ── v7.7 (1)/(2): the sending account, resolved once per activation ──────────
+//
+// Every store/roam key is suffixed with this. "unknown" is a real namespace on
+// purpose: a runtime that could not resolve a sender must not read another
+// account's cache, and it must not write into it either.
+let _senderEmail = "";
+
+const accountKey = () => (_senderEmail || "unknown").replace(/[\s/\\'"]/g, "_");
+const nsKey = (key) => `${key}:${accountKey()}`;
+
+async function resolveSender(item, mailbox) {
+    const profile = (() => {
+        try { return String(mailbox?.userProfile?.emailAddress || "").trim().toLowerCase(); }
+        catch (_) { return ""; }
+    })();
+    let from = "";
+    if (typeof item?.from?.getAsync === "function") {
+        const res = await officeAsync((cb) => item.from.getAsync(cb), { ms: budgetMs(), label: "from getAsync" });
+        from = String(res?.value?.emailAddress || "").trim().toLowerCase();
+    }
+    const next = from || profile;
+    if (next !== _senderEmail) {
+        // A different account owns whatever the memo layer holds.
+        _mem.clear();
+        _sigMap = null;
+        _rulesParsed = { raw: null, json: null };
+        _enabledCache = { src: null, list: null };
+        _inFlight.clear();
+        _encCache = { plain: null, cipher: null };
+    }
+    _senderEmail = next;
+    if (from && profile && from !== profile) log(`sender=${from} (From dropdown) differs from profile=${profile} — From wins`);
+    return _senderEmail;
+}
+
+// All keys below are account data, so the namespace is applied here, once, and
+// nothing else in the file needs to know about it.
 const store = {
     get(key) {
-        if (_mem.has(key)) return _mem.get(key);
+        const k = nsKey(key);
+        if (_mem.has(k)) return _mem.get(k);
         try {
-            const v = localStorage.getItem(key);
-            if (v != null) { _mem.set(key, v); return v; }
+            const v = localStorage.getItem(k);
+            if (v != null) { _mem.set(k, v); return v; }
         } catch (_) { }
         return null;
     },
     set(key, val) {
-        _mem.set(key, val);
-        try { localStorage.setItem(key, val); } catch (_) { }
+        const k = nsKey(key);
+        _mem.set(k, val);
+        try { localStorage.setItem(k, val); } catch (_) { }
     },
     remove(...keys) {
-        keys.forEach((k) => _mem.delete(k));
-        try { keys.forEach((k) => localStorage.removeItem(k)); } catch (_) { }
+        keys.forEach((key) => _mem.delete(nsKey(key)));
+        try { keys.forEach((key) => localStorage.removeItem(nsKey(key))); } catch (_) { }
     },
+    // Unscoped read/remove, for the one legacy key the taskpane wrote before
+    // namespacing existed. Nothing else may use these.
+    getRaw(key) { try { return localStorage.getItem(key); } catch (_) { return null; } },
+    removeRaw(key) { try { localStorage.removeItem(key); } catch (_) { } },
     getJson(key) {
         try { const v = store.get(key); return v ? JSON.parse(v) : null; } catch (_) { return null; }
     },
@@ -953,13 +1047,13 @@ const store = {
 
 const roam = {
     get(key) {
-        try { return Office?.context?.roamingSettings?.get(key) ?? null; } catch (_) { return null; }
+        try { return Office?.context?.roamingSettings?.get(nsKey(key)) ?? null; } catch (_) { return null; }
     },
     set(key, val) {
         try {
             const rs = Office?.context?.roamingSettings;
             if (!rs) return;
-            rs.set(key, val);
+            rs.set(nsKey(key), val);
             rs.saveAsync(() => { });
         } catch (_) { }
     },
@@ -967,7 +1061,7 @@ const roam = {
         try {
             const rs = Office?.context?.roamingSettings;
             if (!rs) return;
-            rs.remove(key);
+            rs.remove(nsKey(key));
             rs.saveAsync(() => { });
         } catch (_) { }
     },
@@ -1006,12 +1100,7 @@ function invalidateCaches() {
     _sigMap = null;
     _rulesParsed = { raw: null, json: null };
     _enabledCache = { src: null, list: null };
-    _mem.delete(K_SIG_CACHE);
-    _mem.delete(K_SIG_CACHE_LEGACY_DEFAULT);
-    _mem.delete(K_RULES);
-    _mem.delete(K_RULES_TS);
-    _mem.delete(K_ACTIVE_SIG);
-    _mem.delete(K_ACTIVE_SIG_TS);
+    _mem.clear();             // v7.7: keys are namespaced, so drop the lot
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1058,13 +1147,17 @@ const sigCache = {
      * the legacy key so this can never run twice.
      */
     migrateLegacy() {
+        // The pane wrote this key UNSCOPED, so it is read raw. It can only
+        // ever be attributed to the profile mailbox, so it is folded in only
+        // when this runtime is serving that mailbox.
         let legacy = null;
-        try { legacy = store.get(K_SIG_CACHE_LEGACY_DEFAULT); } catch (_) { }
+        try { legacy = store.getRaw(K_SIG_CACHE_LEGACY_DEFAULT) || store.get(K_SIG_CACHE_LEGACY_DEFAULT); } catch (_) { }
         if (!legacy) return;
         if (!_sigMap[DEFAULT_ID]) {
             _sigMap[DEFAULT_ID] = { html: legacy, ts: 0 };
             log("sig cache: migrated the legacy default key (marked stale)");
         }
+        store.removeRaw(K_SIG_CACHE_LEGACY_DEFAULT);
         store.remove(K_SIG_CACHE_LEGACY_DEFAULT);
         scheduleSigFlush();
     },
@@ -2046,7 +2139,13 @@ async function findMatchingRule(item, senderEmail, {
         return { rule: null, blocked: true };
     }
     if (emails.length === 0) {
-        // Deliberately NOT blocked — see (E).
+        // Deliberately NOT blocked — see (E). v7.7 (3): and not evaluated
+        // either — the default is the answer for an empty recipient set.
+        if (EMPTY_RECIPIENTS_MEANS_DEFAULT) {
+            log("no recipients — default applies (EMPTY_RECIPIENTS_MEANS_DEFAULT)");
+            if (persistComposeType) getComposeType(item, { persist: true }).catch(() => { });
+            return { rule: null, blocked: false };
+        }
         log("no recipients — evaluating as an empty recipient set");
     }
 
@@ -2223,9 +2322,19 @@ async function verifySignatureOnBody(item, expectedHtml, id) {
     } catch (_) { }
 
     try {
-        const r = HCS.verifyInDraft(expectedHtml, body, {
-            ...SIG_PROFILE, markAttr: SIG_MARK_ATTR, sigId: id,
-        });
+        const opt = { ...SIG_PROFILE, markAttr: SIG_MARK_ATTR, sigId: id };
+        // v7.7 (4). No wrapper left on the draft (editor stripped it, or a
+        // pre-7.5 draft): fall back to a token-run search of the live area.
+        // A deleted signature still reads "absent"; an intact unmarked one
+        // reads "identical" instead of forcing a rewrite on every send.
+        const marked = HCS.extractMarkedRegions(body, SIG_MARK_ATTR);
+        if (!marked.length) {
+            const split = HCS.splitDraftAtQuote(body);
+            const scope = split.boundary < body.length ? "live-of-reply" : "whole-body";
+            const rr = HCS.verifyRegion(expectedHtml, split.live, opt);
+            return { verdict: rr.verdict, reason: `${scope}: marker-free token match`, note };
+        }
+        const r = HCS.verifyInDraft(expectedHtml, body, opt);
         return { verdict: r.verdict, reason: `${r.scope}: ${r.reason}`, note };
     } catch (e) {
         // The comparison must never take the send down with it.
@@ -2427,7 +2536,7 @@ async function persistDecision(item, id, snapshot, digest) {
 
 async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}) {
     const t0 = Date.now();
-    const userEmail = mailbox?.userProfile?.emailAddress;
+    const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
 
     const override = await getManualOverride(item);
     if (override) {
@@ -2591,7 +2700,8 @@ async function decideSendId(item, userEmail) {
 
 async function onSendCore(item, mailbox) {
     const t0 = Date.now();
-    const userEmail = mailbox?.userProfile?.emailAddress;
+    await resolveSender(item, mailbox);     // v7.7 (2)
+    const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
     const seq = beginWrite();
 
     const { id, snapshot, reason, persist } = await decideSendId(item, userEmail);
@@ -2658,13 +2768,14 @@ const applySignature = async function (event = { completed: () => { } }) {
         if (!item) return complete();
         invalidateProps(item);
         invalidateCaches();
-        log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()})`);
+        await resolveSender(item, mailbox);   // v7.7 (2): before ANY cache read
+        log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()}) account=${accountKey()}`);
 
         // FIX (M): no "Preparing your signature..." — the bar stays empty until
         // there is an outcome. FIX (N): beginWrite() also clears the ledger, so
         // everything below is attributed to this decision only.
         const seq = beginWrite();
-        const userEmail = mailbox?.userProfile?.emailAddress;
+        const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
 
         // v7.5.2 (Y). The pin is checked BEFORE the state reset, matching
         // Classic's runPipeline. Clearing P_ACTIVE_SIG on a pinned draft forces
@@ -2731,6 +2842,7 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
         if (!item) return complete();
         invalidateProps(item);   // v7.5.2 — the pane may have pinned since the last event
         invalidateCaches();      // v7.6 (β)
+        await resolveSender(item, mailbox);   // v7.7 (2)
 
         // v7.6 (ζ): the token is taken HERE, before the first recipient read,
         // not later when evaluateAndApply is called. It is what scopes the
@@ -2784,30 +2896,29 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         if (!item) return complete();
         invalidateProps(item);   // v7.5.2
         invalidateCaches();      // v7.6 (β)
-        log("from changed — re-evaluating for the new account");
+        const prev = _senderEmail;
+        await resolveSender(item, mailbox);   // v7.7 (2): switches the namespace
+        log(`from changed — re-evaluating for the new account (${prev || "?"} -> ${_senderEmail || "?"})`);
 
         const seq = beginWrite();
-        const userEmail = mailbox?.userProfile?.emailAddress;
+        const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
 
-        // The account changed, so every cached signature and rule belongs to
-        // the previous identity. FIX (B): clearRulesCache() drops the ROAMED
-        // copy too — v7.0 cleared localStorage only, and the next read fell
-        // straight through to roaming and matched the old account's rules.
-        sigCache.wipe();         // also drops the parsed map and any pending flush
+        // v7.7 (1): storage is namespaced per account, so the previous
+        // identity's cache is simply no longer addressed — nothing to wipe,
+        // and nothing to refetch that a warm namespace already holds. Only the
+        // per-runtime memos that are not keyed by account are reset here.
         _inFlight.clear();
-        _encCache = { plain: null, cipher: null };
         _digestCache = { html: null, digest: null };
-        clearRulesCache();
         await markActiveSignature(item, null);
 
-        if (userEmail) await fetchRules(await encryptEmail(userEmail));
+        if (userEmail && !getCachedRules()) await fetchRules(await encryptEmail(userEmail));
 
         const snap0 = serializeRecipients(await readRecipientEmails(item));
         if (snap0 !== null) _lastSnapshot = snap0;
 
         await evaluateAndApply(item, mailbox, seq);
 
-        // The new identity's cache is empty by definition — warm it now rather
+        // The new identity's cache may be cold — warm it now rather
         // than at send, where the budget is tighter.
         if (userEmail) {
             prefetchSignatures(userEmail, { includeRules: !isMobile() })
@@ -2843,6 +2954,9 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         // Ran out of budget or threw: the signature probably did not make it, so
         // report rather than silently clearing the bar as v7.3 did.
         warn("onSend timeout/error:", e.message);
+        // v7.7 (5): retire the write token so the still-running onSendCore
+        // cannot write the body after the send has been allowed.
+        _writeSeq++;
         if (!hasFailure()) recordFailure("offline", `onSendCore: ${e.message}`);
         if (!wasReported()) reportOutcome(item, "failed");
     } finally {
@@ -2858,15 +2972,16 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 //  nothing at all on the one platform where the runtime outlives the activation.
 // ─────────────────────────────────────────────────────────────────────────────
 
-Office.onReady(() => {
-    log(`ready — ${CB_VERSION} | platform=${detectPlatform()} | X-Platform=${getXPlatform()} | session=${getSessionId()}`);
-    try {
-        const d = Office.context.mailbox?.diagnostics;
-        if (d) log(`host=${d.hostName} version=${d.hostVersion}`);
-    } catch (_) { }
-    log("rules cache at startup:", describeRulesSource());
-    if (!HCS) warn("html-content-signature.js not loaded — send-time verification disabled");
-});
+if (typeof Office !== "undefined" && typeof Office.onReady === "function") {
+    Office.onReady(() => {
+        log(`ready — ${CB_VERSION} | platform=${detectPlatform()} | X-Platform=${getXPlatform()} | session=${getSessionId()}`);
+        try {
+            const d = Office.context.mailbox?.diagnostics;
+            if (d) log(`host=${d.hostName} version=${d.hostVersion}`);
+        } catch (_) { }
+        if (!HCS) warn("html-content-signature.js not loaded — send-time verification disabled");
+    });
+}
 
 if (typeof Office !== "undefined" && Office.actions?.associate) {
     Office.actions.associate("applySignature", applySignature);
