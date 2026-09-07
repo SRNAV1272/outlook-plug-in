@@ -1,7 +1,69 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v7.7.0)
+//  CardByte Outlook Add-in — event-handler.js (v7.8.0)
+//
+// -----------------------------------------------------------------------------
+//  CHANGES IN v7.8.0 — MOBILE AUTO-INSERTION ACTUALLY HAPPENS
+//
+//  Symptom: no signature is ever inserted on Outlook for iOS / Android.
+//  Four independent causes, all of which had to be fixed for mobile to work.
+//
+//  I. THE COMPOSE WRITE WAS DEFERRED TO AN EVENT THAT NEVER FIRES. This build
+//     assumed mobile has no setSignatureAsync, so applyById returned "deferred"
+//     at compose and left the write to OnMessageSend — and OnMessageSend is NOT
+//     a supported mobile event. The decision was persisted and then nothing
+//     ever consumed it. Net effect on a phone: id decided, HTML fetched, cache
+//     warmed, body never touched.
+//
+//     The assumption is also out of date: body.setSignatureAsync IS supported
+//     in Message Compose on Outlook for Android and iOS (Mailbox 1.10 API,
+//     enabled on mobile from app version 4.2352.0). Deferring is now gated on
+//     hostHasSendEvent() — false on mobile — so a host with no send event
+//     writes at compose or reports a real failure. It never silently defers
+//     into a void.
+//
+//  II. THE 30,000-CHARACTER setSignatureAsync LIMIT WAS NOT ENFORCED, AND THE
+//     ONE CEILING THAT WAS (MAX_SIG_BYTES, 100KB) IS THREE TIMES TOO HIGH.
+//     setSignatureAsync rejects a data parameter longer than 30,000 characters
+//     with DataExceedsMaximumSize. The file's own notes put observed rule
+//     signatures at ~42KB — comfortably over the limit — so on any host that
+//     enforces it the write failed while every log line said the signature had
+//     resolved fine. Checked up front now, in CHARACTERS (what the API counts),
+//     with its own failure message.
+//
+//  III. X-Platform. getXPlatform() sent "MAC" from iOS and Android. The header
+//     note in this file says the backend accepts WINDOWS only and that MAC and
+//     MOBILE come back non-2xx — which would fail every fetch on a phone before
+//     any of the above mattered. Rather than trusting either side of that
+//     contradiction, requests now RETRY ONCE with X-Platform: WINDOWS after a
+//     non-2xx, and pin WINDOWS for the rest of the runtime if the retry
+//     succeeds. Correct whichever way the backend actually behaves, and it
+//     costs one extra request per runtime at most. X_PLATFORM_MAP still lets
+//     you force the values outright.
+//
+//  IV. Mobile-supported APIs are no longer treated as absent: getComposeTypeAsync
+//     and from.getAsync both work on mobile now, so the compose type and the
+//     sending account resolve there like anywhere else.
+//
+//  MANIFEST — REQUIRED, AND NOT FIXABLE IN THIS FILE:
+//     The <VersionOverrides V1_1> <Requirements> block requests Mailbox 1.10.
+//     Outlook mobile supports up to Mailbox 1.5 and will not load version
+//     overrides that demand more, so the mobile LaunchEvents never register and
+//     none of this code runs. Set that block to MinVersion 1.5 (the later APIs
+//     stay usable on mobile — they are enabled individually by the host, not by
+//     the manifest). The mobile LaunchEvent list itself is fine: all three of
+//     OnNewMessageCompose, OnMessageRecipientsChanged and OnMessageFromChanged
+//     are supported on current builds.
+//
+//  KNOWN MOBILE BEHAVIOUR, NOT A BUG: on a reply opened from the bottom of a
+//  message the signature is inserted but is not visible until the compose
+//  window is expanded to full screen; and a new message with no user edits is
+//  not saved as a draft even after a signature is added. Both are documented
+//  platform behaviours.
+//
+// -----------------------------------------------------------------------------
+//  CHANGES IN v7.7.0 — ONE MAILBOX, MANY ACCOUNTS (see below)
 //
 // -----------------------------------------------------------------------------
 //  CHANGES IN v7.7.0 — ONE MAILBOX, MANY ACCOUNTS
@@ -357,7 +419,7 @@
 //      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v7.7.0";
+const CB_VERSION = "v7.8.0";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -432,6 +494,14 @@ const SIG_PURGE_MS = 12 * 60 * 60 * 1000;
 // One size ceiling, actually enforced. v6 declared 500KB/200KB constants and
 // then hardcoded 100KB in the apply path; observed rule signatures are ~42KB.
 const MAX_SIG_BYTES = 100 * 1024;
+
+// v7.8 (II). THE LIMIT THE HOST ACTUALLY ENFORCES. setSignatureAsync fails with
+// DataExceedsMaximumSize when the data parameter exceeds 30,000 CHARACTERS —
+// characters, not bytes, and it counts the wrapper too. At ~42KB, the observed
+// rule signatures are over this, so the write was failing on any host that
+// enforces it while the logs reported a clean resolve. Checked before the call
+// so the failure names the real cause.
+const MAX_SIG_CHARS = 30000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  v7.5 — SEND-TIME VERIFICATION CONFIG
@@ -589,7 +659,13 @@ const isColdRuntime = () => isMac() || isMobile();
 // chain of comparisons on every request and every log line.
 let _xPlatform = null;
 
+// v7.8 (III). Set once the backend has answered 2xx for a platform value other
+// than the one we would normally send. Sticky for the runtime: having learned
+// that WINDOWS works, there is no reason to pay the failed request again.
+let _xPlatformPinned = null;
+
 function getXPlatform() {
+    if (_xPlatformPinned) return _xPlatformPinned;
     if (_xPlatform) return _xPlatform;
     const p = detectPlatform();
     const base =
@@ -797,6 +873,12 @@ const FAILURES = {
     too_large: {
         rank: 4, fatal: true,
         msg: "Signature exceeds the allowed size. Please contact Admin.",
+    },
+    // Distinct from too_large: this one is the host's hard API limit, so it
+    // fails on every device rather than being a local policy choice.
+    too_long: {
+        rank: 4, fatal: true,
+        msg: "Signature is too long to insert (over 30,000 characters). Please contact Admin.",
     },
     write_failed: {
         rank: 4, fatal: true,
@@ -1477,6 +1559,32 @@ const apiInit = (encryptedMail, extra) => ({
     headers: apiHeaders(encryptedMail, extra),
 });
 
+/**
+ * v7.8 (III). THE ONE DOOR TO THE BACKEND, WITH A PLATFORM-HEADER RETRY.
+ *
+ * The X-Platform note in this file says the backend accepts WINDOWS only and
+ * that MAC/MOBILE come back non-2xx; the shipped X_PLATFORM_MAP contradicts it.
+ * Instead of guessing which is true, a non-2xx from a non-WINDOWS platform is
+ * retried ONCE as WINDOWS. If that works, WINDOWS is pinned for the runtime and
+ * nothing pays for the discovery again.
+ *
+ * Costs at most one extra request per runtime, and only on the platforms that
+ * were failing outright anyway. A genuine 404/412 is returned untouched from
+ * the retry, so plan-expiry and not-found classification are unaffected.
+ */
+async function apiFetch(path, encryptedMail, extra = {}) {
+    const res = await fetch(apiUrl(path), apiInit(encryptedMail, extra));
+    if (res.ok || getXPlatform() === "WINDOWS") return res;
+
+    warn(`${path} returned ${res.status} with X-Platform=${getXPlatform()} — retrying as WINDOWS`);
+    const retry = await fetch(apiUrl(path), apiInit(encryptedMail, { ...extra, "X-Platform": "WINDOWS" }));
+    if (retry.ok) {
+        _xPlatformPinned = "WINDOWS";
+        log("backend accepted X-Platform=WINDOWS — pinned for this runtime");
+    }
+    return retry;
+}
+
 // Shown verbatim only when it is a real sentence: an exception class name or an
 // over-long string falls back to the canned wording rather than putting Java
 // package paths on the notification bar.
@@ -1501,10 +1609,7 @@ async function readApiError(res) {
 async function fetchRules(encryptedMail) {
     const xp = getXPlatform();
     try {
-        const res = await fetch(
-            apiUrl("/rules-config/get-active"),
-            apiInit(encryptedMail, { "Content-Type": "application/json" })
-        );
+        const res = await apiFetch("/rules-config/get-active", encryptedMail, { "Content-Type": "application/json" });
         if (!res.ok) {
             // Status is logged WITH the platform header: a 4xx that disappears
             // when X-Platform is WINDOWS is fix (I), not a backend outage.
@@ -1546,7 +1651,7 @@ async function fetchRules(encryptedMail) {
 async function fetchDefaultSignature(encryptedMail) {
     const xp = getXPlatform();
     try {
-        const res = await fetch(apiUrl("/html/outlook/get-active"), apiInit(encryptedMail));
+        const res = await apiFetch("/html/outlook/get-active", encryptedMail);
         if (!res.ok) {
             const { message, planExpired, raw } = await readApiError(res);
             warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, raw);
@@ -1581,10 +1686,7 @@ async function fetchDefaultSignature(encryptedMail) {
 // Same shape as fetchDefaultSignature so resolveSigHtml can treat both uniformly.
 async function fetchSignatureById(id, encryptedMail) {
     try {
-        const res = await fetch(
-            apiUrl(`/rules-config/get/${encodeURIComponent(id)}`),
-            apiInit(encryptedMail)
-        );
+        const res = await apiFetch(`/rules-config/get/${encodeURIComponent(id)}`, encryptedMail);
         if (!res.ok) {
             const { message, planExpired, raw } = await readApiError(res);
             err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`, raw);
@@ -2357,6 +2459,19 @@ async function verifySignatureOnBody(item, expectedHtml, id) {
 const hostCanSetSignature = (item) => typeof item?.body?.setSignatureAsync === "function";
 
 /**
+ * v7.8 (I). DOES THIS HOST EVER RAISE OnMessageSend?
+ *
+ * Outlook mobile does not: its supported launch events are OnNewMessageCompose,
+ * OnMessageRecipientsChanged and OnMessageFromChanged, and nothing else. So
+ * "decide at compose, write at send" — which is what a deferral means — writes
+ * the signature precisely never on a phone.
+ *
+ * Anywhere this returns false, the compose write is the ONLY write, and a host
+ * that cannot perform it has genuinely failed rather than postponed.
+ */
+const hostHasSendEvent = () => !isMobile();
+
+/**
  * FIX (N). Records failures instead of notifying. `silent` is for the
  * background revalidation rewrite, which happens after the outcome has already
  * been reported and must not retroactively colour it.
@@ -2367,6 +2482,16 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
     // v7.5: wrap so send time can find this block again. The wrapper counts
     // towards MAX_SIG_BYTES because it is part of what goes on the mail.
     const payload = sigId == null ? html : wrapSignature(html, sigId);
+
+    // v7.8 (II). The host counts CHARACTERS and rejects over 30,000 with
+    // DataExceedsMaximumSize, so that ceiling is checked first — it is the one
+    // that actually fires, and it explains the failure far better than a
+    // generic write error would.
+    if (payload.length > MAX_SIG_CHARS) {
+        warn(`signature ${payload.length} chars exceeds the host limit of ${MAX_SIG_CHARS} — not applying`);
+        fail("too_long", `${payload.length} chars > ${MAX_SIG_CHARS}`);
+        return false;
+    }
 
     const bytes = utf8Len(payload);
     if (bytes > MAX_SIG_BYTES) {
@@ -2381,10 +2506,14 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
             { ms: budgetMs(), label: "setSignatureAsync" }
         );
         if (res) { log(`signature written (${bytes}B)`); return true; }
-    } else if (!isSendTime) {
+    } else if (!isSendTime && hostHasSendEvent()) {
         // FIX (L). Not an error, and not the user's problem: this host defers
         // all signature writing to send. Record NOTHING, notify NOTHING, and let
         // the decision be persisted so the send runtime can act on it.
+        //
+        // v7.8 (I): ONLY legitimate where a send event actually exists. On
+        // mobile it does not, so falling through here would mean the signature
+        // is never written at all — which is exactly what was happening.
         log("setSignatureAsync unavailable at compose on this host — deferring the write to send");
         return false;
     } else {
@@ -2419,7 +2548,12 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
 
     // Nothing can be written at compose on this host — do not fetch, do not
     // record. evaluateAndApply still persists the id for the send runtime (L).
-    if (!isSendTime && !hostCanSetSignature(item)) {
+    //
+    // v7.8 (I): deferring is only meaningful when a send event will follow.
+    // Outlook mobile raises no OnMessageSend, so a deferral there discards the
+    // signature silently. Where there is no send event we go on and write,
+    // and a host that truly cannot write reports a failure the user can see.
+    if (!isSendTime && !hostCanSetSignature(item) && hostHasSendEvent()) {
         log(`host cannot write at compose — id=${key} decided but not applied yet`);
         return nothing("deferred");
     }
