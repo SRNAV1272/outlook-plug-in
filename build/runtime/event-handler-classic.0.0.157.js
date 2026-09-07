@@ -2549,12 +2549,12 @@ const CONFIG = {
     XHR_RETRY_DELAY_MS: 600,
     XHR_LOG_BODY_CHARS: 400,
     // Send mode: one attempt, short. The send budget cannot absorb a retry.
-    SEND_XHR_TIMEOUT_MS: 2500,
+    SEND_XHR_TIMEOUT_MS: 1500,
     SEND_XHR_MAX_ATTEMPTS: 1,
 
     // ── Handler budgets ──
     // Compose: the platform allows minutes; a long guard is a safety net only.
-    COMPOSE_HANDLER_TIMEOUT_MS: 45000,
+    COMPOSE_HANDLER_TIMEOUT_MS: 5000,
     // Send: the pipeline must complete with allowEvent:true well before the
     // host loses patience. Everything on the send path is bounded so the whole
     // thing fits inside this with headroom.
@@ -2582,10 +2582,13 @@ const CONFIG = {
     // ONE freshness window for everything cached: default signature, rules and
     // per-id signatures are all refetched once older than this.
     CACHE_TTL_MS: 5 * 60 * 1000,
-    // How long an EXPIRED copy is still usable as the offline/failure fallback.
-    // Eviction, not freshness: it is only read when the network cannot answer.
-    STALE_FALLBACK_MS: 12 * 60 * 60 * 1000,
-    LAST_APPLIED_TTL_MS: 30 * 60 * 1000,
+    // EVICTION, NOT FRESHNESS. Nothing survives PURGE_MS in any tier — memory
+    // or OfficeRuntime.storage. Enforced on read AND by purgeExpiredStorage().
+    STALE_FALLBACK_MS: 30 * 60 * 1000,
+    // ⚠ === CACHE_TTL_MS by request: the default signature is deleted the
+    // moment it goes stale, so it is never served as an offline fallback.
+    DEFAULT_SIG_PURGE_MS: 5 * 60 * 1000,
+    LAST_APPLIED_TTL_MS: 30 * 60 * 1000,   // already aligned
 
     // Suppress an identical re-write inside this window (recipient storms).
     REDUNDANT_WRITE_WINDOW_MS: 1500,
@@ -2755,6 +2758,7 @@ function resolveSender(item, cb) {
         _diag.step("resolveSender", "sender=" + _senderEmail + " profile=" + fallback +
             (timedOut ? " (timed out, profile)" : "") +
             (_senderEmail && fallback && _senderEmail !== fallback ? " (From wins)" : ""));
+        purgeExpiredStorage();
         cb(_senderEmail);
     });
 
@@ -2813,6 +2817,10 @@ function decryptResponse(cipherB64) {
 // STALE (within STALE_FALLBACK_MS) separately: cb(fresh, stale). Callers use
 // fresh normally and stale only when the network has already failed. Entries
 // older than the fallback window are evicted on read.
+function _purgeMsFor(key) {
+    // The default signature lives in its own key, so the stem identifies it.
+    return key.indexOf(CONFIG.CACHE_KEY + ":") === 0 ? CONFIG.DEFAULT_SIG_PURGE_MS : CONFIG.STALE_FALLBACK_MS;
+}
 
 function _storageGet(key, cb) {
     try {
@@ -2823,7 +2831,8 @@ function _storageGet(key, cb) {
                 try { entry = JSON.parse(raw); } catch (_) { cb(null, null); return; }
                 if (!entry || entry.data === null || entry.data === undefined) { cb(null, null); return; }
                 const age = Date.now() - (entry.ts || 0);
-                if (age > CONFIG.STALE_FALLBACK_MS) {
+                const maxAge = _purgeMsFor(key);
+                if (age > maxAge) {
                     _diag.step("storage:evict", key + " age=" + age + "ms");
                     OfficeRuntime.storage.removeItem(key).then(function () { }, function () { });
                     cb(null, null);
@@ -2894,7 +2903,10 @@ function getCachedSignature(cb) {
     }
     _storageGet(K.sig(), function (fresh, stale) {
         if (fresh) { _memSig = fresh; _memSigOwner = owner; _memSigTs = Date.now(); }
-        cb(fresh, stale || (_memSigOwner === owner ? _memSig : null));
+        else if (_memSig && Date.now() - _memSigTs > CONFIG.DEFAULT_SIG_PURGE_MS) {
+            _memSig = null; _memSigOwner = null; _memSigTs = 0;
+        }
+        cb(fresh, stale || (_memSig && _memSigOwner === owner ? _memSig : null));
     });
 }
 
@@ -2912,6 +2924,33 @@ function purgeAllCaches() {
     _storageRemove(K.lastApplied());
 }
 
+function _storageAge(key, cb) {
+    try {
+        OfficeRuntime.storage.getItem(key).then(function (raw) {
+            if (!raw) { cb(-1); return; }
+            let e; try { e = JSON.parse(raw); } catch (_) { cb(Infinity); return; }
+            cb(Date.now() - ((e && e.ts) || 0));
+        }, function () { cb(-1); });
+    } catch (_) { cb(-1); }
+}
+
+// ONE EVICTION SWEEP, EVERY TIER. Fire-and-forget; runs once per activation,
+// after the sender is known (the keys are account-namespaced).
+function purgeExpiredStorage() {
+    const now = Date.now();
+    [[K.sig(), CONFIG.DEFAULT_SIG_PURGE_MS],
+    [K.rules(), CONFIG.STALE_FALLBACK_MS],
+    [K.sigById(), CONFIG.STALE_FALLBACK_MS],
+    [K.lastApplied(), CONFIG.LAST_APPLIED_TTL_MS]].forEach(function (j) {
+        _storageAge(j[0], function (age) {
+            if (age >= 0 && age > j[1]) { _diag.step("purge:expired", j[0] + " age=" + age + "ms"); _storageRemove(j[0]); }
+        });
+    });
+    if (_memSig && now - _memSigTs > CONFIG.DEFAULT_SIG_PURGE_MS) { _memSig = null; _memSigOwner = null; _memSigTs = 0; }
+    if (_memRules && now - _memRulesTs > CONFIG.STALE_FALLBACK_MS) { _memRules = null; _memRulesOwner = null; _memRulesTs = 0; }
+    if (_memLastApplied && now - (_memLastApplied.ts || 0) > CONFIG.LAST_APPLIED_TTL_MS) _memLastApplied = null;
+}
+
 // ─── Rules cache ──────────────────────────────────────────────────────────────
 
 // cb(fresh, stale)
@@ -2924,7 +2963,10 @@ function getCachedRules(cb) {
     }
     _storageGet(K.rules(), function (fresh, stale) {
         if (fresh) { _memRules = fresh; _memRulesOwner = owner; _memRulesTs = Date.now(); }
-        cb(fresh, stale || (_memRulesOwner === owner ? _memRules : null));
+        else if (_memRules && Date.now() - _memRulesTs > CONFIG.STALE_FALLBACK_MS) {
+            _memRules = null; _memRulesOwner = null; _memRulesTs = 0;
+        }
+        cb(fresh, stale || (_memRules && _memRulesOwner === owner ? _memRules : null));
     });
 }
 
@@ -2966,22 +3008,28 @@ function setSigById(signatureId, html, cb) {
 
 function _itemKey(item) {
     try { if (item && item.conversationId) return String(item.conversationId); } catch (_) { }
-    return "current";
+    try { if (item && item.itemId) return String(item.itemId); } catch (_) { }
+    return null;   // unidentifiable: no shared bucket
 }
 
 function getLastApplied(item, cb) {
     const key = _itemKey(item), owner = accountKey();
-    if (_memLastApplied && _memLastApplied.itemKey === key && _memLastApplied.owner === owner) { cb(_memLastApplied); return; }
+    if (key === null) { cb(null); return; }
+    if (_memLastApplied && _memLastApplied.itemKey === key && _memLastApplied.owner === owner &&
+        Date.now() - (_memLastApplied.ts || 0) <= CONFIG.LAST_APPLIED_TTL_MS) { cb(_memLastApplied); return; }
     _storageGetRaw(K.lastApplied(), function (rec) {
         if (rec && rec.itemKey === key && rec.owner === owner && Date.now() - (rec.ts || 0) <= CONFIG.LAST_APPLIED_TTL_MS) {
             _memLastApplied = rec; cb(rec); return;
         }
+        if (rec) _storageRemove(K.lastApplied());   // expired or foreign — don't leave it
         cb(null);
     });
 }
 
 function setLastApplied(item, sigKey, htmlLen, digest, cb) {
-    const rec = { itemKey: _itemKey(item), owner: accountKey(), sigKey: String(sigKey), htmlLen: htmlLen || 0, digest: digest || null, ts: Date.now() };
+    const key = _itemKey(item);
+    if (key === null) { if (cb) cb(false); return; }
+    const rec = { itemKey: key, owner: accountKey(), sigKey: String(sigKey), htmlLen: htmlLen || 0, digest: digest || null, ts: Date.now() };
     _memLastApplied = rec;
     _storageSet(K.lastApplied(), rec, cb || function () { });
 }
@@ -3088,7 +3136,9 @@ function removeNotification(item) {
     try { if (item && item.notificationMessages) item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { }); } catch (_) { }
 }
 
-function showLoading(item) { if (!_sendMode) showNotification(item, CONFIG.MSG_LOADING, "informationalMessage"); }
+// function showLoading(item) { if (!_sendMode) showNotification(item, CONFIG.MSG_LOADING, "informationalMessage"); }
+// v6.1: progress and success are silent. The bar only ever carries an error.
+function showLoading(item) { /* no-op — see notifyApplied */ }
 
 // Failure: the lapsed plan is the truer cause of anything else that failed.
 function notifyFailure(item, message) {
@@ -3097,12 +3147,17 @@ function notifyFailure(item, message) {
 
 // Success: "Signature applied" briefly (compose only), then clear — unless the
 // plan has lapsed, which must stay visible.
+// function notifyApplied(item) {
+//     if (_plan.isExpired()) { showNotification(item, _plan.message(), "errorMessage"); return; }
+//     if (_sendMode) { removeNotification(item); return; }   // the item is already closing
+//     showNotification(item, CONFIG.MSG_APPLIED, "informationalMessage");
+//     const mine = _notifSeq;
+//     setTimeout(function () { if (mine === _notifSeq) removeNotification(item); }, CONFIG.NOTIFY_CLEAR_MS);
+// }
 function notifyApplied(item) {
+    // The lapsed plan is the one thing worth saying on an otherwise good run.
     if (_plan.isExpired()) { showNotification(item, _plan.message(), "errorMessage"); return; }
-    if (_sendMode) { removeNotification(item); return; }   // the item is already closing
-    showNotification(item, CONFIG.MSG_APPLIED, "informationalMessage");
-    const mine = _notifSeq;
-    setTimeout(function () { if (mine === _notifSeq) removeNotification(item); }, CONFIG.NOTIFY_CLEAR_MS);
+    removeNotification(item);
 }
 
 // ─── Item custom properties ───────────────────────────────────────────────────

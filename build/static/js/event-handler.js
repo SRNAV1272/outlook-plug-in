@@ -8,7 +8,7 @@
 //  which triggers the "deferred" status and persists the decision for send time.
 // =============================================================================
 
-const CB_VERSION = "v7.7.0-mobile-fix";
+const CB_VERSION = "v7.8.0-purge-and-quiet";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -60,6 +60,7 @@ const P_SIG_DIGEST = "cardbyte_sig_digest";
 // NOTE (H): mailbox-scoped means CROSS-DEVICE. R_ACTIVE_SIG is a last-resort
 // hint, never evidence about the item currently being composed.
 const R_ACTIVE_SIG = "cb_active_sig";
+const R_ACTIVE_SIG_TS = "cb_active_sig_ts";  // v7.8: roamed ids were immortal without this
 const R_RULES = "cb_rules";
 const R_RULES_TS = "cb_rules_ts";   // FIX (A): roamed rules were immortal without this
 const R_RULES_MAX_BYTES = 20 * 1024;
@@ -73,12 +74,22 @@ const SIG_TTL_MS = CACHE_TTL_MS;
 const RULES_TTL_MS = CACHE_TTL_MS;
 const ACTIVE_SIG_MAX_AGE_MS = 1 * 60 * 1000;
 
-// EVICTION, NOT FRESHNESS. v7.6 (α): this was 5 min, i.e. equal to SIG_TTL_MS,
-// which was harmless while the TTL never fired but would now delete exactly the
-// stale copies resolveSigHtml falls back on when the network is down. Purging
-// exists to stop localStorage growing without bound, so it is deliberately much
-// longer than the TTL. Must stay > SIG_TTL_MS or the offline fallback is lost.
-const SIG_PURGE_MS = 12 * 60 * 60 * 1000;
+// EVICTION, NOT FRESHNESS. Nothing this file writes may OUTLIVE PURGE_MS in
+// any tier — memory, localStorage or roamingSettings — and the default
+// signature may not outlive DEFAULT_SIG_PURGE_MS. purgeExpiredStorage()
+// enforces both once per decision, from beginWrite().
+//
+// Freshness (*_TTL_MS) decides whether a value may be USED; this decides
+// whether it may still EXIST. Must stay > SIG_TTL_MS or the offline fallback
+// in resolveSigHtml is lost.
+const PURGE_MS = 30 * 60 * 1000;
+const SIG_PURGE_MS = PURGE_MS;
+
+// ⚠ DEFAULT_SIG_PURGE_MS === SIG_TTL_MS, by request. The default signature is
+// therefore deleted the moment it goes stale: it can never be served as a
+// stale copy and never covers for an unreachable network. Raise it above
+// SIG_TTL_MS to get the offline default back.
+const DEFAULT_SIG_PURGE_MS = 5 * 60 * 1000;
 
 // One size ceiling, actually enforced. v6 declared 500KB/200KB constants and
 // then hardcoded 100KB in the apply path; observed rule signatures are ~42KB.
@@ -337,10 +348,9 @@ function beginWrite() {
     clearFailures();
     _recipCache = { seq: -1, emails: null };
     _writeSeq++;
-    // Cheap, and this is the only per-decision hook that runs on every host —
-    // Office.onReady does not fire in the Windows classic event runtime, which
-    // is why purging from there evicted nothing for the runtime's whole life.
-    sigCache.purge();
+    // Cheap, and the only per-decision hook that runs on every host —
+    // Office.onReady does not fire in the Windows classic event runtime.
+    purgeExpiredStorage();
     return _writeSeq;
 }
 
@@ -510,29 +520,24 @@ const rulesFailureKind = () => (_rulesFetchError === "offline" ? "rules_offline"
  * that raises it ends in reportOutcome(), which replaces it on success/failure
  * and removes it on "quiet" — so it cannot get stranded on the bar.
  */
-function showLoading(item) {
-    showNotification(item, MSG_LOADING, "informationalMessage");
-}
+// function showLoading(item) {
+//     showNotification(item, MSG_LOADING, "informationalMessage");
+// }
 
 /**
- * THE ONLY PLACE A NOTIFICATION IS RAISED.
+ * THE ONLY PLACE A NOTIFICATION IS RAISED — and it raises one ONLY on error.
  *
  * @param {"applied"|"failed"|"quiet"} outcome
- *   applied — the signature is on the body
+ *   applied — the signature is on the body. Silent, UNLESS a degradation was
+ *             recorded (the rules could not be checked, say) — that is still
+ *             an error worth showing.
  *   failed  — it is not, and no more specific failure was recorded
  *   quiet   — there was nothing to do (manual override, deferred mobile
  *             compose, blocked evaluation that kept a good signature)
  */
 function reportOutcome(item, outcome) {
-    const show = (msg, type) => { _reported = true; showNotification(item, msg, type); };
-
-    if (_failure) return show(_failure.msg, "errorMessage");
-    if (outcome === "applied") {
-        show(MSG_APPLIED, "informationalMessage");
-        clearNotificationSoon(item);
-        return;
-    }
-    if (outcome === "failed") return show(FAILURES.write_failed.msg, "errorMessage");
+    if (_failure) { _reported = true; showNotification(item, _failure.msg, "errorMessage"); return; }
+    if (outcome === "failed") { _reported = true; showNotification(item, FAILURES.write_failed.msg, "errorMessage"); return; }
     removeNotification(item);
 }
 
@@ -837,7 +842,8 @@ const sigCache = {
         scheduleSigFlush();
     },
 
-    // Eviction, not expiry — see SIG_PURGE_MS. Runs per decision now, because
+    // Eviction, not expiry — see PURGE_MS. DEFAULT_ID gets its own, much
+    // shorter ceiling. Runs per decision (via purgeExpiredStorage) because
     // Office.onReady does not fire in the Windows classic event runtime.
     purge() {
         let map;
@@ -845,7 +851,8 @@ const sigCache = {
         const now = Date.now();
         let n = 0;
         for (const id of Object.keys(map)) {
-            if (now - (map[id]?.ts || 0) > SIG_PURGE_MS) { delete map[id]; n++; }
+            const ceiling = id === DEFAULT_ID ? DEFAULT_SIG_PURGE_MS : SIG_PURGE_MS;
+            if (now - (map[id]?.ts || 0) > ceiling) { delete map[id]; n++; }
         }
         if (n) { scheduleSigFlush(); log(`purged ${n} expired signature cache entr${n === 1 ? "y" : "ies"}`); }
     },
@@ -952,6 +959,47 @@ function describeRulesSource() {
     if (roam.get(R_RULES)) return `roamed (age=${rts ? Date.now() - rts : "unknown"}ms)`;
     return "none";
 }
+/**
+ * ONE EVICTION SWEEP, EVERY TIER. Called from beginWrite(), i.e. once per
+ * decision, on every platform.
+ *
+ * An entry with no timestamp counts as expired: every writer in this file
+ * stamps one, so an unstamped value is either legacy or was written by a build
+ * that predates its ceiling. Item CustomProperties are not swept — they are
+ * item-scoped and die with the draft.
+ */
+function purgeExpiredStorage() {
+    const now = Date.now();
+    const tsOf = (v) => parseInt(v || "0", 10);
+    const expired = (ts) => !ts || now - ts > PURGE_MS;
+
+    sigCache.purge();
+
+    try {
+        if (store.get(K_RULES) && expired(tsOf(store.get(K_RULES_TS)))) {
+            store.remove(K_RULES, K_RULES_TS);
+            _rulesParsed = { raw: null, json: null };
+            _enabledCache = { src: null, list: null };
+            log("purged the local rules cache");
+        }
+        if (roam.get(R_RULES) && expired(tsOf(roam.get(R_RULES_TS)))) {
+            roam.remove(R_RULES);
+            roam.remove(R_RULES_TS);
+            log("purged the roamed rules cache");
+        }
+        if (store.get(K_ACTIVE_SIG) && expired(tsOf(store.get(K_ACTIVE_SIG_TS)))) {
+            store.remove(K_ACTIVE_SIG, K_ACTIVE_SIG_TS);
+            log("purged the local active signature id");
+        }
+        if (roam.get(R_ACTIVE_SIG) && expired(tsOf(roam.get(R_ACTIVE_SIG_TS)))) {
+            roam.remove(R_ACTIVE_SIG);
+            roam.remove(R_ACTIVE_SIG_TS);
+            log("purged the roamed active signature id");
+        }
+    } catch (e) {
+        warn("purgeExpiredStorage threw, ignoring:", e);
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ITEM CUSTOM PROPERTIES
@@ -1053,10 +1101,12 @@ async function markActiveSignature(item, id, snapshot = null, digest = null) {
     if (id == null) {
         store.remove(K_ACTIVE_SIG, K_ACTIVE_SIG_TS);
         roam.remove(R_ACTIVE_SIG);
+        roam.remove(R_ACTIVE_SIG_TS);
     } else {
         store.set(K_ACTIVE_SIG, String(id));
         store.set(K_ACTIVE_SIG_TS, Date.now().toString());
         roam.set(R_ACTIVE_SIG, String(id));
+        roam.set(R_ACTIVE_SIG_TS, Date.now().toString());
     }
     if (!item) return;
 
@@ -2203,7 +2253,7 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
             return;
         }
         log("manual override active but body state unknown — reapplying:", override);
-        showLoading(item);
+        // showLoading(item);
         const rOv = await applyById(item, override, userEmail, seq, { revalidate: false });
         // Snapshot is null on purpose: a manual choice is recipient-independent,
         // and markActiveSignature removes the property, so send time re-evaluates
@@ -2219,7 +2269,7 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 
     // Progress goes up only after the override check, so a user-chosen
     // signature never flashes a message about work that is not happening.
-    showLoading(item);
+    // showLoading(item);
 
     const { rule, blocked } = await findMatchingRule(item, userEmail, {
         allowNetwork,
