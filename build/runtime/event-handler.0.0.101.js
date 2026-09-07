@@ -1,69 +1,7 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v7.8.0)
-//
-// -----------------------------------------------------------------------------
-//  CHANGES IN v7.8.0 — MOBILE AUTO-INSERTION ACTUALLY HAPPENS
-//
-//  Symptom: no signature is ever inserted on Outlook for iOS / Android.
-//  Four independent causes, all of which had to be fixed for mobile to work.
-//
-//  I. THE COMPOSE WRITE WAS DEFERRED TO AN EVENT THAT NEVER FIRES. This build
-//     assumed mobile has no setSignatureAsync, so applyById returned "deferred"
-//     at compose and left the write to OnMessageSend — and OnMessageSend is NOT
-//     a supported mobile event. The decision was persisted and then nothing
-//     ever consumed it. Net effect on a phone: id decided, HTML fetched, cache
-//     warmed, body never touched.
-//
-//     The assumption is also out of date: body.setSignatureAsync IS supported
-//     in Message Compose on Outlook for Android and iOS (Mailbox 1.10 API,
-//     enabled on mobile from app version 4.2352.0). Deferring is now gated on
-//     hostHasSendEvent() — false on mobile — so a host with no send event
-//     writes at compose or reports a real failure. It never silently defers
-//     into a void.
-//
-//  II. THE 30,000-CHARACTER setSignatureAsync LIMIT WAS NOT ENFORCED, AND THE
-//     ONE CEILING THAT WAS (MAX_SIG_BYTES, 100KB) IS THREE TIMES TOO HIGH.
-//     setSignatureAsync rejects a data parameter longer than 30,000 characters
-//     with DataExceedsMaximumSize. The file's own notes put observed rule
-//     signatures at ~42KB — comfortably over the limit — so on any host that
-//     enforces it the write failed while every log line said the signature had
-//     resolved fine. Checked up front now, in CHARACTERS (what the API counts),
-//     with its own failure message.
-//
-//  III. X-Platform. getXPlatform() sent "MAC" from iOS and Android. The header
-//     note in this file says the backend accepts WINDOWS only and that MAC and
-//     MOBILE come back non-2xx — which would fail every fetch on a phone before
-//     any of the above mattered. Rather than trusting either side of that
-//     contradiction, requests now RETRY ONCE with X-Platform: WINDOWS after a
-//     non-2xx, and pin WINDOWS for the rest of the runtime if the retry
-//     succeeds. Correct whichever way the backend actually behaves, and it
-//     costs one extra request per runtime at most. X_PLATFORM_MAP still lets
-//     you force the values outright.
-//
-//  IV. Mobile-supported APIs are no longer treated as absent: getComposeTypeAsync
-//     and from.getAsync both work on mobile now, so the compose type and the
-//     sending account resolve there like anywhere else.
-//
-//  MANIFEST — REQUIRED, AND NOT FIXABLE IN THIS FILE:
-//     The <VersionOverrides V1_1> <Requirements> block requests Mailbox 1.10.
-//     Outlook mobile supports up to Mailbox 1.5 and will not load version
-//     overrides that demand more, so the mobile LaunchEvents never register and
-//     none of this code runs. Set that block to MinVersion 1.5 (the later APIs
-//     stay usable on mobile — they are enabled individually by the host, not by
-//     the manifest). The mobile LaunchEvent list itself is fine: all three of
-//     OnNewMessageCompose, OnMessageRecipientsChanged and OnMessageFromChanged
-//     are supported on current builds.
-//
-//  KNOWN MOBILE BEHAVIOUR, NOT A BUG: on a reply opened from the bottom of a
-//  message the signature is inserted but is not visible until the compose
-//  window is expanded to full screen; and a new message with no user edits is
-//  not saved as a draft even after a signature is added. Both are documented
-//  platform behaviours.
-//
-// -----------------------------------------------------------------------------
-//  CHANGES IN v7.7.0 — ONE MAILBOX, MANY ACCOUNTS (see below)
+//  CardByte Outlook Add-in — event-handler.js (v7.7.0)
 //
 // -----------------------------------------------------------------------------
 //  CHANGES IN v7.7.0 — ONE MAILBOX, MANY ACCOUNTS
@@ -419,7 +357,7 @@
 //      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
 // =============================================================================
 
-const CB_VERSION = "v7.8.0";
+const CB_VERSION = "v7.7.0";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -494,14 +432,6 @@ const SIG_PURGE_MS = 12 * 60 * 60 * 1000;
 // One size ceiling, actually enforced. v6 declared 500KB/200KB constants and
 // then hardcoded 100KB in the apply path; observed rule signatures are ~42KB.
 const MAX_SIG_BYTES = 100 * 1024;
-
-// v7.8 (II). THE LIMIT THE HOST ACTUALLY ENFORCES. setSignatureAsync fails with
-// DataExceedsMaximumSize when the data parameter exceeds 30,000 CHARACTERS —
-// characters, not bytes, and it counts the wrapper too. At ~42KB, the observed
-// rule signatures are over this, so the write was failing on any host that
-// enforces it while the logs reported a clean resolve. Checked before the call
-// so the failure names the real cause.
-const MAX_SIG_CHARS = 30000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  v7.5 — SEND-TIME VERIFICATION CONFIG
@@ -593,6 +523,332 @@ const MSG_APPLIED = "Signature applied";
 // showLoading(), and always superseded or removed by reportOutcome().
 const MSG_LOADING = "Applying your signature...";
 
+// =============================================================================
+//  CardByte Outlook Add-in — MOBILE-ONLY PATCH  (v7.7.1-mobile)
+//
+//  Target problem: BASE_URL moved from https://enterprise.cardbyte.ai/... to
+//  https://ns-enterprise.cardbyte.ai/... and the signature stopped being
+//  inserted on Outlook for iOS and Android. Windows, Mac and OWA are unaffected.
+//
+//  PASTE THIS BLOCK INTO event-handler.js immediately AFTER the CONFIG section
+//  (i.e. just before the "LOGGING" banner, around line 526). Then make the four
+//  small call-site edits listed in EDITS below.
+//
+//  Every function here is a no-op on any platform where isMobile() is false, so
+//  Windows / Mac / OWA execute byte-for-byte the same path as v7.7.0.
+//
+// -----------------------------------------------------------------------------
+//  WHY THIS IS A MOBILE-ONLY FAILURE — the part that actually explains it
+//
+//  event-handler.js is host-agnostic. BASE_URL is the ONLY place either
+//  hostname appears; nothing branches on it. So swapping the host cannot have
+//  introduced a mobile-specific code path. What it did was remove the margin
+//  that mobile never had in the first place:
+//
+//    DESKTOP gets TWO chances to put the signature on the mail —
+//      1. OnNewMessageCompose (applySignature)
+//      2. OnMessageSend (onSendHandler -> decideSendId -> applyById)
+//    and on Windows/OWA the runtime is long-lived, so chance 2 usually runs
+//    against a WARM localStorage cache with no network call at all.
+//
+//    MOBILE gets ONE chance, and it is always cold:
+//      • Outlook on iOS/Android does NOT support OnMessageSend at all. Only
+//        OnNewMessageCompose, OnMessageRecipientsChanged and OnMessageFromChanged
+//        are raised. (This file's own comments say the opposite — see NOTE 1.)
+//      • Every activation is a fresh WebView with empty localStorage, so every
+//        compose performs the full rules + signature fetch over a phone network.
+//      • The whole activation is capped at 60 seconds by the host.
+//
+//  Net effect: a backend that is merely SLOWER, or that fails a small fraction
+//  of requests, or whose CORS preflight is misconfigured, shows up on desktop as
+//  "fine" (warm cache, plus a send-time retry) and on mobile as "no signature,
+//  ever". That is exactly the reported symptom.
+//
+//  ALREADY RULED OUT — do not spend time on these:
+//
+//    • X-Platform. getXPlatform() resolves mac -> "MAC", mobile-ios -> "MAC",
+//      mobile-android -> "MAC" (via the isMobile() branch), and X_PLATFORM_MAP
+//      maps MAC -> "MAC". Desktop Mac and both phones therefore send the
+//      IDENTICAL header value. Mac works against ns-enterprise, so ns-enterprise
+//      accepts X-Platform: MAC. The long-standing ⚠ warning on X_PLATFORM_MAP
+//      is not what is biting here.
+//
+//    • /.well-known/microsoft-officeaddins-allowed.json. Per Microsoft's docs
+//      this file belongs on the origin that HOSTS the add-in's JavaScript, not
+//      on the API server being called. That origin did not change.
+//
+//  NOTE 1 — stale comments in v7.7.0 that this patch does not rely on:
+//    line ~341  "OnMessageRecipientsChanged is not raised by Outlook mobile"
+//               — it is, on Android/iOS 4.2425.0+.
+//    line ~2634 "On mobile this is the ONLY phase that runs" (about send)
+//               — inverted. Send never runs on mobile; compose always does.
+//    line ~268  "Mobile has only appendOnSendAsync"
+//               — wrong. setSignatureAsync IS supported on mobile;
+//                 appendOnSendAsync is NOT. This is benign today only because
+//                 hostCanSetSignature() feature-detects instead of trusting the
+//                 comment, so mobile takes the setSignatureAsync path correctly.
+//
+// -----------------------------------------------------------------------------
+//  EDITS REQUIRED AT EXISTING CALL SITES (4 total, all behaviour-neutral off
+//  mobile because apiFetch delegates to the original fetch there)
+//
+//  EDIT 1 — replace budgetMs() (around line 625):
+//
+//      const budgetMs = () =>
+//          isMobile() ? MOBILE_FETCH_BUDGET_MS
+//                     : isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS;
+//
+//  EDIT 2 — fetchRules (around line 1504), replace the fetch(...) call with:
+//
+//      const res = await apiFetch("/rules-config/get-active", encryptedMail,
+//                                 { "Content-Type": "application/json" });
+//
+//  EDIT 3 — fetchDefaultSignature (around line 1549):
+//
+//      const res = await apiFetch("/html/outlook/get-active", encryptedMail);
+//
+//      ...and fetchSignatureById (around line 1584):
+//
+//      const res = await apiFetch(`/rules-config/get/${encodeURIComponent(id)}`,
+//                                 encryptedMail);
+//
+//  EDIT 4 — inside applySignature (around lines 2800-2814):
+//
+//      a) add the warm-start alongside the existing rulesP, and await it too:
+//
+//         const warmP = mobileWarmDefault(userEmail);
+//         await Promise.allSettled([composeTypeP, rulesP, warmP]);
+//
+//      b) add the in-activation retry directly after evaluateAndApply:
+//
+//         await evaluateAndApply(item, mailbox, seq);
+//         await mobileRetryIfNeeded(item, mailbox, t0);
+// =============================================================================
+
+// ── Mobile budgets ───────────────────────────────────────────────────────────
+// The host kills an event-based add-in 60s after activation, so every number
+// below has to fit inside that with room for the Office calls and the write.
+const MOBILE_ACTIVATION_CAP_MS = 60_000;
+
+// Per-request ceiling. FETCH_BUDGET_MS_COLD (8s) was tuned for a Mac on a
+// desktop network. A phone on LTE talking to a backend that may be cold-starting
+// needs more, and mobile has no send-time retry to fall back on.
+const MOBILE_FETCH_BUDGET_MS = 12_000;
+
+// Ceiling for one id -> HTML resolution, including its retries.
+const MOBILE_RESOLVE_BUDGET_MS = 15_000;
+
+// Transport-level retries per request. 0 disables retrying entirely.
+const MOBILE_FETCH_RETRIES = 2;
+const MOBILE_RETRY_BACKOFF_MS = 600;
+
+// Held back from the 60s cap for event.completed() and the body write.
+const MOBILE_RETRY_RESERVE_MS = 8_000;
+// Do not start a second full evaluation with less than this remaining.
+const MOBILE_RETRY_MIN_MS = 6_000;
+
+// PREFLIGHT-FREE FALLBACK. See simpleRequest() below. Leave this true: it costs
+// nothing until a request actually fails with a TypeError, and it is inert
+// unless the backend has been taught to read the two query parameters.
+const MOBILE_SIMPLE_REQUEST_FALLBACK = true;
+
+// ── Transport ────────────────────────────────────────────────────────────────
+
+/**
+ * The single door every API GET goes through.
+ *
+ * OFF MOBILE this is exactly `fetch(apiUrl(path), apiInit(mail, extra))` — the
+ * same URL, the same headers, the same init object, no retry, no fallback.
+ * Windows, Mac and OWA are therefore unchanged.
+ *
+ * ON MOBILE it adds: a bounded retry for transport failures and 5xx, and the
+ * preflight-free fallback described in simpleRequest().
+ */
+async function apiFetch(path, encryptedMail, extra = {}) {
+    if (!isMobile()) return fetch(apiUrl(path), apiInit(encryptedMail, extra));
+
+    let lastErr = null;
+
+    for (let attempt = 0; attempt <= MOBILE_FETCH_RETRIES; attempt++) {
+        if (attempt) await sleep(MOBILE_RETRY_BACKOFF_MS * attempt);
+
+        try {
+            const res = await fetch(apiUrl(path), apiInit(encryptedMail, extra));
+
+            // 5xx is worth one more try — a cold backend instance answers the
+            // second request. 4xx is a decision, not a blip: return it and let
+            // readApiError classify it (404 = unassigned, 412 = plan expired).
+            if (res.status >= 500 && attempt < MOBILE_FETCH_RETRIES) {
+                warn(`[mobile] ${path} -> ${res.status}, retrying (${attempt + 1}/${MOBILE_FETCH_RETRIES})`);
+                continue;
+            }
+            if (attempt) log(`[mobile] ${path} succeeded on attempt ${attempt + 1}`);
+            return res;
+
+        } catch (e) {
+            lastErr = e;
+            mobileClassifyTransportError(path, e, attempt);
+
+            // A TypeError from fetch is NOT "the phone is offline" — the phone
+            // has a network, Outlook just loaded this add-in over it. It means
+            // the request never completed at the transport/CORS layer, and
+            // repeating the identical request will fail identically. Try the
+            // shape of request that has no preflight instead.
+            if (MOBILE_SIMPLE_REQUEST_FALLBACK && e instanceof TypeError) {
+                const res = await simpleRequest(path, encryptedMail);
+                if (res) return res;
+            }
+        }
+    }
+
+    throw lastErr || new Error(`mobile fetch failed: ${path}`);
+}
+
+/**
+ * PREFLIGHT-FREE FALLBACK.
+ *
+ * `username` and `X-Platform` are not CORS-safelisted request headers, and the
+ * rules call additionally sends `Content-Type: application/json` on a GET (which
+ * has no body and does not need it). Any one of those forces the browser to send
+ * an OPTIONS preflight before every single API call.
+ *
+ * That makes the OPTIONS handler on ns-enterprise a hard dependency, and it is
+ * the single most common thing to differ between two deployments of the same
+ * API — especially when Access-Control-Allow-Origin is an explicit allowlist
+ * rather than "*", because the WebView origin Outlook mobile presents is not the
+ * same as the desktop one and will not be on a list copied from the old host.
+ *
+ * Sending the same two values as query parameters, with NO custom headers,
+ * makes this a CORS "simple request": no preflight, nothing for the ns host's
+ * OPTIONS handler to get wrong.
+ *
+ * ⚠ REQUIRES A SMALL, ADDITIVE BACKEND CHANGE: ns-enterprise must accept
+ * `username` and `xPlatform` as query parameters as an alternative to the
+ * headers. Until it does, this returns null and nothing changes — it is safe to
+ * ship ahead of the backend. Nothing on desktop ever reaches this function.
+ */
+async function simpleRequest(path, encryptedMail) {
+    try {
+        const url = apiUrl(path) +
+            `&username=${encodeURIComponent(encryptedMail)}` +
+            `&xPlatform=${encodeURIComponent(getXPlatform())}`;
+
+        // No headers at all, so no preflight is generated.
+        const res = await fetch(url, { method: "GET", cache: "no-store" });
+        log(`[mobile] preflight-free fallback ${path} -> ${res.status}`);
+        return res.ok ? res : null;
+    } catch (e) {
+        warn(`[mobile] preflight-free fallback also failed for ${path}:`, e?.message);
+        return null;
+    }
+}
+
+/**
+ * DIAGNOSTIC. Prints the one line that tells you which of the three candidate
+ * root causes you actually have. Read it from a phone attached to a debugger:
+ *   Safari > Develop > <device>   (iOS)
+ *   chrome://inspect              (Android)
+ *
+ *   "TypeError: Load failed" / "Failed to fetch"
+ *        -> the request never left, or the response was rejected before your
+ *           code saw it. CORS preflight or the TLS chain. Check that
+ *           ns-enterprise answers OPTIONS with Access-Control-Allow-Origin,
+ *           -Headers: username, X-Platform, Content-Type and -Methods: GET,
+ *           and that it serves the full intermediate certificate chain —
+ *           Windows and macOS fetch a missing intermediate via AIA, iOS and
+ *           Android WebViews generally do not.
+ *
+ *   "timed out after Nms"
+ *        -> the host answered too slowly for a cold phone runtime. Raise
+ *           MOBILE_FETCH_BUDGET_MS, and warm the ns backend.
+ *
+ *   an HTTP status in the log instead
+ *        -> the backend rejected it. Compare the request against the same call
+ *           made with X-Platform: WINDOWS.
+ */
+function mobileClassifyTransportError(path, e, attempt) {
+    const name = e?.name || "Error";
+    const msg = e?.message || String(e);
+    const kind =
+        /timed out/i.test(msg) ? "TIMEOUT (host too slow for a cold phone runtime)" :
+            name === "TypeError" ? "TRANSPORT/CORS (request never completed — preflight or TLS chain)" :
+                "UNKNOWN";
+    warn(`[mobile] ${path} attempt ${attempt + 1} failed — ${kind} — ${name}: ${msg}`);
+}
+
+// ── Warm start ───────────────────────────────────────────────────────────────
+
+/**
+ * On a phone the cache is empty at every activation, so the rules fetch and the
+ * signature fetch are two SERIAL round trips before a single byte can be
+ * written. Starting the DEFAULT signature now, in parallel with the rules,
+ * removes one of them from the critical path.
+ *
+ * Silent, and deduped by resolveSigHtml's own in-flight map, so if the rules end
+ * up selecting DEFAULT anyway applyById joins this fetch instead of issuing a
+ * second one. If a rule wins instead, the cost is one speculative request and
+ * the default is cached as the fallback resolveSigHtml wants anyway.
+ *
+ * No-op off mobile.
+ */
+async function mobileWarmDefault(userEmail) {
+    if (!isMobile() || !userEmail) return;
+    const t0 = Date.now();
+    try {
+        await resolveSigHtml(DEFAULT_ID, userEmail, {
+            silent: true,
+            budgetMs: MOBILE_RESOLVE_BUDGET_MS,
+        });
+        log(`[mobile] default warm-up finished in ${Date.now() - t0}ms`);
+    } catch (e) {
+        warn("[mobile] default warm-up failed:", e?.message);
+    }
+}
+
+// ── The second chance mobile never had ───────────────────────────────────────
+
+/**
+ * THE CORE OF THIS PATCH.
+ *
+ * On desktop, a compose-time failure is corrected at send. On mobile there is no
+ * send event, so a compose-time failure is final and the mail goes out bare.
+ * This puts the retry back where mobile can actually run it: inside the same
+ * activation, before event.completed().
+ *
+ * The success signal is P_ACTIVE_SIG. applySignature clears it on entry
+ * (markActiveSignature(item, null)) and evaluateAndApply only writes it back via
+ * persistDecision once a signature was actually applied — so "still empty" is a
+ * reliable "nothing landed on this mail".
+ *
+ * beginWrite() issues a fresh token AND clears the failure ledger, so the retry
+ * is reported as its own outcome rather than inheriting the first pass's error.
+ *
+ * No-op off mobile.
+ */
+async function mobileRetryIfNeeded(item, mailbox, t0) {
+    if (!isMobile()) return;
+
+    const applied = await getItemProp(item, P_ACTIVE_SIG);
+    if (applied) return;                      // something is on the mail
+
+    const spent = Date.now() - t0;
+    const left = MOBILE_ACTIVATION_CAP_MS - spent - MOBILE_RETRY_RESERVE_MS;
+
+    if (left < MOBILE_RETRY_MIN_MS) {
+        warn(`[mobile] nothing applied, but only ${left}ms of the 60s activation remains — not retrying`);
+        return;
+    }
+
+    warn(`[mobile] nothing applied on the first pass (${spent}ms spent) — retrying once with ${left}ms left`);
+
+    const seq2 = beginWrite();
+    try {
+        await withTimeout(evaluateAndApply(item, mailbox, seq2), left, "mobile retry");
+    } catch (e) {
+        warn("[mobile] retry did not finish inside the activation:", e.message);
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  LOGGING
 // ─────────────────────────────────────────────────────────────────────────────
@@ -659,13 +915,7 @@ const isColdRuntime = () => isMac() || isMobile();
 // chain of comparisons on every request and every log line.
 let _xPlatform = null;
 
-// v7.8 (III). Set once the backend has answered 2xx for a platform value other
-// than the one we would normally send. Sticky for the runtime: having learned
-// that WINDOWS works, there is no reason to pay the failed request again.
-let _xPlatformPinned = null;
-
 function getXPlatform() {
-    if (_xPlatformPinned) return _xPlatformPinned;
     if (_xPlatform) return _xPlatform;
     const p = detectPlatform();
     const base =
@@ -698,7 +948,9 @@ function withTimeout(promise, ms, label = "operation") {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The one place the per-call Office/network ceiling is decided.
-const budgetMs = () => (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
+const budgetMs = () =>
+    isMobile() ? MOBILE_FETCH_BUDGET_MS
+        : isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS;
 
 // Wrap a callback-style Office API in a promise with a hard ceiling, resolving
 // to `fallback` on failure or timeout so no caller can hang.
@@ -873,12 +1125,6 @@ const FAILURES = {
     too_large: {
         rank: 4, fatal: true,
         msg: "Signature exceeds the allowed size. Please contact Admin.",
-    },
-    // Distinct from too_large: this one is the host's hard API limit, so it
-    // fails on every device rather than being a local policy choice.
-    too_long: {
-        rank: 4, fatal: true,
-        msg: "Signature is too long to insert (over 30,000 characters). Please contact Admin.",
     },
     write_failed: {
         rank: 4, fatal: true,
@@ -1559,32 +1805,6 @@ const apiInit = (encryptedMail, extra) => ({
     headers: apiHeaders(encryptedMail, extra),
 });
 
-/**
- * v7.8 (III). THE ONE DOOR TO THE BACKEND, WITH A PLATFORM-HEADER RETRY.
- *
- * The X-Platform note in this file says the backend accepts WINDOWS only and
- * that MAC/MOBILE come back non-2xx; the shipped X_PLATFORM_MAP contradicts it.
- * Instead of guessing which is true, a non-2xx from a non-WINDOWS platform is
- * retried ONCE as WINDOWS. If that works, WINDOWS is pinned for the runtime and
- * nothing pays for the discovery again.
- *
- * Costs at most one extra request per runtime, and only on the platforms that
- * were failing outright anyway. A genuine 404/412 is returned untouched from
- * the retry, so plan-expiry and not-found classification are unaffected.
- */
-async function apiFetch(path, encryptedMail, extra = {}) {
-    const res = await fetch(apiUrl(path), apiInit(encryptedMail, extra));
-    if (res.ok || getXPlatform() === "WINDOWS") return res;
-
-    warn(`${path} returned ${res.status} with X-Platform=${getXPlatform()} — retrying as WINDOWS`);
-    const retry = await fetch(apiUrl(path), apiInit(encryptedMail, { ...extra, "X-Platform": "WINDOWS" }));
-    if (retry.ok) {
-        _xPlatformPinned = "WINDOWS";
-        log("backend accepted X-Platform=WINDOWS — pinned for this runtime");
-    }
-    return retry;
-}
-
 // Shown verbatim only when it is a real sentence: an exception class name or an
 // over-long string falls back to the canned wording rather than putting Java
 // package paths on the notification bar.
@@ -1609,7 +1829,8 @@ async function readApiError(res) {
 async function fetchRules(encryptedMail) {
     const xp = getXPlatform();
     try {
-        const res = await apiFetch("/rules-config/get-active", encryptedMail, { "Content-Type": "application/json" });
+        const res = await apiFetch("/rules-config/get-active", encryptedMail,
+            { "Content-Type": "application/json" });
         if (!res.ok) {
             // Status is logged WITH the platform header: a 4xx that disappears
             // when X-Platform is WINDOWS is fix (I), not a backend outage.
@@ -1686,7 +1907,8 @@ async function fetchDefaultSignature(encryptedMail) {
 // Same shape as fetchDefaultSignature so resolveSigHtml can treat both uniformly.
 async function fetchSignatureById(id, encryptedMail) {
     try {
-        const res = await apiFetch(`/rules-config/get/${encodeURIComponent(id)}`, encryptedMail);
+        const res = await apiFetch(`/rules-config/get/${encodeURIComponent(id)}`,
+            encryptedMail);
         if (!res.ok) {
             const { message, planExpired, raw } = await readApiError(res);
             err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`, raw);
@@ -2459,19 +2681,6 @@ async function verifySignatureOnBody(item, expectedHtml, id) {
 const hostCanSetSignature = (item) => typeof item?.body?.setSignatureAsync === "function";
 
 /**
- * v7.8 (I). DOES THIS HOST EVER RAISE OnMessageSend?
- *
- * Outlook mobile does not: its supported launch events are OnNewMessageCompose,
- * OnMessageRecipientsChanged and OnMessageFromChanged, and nothing else. So
- * "decide at compose, write at send" — which is what a deferral means — writes
- * the signature precisely never on a phone.
- *
- * Anywhere this returns false, the compose write is the ONLY write, and a host
- * that cannot perform it has genuinely failed rather than postponed.
- */
-const hostHasSendEvent = () => !isMobile();
-
-/**
  * FIX (N). Records failures instead of notifying. `silent` is for the
  * background revalidation rewrite, which happens after the outcome has already
  * been reported and must not retroactively colour it.
@@ -2482,16 +2691,6 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
     // v7.5: wrap so send time can find this block again. The wrapper counts
     // towards MAX_SIG_BYTES because it is part of what goes on the mail.
     const payload = sigId == null ? html : wrapSignature(html, sigId);
-
-    // v7.8 (II). The host counts CHARACTERS and rejects over 30,000 with
-    // DataExceedsMaximumSize, so that ceiling is checked first — it is the one
-    // that actually fires, and it explains the failure far better than a
-    // generic write error would.
-    if (payload.length > MAX_SIG_CHARS) {
-        warn(`signature ${payload.length} chars exceeds the host limit of ${MAX_SIG_CHARS} — not applying`);
-        fail("too_long", `${payload.length} chars > ${MAX_SIG_CHARS}`);
-        return false;
-    }
 
     const bytes = utf8Len(payload);
     if (bytes > MAX_SIG_BYTES) {
@@ -2506,14 +2705,10 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
             { ms: budgetMs(), label: "setSignatureAsync" }
         );
         if (res) { log(`signature written (${bytes}B)`); return true; }
-    } else if (!isSendTime && hostHasSendEvent()) {
+    } else if (!isSendTime) {
         // FIX (L). Not an error, and not the user's problem: this host defers
         // all signature writing to send. Record NOTHING, notify NOTHING, and let
         // the decision be persisted so the send runtime can act on it.
-        //
-        // v7.8 (I): ONLY legitimate where a send event actually exists. On
-        // mobile it does not, so falling through here would mean the signature
-        // is never written at all — which is exactly what was happening.
         log("setSignatureAsync unavailable at compose on this host — deferring the write to send");
         return false;
     } else {
@@ -2548,12 +2743,7 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
 
     // Nothing can be written at compose on this host — do not fetch, do not
     // record. evaluateAndApply still persists the id for the send runtime (L).
-    //
-    // v7.8 (I): deferring is only meaningful when a send event will follow.
-    // Outlook mobile raises no OnMessageSend, so a deferral there discards the
-    // signature silently. Where there is no send event we go on and write,
-    // and a host that truly cannot write reports a failure the user can see.
-    if (!isSendTime && !hostCanSetSignature(item) && hostHasSendEvent()) {
+    if (!isSendTime && !hostCanSetSignature(item)) {
         log(`host cannot write at compose — id=${key} decided but not applied yet`);
         return nothing("deferred");
     }
@@ -2937,7 +3127,11 @@ const applySignature = async function (event = { completed: () => { } }) {
             await fetchRules(await encryptEmail(userEmail));
         })().catch((e) => warn("rules refresh failed:", e));
 
-        await Promise.allSettled([composeTypeP, rulesP]);
+        // v7.7.1-mobile: start the DEFAULT signature fetch in parallel with the
+        // rules fetch. No-op on every platform except iOS/Android.
+        const warmP = mobileWarmDefault(userEmail);
+
+        await Promise.allSettled([composeTypeP, rulesP, warmP]);
 
         // Only overwrite the baseline with a real reading — a null would make
         // the next recipients-changed event compare against nothing. Memoised,
@@ -2946,6 +3140,10 @@ const applySignature = async function (event = { completed: () => { } }) {
         if (snap0 !== null) _lastSnapshot = snap0;
 
         await evaluateAndApply(item, mailbox, seq);
+
+        // v7.7.1-mobile: mobile has NO send-time second chance — OnMessageSend is
+        // not raised on iOS/Android. Retry inside this activation instead.
+        await mobileRetryIfNeeded(item, mailbox, t0);
 
         // FIX (J). Mobile gets the default warmed, but not every rule signature.
         // Silent by design — see prefetchSignatures.
