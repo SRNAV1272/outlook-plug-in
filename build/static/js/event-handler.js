@@ -1,1370 +1,14 @@
-/*!
- * html-content-signature v2
- * ------------------------------------------------------------------
- * Deterministic canonical signature of an HTML body's *rendered content*,
- * for detecting tampering by comparing two signatures.
- *
- * Design goals (in priority order):
- *   1. HOST INDEPENDENCE - the default path is a pure string tokenizer, so
- *      New Outlook (Chromium/WebView2) and Classic Outlook (mshtml/IE11)
- *      produce byte-identical signatures. No DOMParser required.
- *   2. UNFORGEABLE ENCODING - tokens are JSON-encoded, so no text content
- *      can imitate a structural token (the old "|"/":" scheme could).
- *   3. NO BLIND SPOTS THAT CHANGE WHAT THE USER SEES OR CLICKS -
- *      link targets, srcset, CSS urls, style/script bodies are covered.
- *   4. NO FALSE POSITIVES on benign re-serialization - comments, inline
- *      wrapper churn, entity form, whitespace form, NBSP, zero-width junk.
- *
- * Usage:
- *   var sig = HtmlContentSignature.signature(html);        // canonical string
- *   HtmlContentSignature.equal(a, b);                      // boolean
- *   HtmlContentSignature.diff(a, b);                       // where they differ
- *   HtmlContentSignature.digest(html);                     // short, NON-crypto
- *
- * NOTE ON TRUST: this is an integrity *diff*, not a MAC. If the baseline
- * signature travels with the message or is stored client-side, an attacker
- * who can edit the HTML can also edit the baseline. Sign/HMAC the canonical
- * string server-side if you need authenticity, not just change detection.
- */
-(function (root, factory) {
-    "use strict";
-    if (typeof module === "object" && module.exports) module.exports = factory();
-    else root.HtmlContentSignature = factory();
-})(
-    // Classic Outlook's JSRuntime is not a clean browser-or-node global: resolve
-    // through every known name, same trick as the patched CryptoJS UMD wrapper
-    // that ships alongside this file in the classic bundle.
-    (typeof self !== "undefined" && self) ||
-    (typeof window !== "undefined" && window) ||
-    (typeof globalThis !== "undefined" && globalThis) ||
-    this,
-    function () {
-        "use strict";
-
-        var VERSION = "hcs2";
-
-        /* ---------------------------------------------------------------- tables */
-
-        // Elements whose content is raw text, not markup.
-        var RAW_TEXT = {
-            script: 1, style: 1, title: 1, textarea: 1,
-            xmp: 1, noscript: 1, noframes: 1, plaintext: 1
-        };
-
-        // Elements that force a visual break between text runs.
-        var BLOCK = {
-            address: 1, article: 1, aside: 1, blockquote: 1, body: 1, br: 1,
-            caption: 1, center: 1, col: 1, colgroup: 1, dd: 1, details: 1, dialog: 1,
-            dir: 1, div: 1, dl: 1, dt: 1, fieldset: 1, figcaption: 1, figure: 1,
-            footer: 1, form: 1, h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1, header: 1,
-            hgroup: 1, hr: 1, html: 1, legend: 1, li: 1, main: 1, menu: 1, nav: 1,
-            ol: 1, optgroup: 1, option: 1, p: 1, pre: 1, section: 1, summary: 1,
-            table: 1, tbody: 1, td: 1, tfoot: 1, th: 1, thead: 1, tr: 1, ul: 1
-        };
-
-        // URL-bearing attributes, in FIXED order so emission is deterministic.
-        var URL_ATTRS = [
-            "src", "srcset", "poster", "background", "data",
-            "xlink:href", "formaction", "action", "dynsrc", "lowsrc"
-        ];
-
-        var NAMED = {
-            amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00A0",
-            ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", zwnj: "\u200C", zwj: "\u200D",
-            lrm: "\u200E", rlm: "\u200F", shy: "\u00AD",
-            ndash: "\u2013", mdash: "\u2014", lsquo: "\u2018", rsquo: "\u2019",
-            sbquo: "\u201A", ldquo: "\u201C", rdquo: "\u201D", bdquo: "\u201E",
-            dagger: "\u2020", Dagger: "\u2021", bull: "\u2022", hellip: "\u2026",
-            permil: "\u2030", prime: "\u2032", Prime: "\u2033", lsaquo: "\u2039",
-            rsaquo: "\u203A", oline: "\u203E", frasl: "\u2044", euro: "\u20AC",
-            trade: "\u2122", copy: "\u00A9", reg: "\u00AE", deg: "\u00B0",
-            plusmn: "\u00B1", middot: "\u00B7", laquo: "\u00AB", raquo: "\u00BB",
-            times: "\u00D7", divide: "\u00F7", frac12: "\u00BD", frac14: "\u00BC",
-            frac34: "\u00BE", pound: "\u00A3", yen: "\u00A5", cent: "\u00A2",
-            curren: "\u00A4", sect: "\u00A7", para: "\u00B6", micro: "\u00B5",
-            iexcl: "\u00A1", iquest: "\u00BF", brvbar: "\u00A6", uml: "\u00A8",
-            not: "\u00AC", macr: "\u00AF", acute: "\u00B4", cedil: "\u00B8",
-            sup1: "\u00B9", sup2: "\u00B2", sup3: "\u00B3", ordm: "\u00BA", ordf: "\u00AA",
-            agrave: "\u00E0", aacute: "\u00E1", acirc: "\u00E2", atilde: "\u00E3",
-            auml: "\u00E4", aring: "\u00E5", ccedil: "\u00E7", egrave: "\u00E8",
-            eacute: "\u00E9", ecirc: "\u00EA", euml: "\u00EB", igrave: "\u00EC",
-            iacute: "\u00ED", icirc: "\u00EE", iuml: "\u00EF", ntilde: "\u00F1",
-            ograve: "\u00F2", oacute: "\u00F3", ocirc: "\u00F4", otilde: "\u00F5",
-            ouml: "\u00F6", ugrave: "\u00F9", uacute: "\u00FA", ucirc: "\u00FB",
-            uuml: "\u00FC", yacute: "\u00FD", szlig: "\u00DF",
-            Agrave: "\u00C0", Aacute: "\u00C1", Auml: "\u00C4", Ccedil: "\u00C7",
-            Egrave: "\u00C8", Eacute: "\u00C9", Ouml: "\u00D6", Uuml: "\u00DC",
-            Ntilde: "\u00D1"
-        };
-
-        // Entities browsers decode even without a trailing semicolon.
-        var NO_SEMI = {
-            amp: 1, lt: 1, gt: 1, quot: 1, nbsp: 1, copy: 1, reg: 1, deg: 1, pound: 1,
-            yen: 1, cent: 1, sect: 1, middot: 1, times: 1, divide: 1, not: 1, shy: 1,
-            macr: 1, acute: 1, uml: 1, para: 1, micro: 1
-        };
-
-        // Invisible / formatting characters that cannot change what is rendered.
-        var ZERO_WIDTH = /[\u00AD\u200B\u200C\u200D\u200E\u200F\u2060\u2061\u2062\u2063\u2064\uFEFF]/g;
-        // Everything HTML treats as collapsible whitespace, incl. NBSP + Unicode spaces.
-        var WHITESPACE = /[\t\n\f\r \u000B\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g;
-
-        var DEFAULTS = {
-            links: true,        // capture <a href> / <area href> targets
-            media: true,        // capture src / srcset / poster / background / ...
-            css: true,          // capture <style> bodies and style="" url()s
-            scriptBodies: true, // capture <script> bodies
-            breaks: true,       // emit break tokens at block boundaries
-            normalizeUnicode: true, // NFC, so composed vs decomposed compare equal
-            lowercaseUrls: false,   // off: URL paths are case-sensitive
-            // Collapse cid:/blob:/data: URLs to one placeholder. REQUIRED when
-            // comparing against a live Outlook draft body: the host rewrites remote
-            // <img src> to cid: attachment references as soon as the signature is
-            // inserted, so a strict URL compare reports every desktop draft as tampered.
-            // http(s) URLs stay strict - those are the ones worth guarding.
-            hostRewrittenUrls: false
-        };
-
-        /* --------------------------------------------------------------- helpers */
-
-        function options(o) {
-            var out = {}, k;
-            for (k in DEFAULTS) if (DEFAULTS.hasOwnProperty(k)) out[k] = DEFAULTS[k];
-            if (o) for (k in o) if (o.hasOwnProperty(k) && out.hasOwnProperty(k)) out[k] = o[k];
-            return out;
-        }
-
-        function fromCodePoint(cp) {
-            if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "\uFFFD";
-            if (cp > 0xffff) {
-                cp -= 0x10000;
-                return String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
-            }
-            return String.fromCharCode(cp);
-        }
-
-        var ENT_RE = /&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31})(;?)/g;
-
-        function decodeEntities(str) {
-            if (str.indexOf("&") === -1) return str;
-            return str.replace(ENT_RE, function (m, body, semi) {
-                if (body.charAt(0) === "#") {
-                    var cp = body.charAt(1) === "x" || body.charAt(1) === "X"
-                        ? parseInt(body.slice(2), 16)
-                        : parseInt(body.slice(1), 10);
-                    if (isNaN(cp)) return m;
-                    return fromCodePoint(cp);
-                }
-                if (NAMED.hasOwnProperty(body) && (semi || NO_SEMI[body])) return NAMED[body];
-                // Unknown entity: leave verbatim. Deterministic on every host.
-                return m;
-            });
-        }
-
-        function normalizeText(s, o) {
-            s = s.replace(ZERO_WIDTH, "");
-            if (o.normalizeUnicode && typeof s.normalize === "function") {
-                try { s = s.normalize("NFC"); } catch (e) { /* older hosts */ }
-            }
-            return s.replace(WHITESPACE, " ");
-        }
-
-        // Browsers strip tabs/newlines/CRs from URLs and trim surrounding whitespace.
-        function normalizeUrl(v, o) {
-            if (v == null) return "";
-            v = decodeEntities(String(v)).replace(/[\t\n\r]+/g, "").replace(ZERO_WIDTH, "");
-            v = v.replace(/^[\s\u00A0]+|[\s\u00A0]+$/g, "");
-            if (o.hostRewrittenUrls && /^(?:cid|blob|data):/i.test(v)) return "@embedded";
-            return o.lowercaseUrls ? v.toLowerCase() : v;
-        }
-
-        function normalizeSrcset(v, o) {
-            // "a.png 1x,  b.png 2x" -> "a.png 1x,b.png 2x" (order preserved, ws collapsed)
-            var parts = String(v == null ? "" : v).split(",");
-            var res = [], i, p, sp, url, desc;
-            for (i = 0; i < parts.length; i++) {
-                p = decodeEntities(parts[i]).replace(WHITESPACE, " ").replace(/^ | $/g, "");
-                if (!p) continue;
-                sp = p.indexOf(" ");
-                url = sp === -1 ? p : p.slice(0, sp);
-                desc = sp === -1 ? "" : " " + p.slice(sp + 1);
-                res.push(normalizeUrl(url, o) + desc);
-            }
-            return res.join(",");
-        }
-
-        var CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi;
-
-        function cssUrls(css, o) {
-            var found = [], m;
-            CSS_URL_RE.lastIndex = 0;
-            while ((m = CSS_URL_RE.exec(css)) !== null) {
-                var u = normalizeUrl(m[1] != null ? m[1] : (m[2] != null ? m[2] : m[3]), o);
-                if (u) found.push(u);
-                if (CSS_URL_RE.lastIndex === m.index) CSS_URL_RE.lastIndex++; // guard
-            }
-            return found;
-        }
-
-        /* ---------------------------------------------------------- token emitter */
-
-        function Emitter(o) {
-            this.o = o;
-            this.tokens = [];
-            this.buf = [];
-            this.pendingSpace = false;
-        }
-
-        Emitter.prototype.flush = function () {
-            if (this.buf.length) {
-                this.tokens.push(["t", this.buf.join("")]);
-                this.buf.length = 0;
-            }
-            this.pendingSpace = false;
-        };
-
-        Emitter.prototype.text = function (raw, alreadyDecoded) {
-            if (!raw) return;
-            var t = normalizeText(alreadyDecoded ? raw : decodeEntities(raw), this.o);
-            if (!t) return;
-            if (t === " ") { if (this.buf.length) this.pendingSpace = true; return; }
-            var lead = t.charAt(0) === " ";
-            var trail = t.charAt(t.length - 1) === " ";
-            var core = t.replace(/^ +| +$/g, "");
-            if (this.buf.length && (this.pendingSpace || lead)) this.buf.push(" ");
-            this.buf.push(core);
-            this.pendingSpace = trail;
-        };
-
-        Emitter.prototype.token = function (arr) {
-            this.flush();
-            this.tokens.push(arr);
-        };
-
-        Emitter.prototype.brk = function () {
-            if (!this.o.breaks) { if (this.buf.length) this.pendingSpace = true; return; }
-            this.flush();
-            var last = this.tokens[this.tokens.length - 1];
-            if (!this.tokens.length) return;                 // no leading break
-            if (last && last.length === 1 && last[0] === "b") return; // no doubles
-            this.tokens.push(["b"]);
-        };
-
-        // Shared per-element handling for both the tokenizer and the DOM walker.
-        Emitter.prototype.element = function (tag, getAttr) {
-            var o = this.o, i, a, v;
-
-            if (BLOCK[tag]) this.brk();
-
-            if (o.media) {
-                for (i = 0; i < URL_ATTRS.length; i++) {
-                    a = URL_ATTRS[i];
-                    v = getAttr(a);
-                    if (v == null) continue;
-                    this.token(["u", tag, a, a === "srcset" ? normalizeSrcset(v, o) : normalizeUrl(v, o)]);
-                }
-            }
-
-            if (o.links && (tag === "a" || tag === "area" || tag === "link")) {
-                v = getAttr("href");
-                if (v != null) this.token(["h", tag, normalizeUrl(v, o)]);
-            }
-
-            // <img> must always be visible in the signature, even with no src,
-            // because its mere presence is rendered content.
-            if (tag === "img" || tag === "image" || tag === "input" || tag === "object" ||
-                tag === "embed" || tag === "iframe" || tag === "video" || tag === "audio" ||
-                tag === "svg" || tag === "canvas") {
-                this.token(["e", tag]);
-                if (tag === "input") {
-                    v = getAttr("type");
-                    if (v != null) this.token(["a", "type", normalizeText(decodeEntities(String(v)), o)]);
-                    v = getAttr("value");
-                    if (v != null) this.token(["a", "value", normalizeText(decodeEntities(String(v)), o)]);
-                }
-            }
-
-            if (o.css) {
-                v = getAttr("style");
-                if (v != null) {
-                    var urls = cssUrls(decodeEntities(String(v)), o);
-                    for (i = 0; i < urls.length; i++) this.token(["c", urls[i]]);
-                }
-            }
-        };
-
-        Emitter.prototype.rawBody = function (tag, body) {
-            var o = this.o, i, urls;
-            if (tag === "style") {
-                if (!o.css) return;
-                body = normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "");
-                this.token(["s", "style", body]);
-                return;
-            }
-            if (tag === "script") {
-                if (!o.scriptBodies) return;
-                body = body.replace(WHITESPACE, " ").replace(/^ +| +$/g, "");
-                this.token(["s", "script", body]);
-                return;
-            }
-            if (tag === "textarea" || tag === "title") {
-                this.token(["s", tag, normalizeText(decodeEntities(body), o).replace(/^ +| +$/g, "")]);
-                return;
-            }
-            // noscript / noframes / xmp / plaintext: treat body as visible text
-            this.text(body);
-        };
-
-        Emitter.prototype.finish = function () {
-            this.flush();
-            var t = this.tokens;
-            while (t.length && t[t.length - 1].length === 1 && t[t.length - 1][0] === "b") t.pop();
-            return t;
-        };
-
-        /* --------------------------------------------------- tokenizer (default) */
-
-        function attrGetter(attrs) {
-            return function (name) {
-                return attrs.hasOwnProperty(name) ? attrs[name] : null;
-            };
-        }
-
-        var ATTR_RE = /([^\s=\/>"'][^\s=\/>]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*)))?/g;
-
-        function parseAttrs(src) {
-            var attrs = {}, m, name;
-            ATTR_RE.lastIndex = 0;
-            while ((m = ATTR_RE.exec(src)) !== null) {
-                if (ATTR_RE.lastIndex === m.index) { ATTR_RE.lastIndex++; continue; }
-                name = m[1].toLowerCase();
-                if (name === "/" || !name) continue;
-                var val = m[2] != null ? m[2] : (m[3] != null ? m[3] : (m[4] != null ? m[4] : ""));
-                // First occurrence wins, matching the HTML parser.
-                if (!attrs.hasOwnProperty(name)) attrs[name] = val;
-            }
-            return attrs;
-        }
-
-        function tokenize(html, o) {
-            var s = html == null ? "" : String(html);
-            var n = s.length, i = 0, em = new Emitter(o), guard = 0;
-
-            while (i < n) {
-                if (++guard > n * 4 + 16) break; // paranoia: never loop forever
-
-                var lt = s.indexOf("<", i);
-                if (lt < 0) { em.text(s.slice(i)); break; }
-                if (lt > i) em.text(s.slice(i, lt));
-
-                var next = s.charAt(lt + 1);
-
-                // Comments (incl. IE conditional comments) - skipped on every host.
-                if (s.substr(lt, 4) === "<!--") {
-                    var endC = s.indexOf("-->", lt + 4);
-                    if (endC < 0) { i = n; break; }
-                    i = endC + 3;
-                    continue;
-                }
-                // Doctype, CDATA, processing instructions, bogus comments.
-                if (next === "!" || next === "?") {
-                    var endB = s.indexOf(">", lt + 2);
-                    i = endB < 0 ? n : endB + 1;
-                    continue;
-                }
-
-                var isEnd = next === "/";
-                var nameStart = lt + (isEnd ? 2 : 1);
-                var ch = s.charAt(nameStart);
-                if (!/[a-zA-Z]/.test(ch)) {           // a literal "<" in text
-                    em.text("<");
-                    i = lt + 1;
-                    continue;
-                }
-
-                var p = nameStart;
-                while (p < n && /[^\s\/>]/.test(s.charAt(p))) p++;
-                var tag = s.slice(nameStart, p).toLowerCase();
-
-                // Find the tag's ">" while respecting quoted attribute values.
-                var q = p, quote = "";
-                while (q < n) {
-                    var c = s.charAt(q);
-                    if (quote) { if (c === quote) quote = ""; }
-                    else if (c === '"' || c === "'") quote = c;
-                    else if (c === ">") break;
-                    q++;
-                }
-                var attrSrc = s.slice(p, q);
-                i = (q < n ? q + 1 : n);
-
-                if (isEnd) {
-                    if (BLOCK[tag]) em.brk();
-                    if (o.links && tag === "a") em.token(["/h"]);
-                    continue;
-                }
-
-                var attrs = parseAttrs(attrSrc);
-                em.element(tag, attrGetter(attrs));
-
-                if (RAW_TEXT[tag]) {
-                    if (tag === "plaintext") { em.rawBody(tag, s.slice(i)); i = n; continue; }
-                    var close = -1, from = i;
-                    // case-insensitive search for "</tag"
-                    var lower = s.toLowerCase(), needle = "</" + tag;
-                    close = lower.indexOf(needle, from);
-                    if (close < 0) { em.rawBody(tag, s.slice(from)); i = n; continue; }
-                    em.rawBody(tag, s.slice(from, close));
-                    i = close; // end tag consumed on the next iteration
-                }
-            }
-
-            return em.finish();
-        }
-
-        /* ------------------------------------------------- DOM path (diagnostic) */
-
-        var TEXT_NODE = 3, ELEMENT_NODE = 1;
-
-        function domParserSupportsHtml() {
-            try {
-                if (typeof DOMParser === "undefined") return false;
-                var d = new DOMParser().parseFromString("<i>x</i>", "text/html");
-                return !!(d && d.body && d.body.textContent === "x");
-            } catch (e) { return false; }
-        }
-
-        function parseToBody(html) {
-            var str = html == null ? "" : String(html);
-            if (domParserSupportsHtml()) {
-                var d = new DOMParser().parseFromString(str, "text/html");
-                if (d && d.body) return d.body;
-            }
-            if (typeof document !== "undefined" && document.implementation &&
-                document.implementation.createHTMLDocument) {
-                var doc = document.implementation.createHTMLDocument("");
-                // Neutralise loading attributes so an inert parse cannot hit the network,
-                // then read them back from their data-* twins.
-                doc.body.innerHTML = str.replace(
-                    /\s(src|srcset|background|poster|lowsrc|dynsrc)\s*=/gi,
-                    " data-hcs-$1="
-                );
-                return doc.body;
-            }
-            return null;
-        }
-
-        function domAttrGetter(el) {
-            return function (name) {
-                if (el.hasAttribute && el.hasAttribute(name)) return el.getAttribute(name);
-                if (el.hasAttribute && el.hasAttribute("data-hcs-" + name)) {
-                    return el.getAttribute("data-hcs-" + name);
-                }
-                return null;
-            };
-        }
-
-        function tokenizeDom(html, o) {
-            var body = parseToBody(html);
-            var em = new Emitter(o);
-            if (!body) return null;
-
-            var stack = [{ node: body, i: 0, entered: false }];
-            while (stack.length) {
-                var top = stack[stack.length - 1];
-                var node = top.node;
-
-                if (!top.entered) {
-                    top.entered = true;
-                    if (node !== body && node.nodeType === ELEMENT_NODE) {
-                        var tag = String(node.tagName || "").toLowerCase();
-                        em.element(tag, domAttrGetter(node));
-                        if (RAW_TEXT[tag]) {
-                            em.rawBody(tag, node.textContent || "");
-                            stack.pop();
-                            continue;
-                        }
-                    }
-                }
-
-                var kids = node.childNodes;
-                if (kids && top.i < kids.length) {
-                    var child = kids[top.i++];
-                    if (child.nodeType === TEXT_NODE) em.text(child.nodeValue || "", true);
-                    else if (child.nodeType === ELEMENT_NODE) stack.push({ node: child, i: 0, entered: false });
-                    continue;
-                }
-
-                if (node !== body && node.nodeType === ELEMENT_NODE) {
-                    var t2 = String(node.tagName || "").toLowerCase();
-                    if (BLOCK[t2]) em.brk();
-                    if (o.links && t2 === "a") em.token(["/h"]);
-                }
-                stack.pop();
-            }
-            return em.finish();
-        }
-
-        /* ------------------------------------------------- marked region extraction
-      
-           Locating "the signature" inside a draft body needs an anchor, because
-           setSignatureAsync does NOT always put the block at the end (on a reply it
-           sits above the quoted original). Wrap what you write in a marked element
-           and pull it back out by that attribute.
-      
-           Void elements never open a depth level; raw-text elements are skipped so a
-           marker mentioned inside <style> or a comment cannot be mistaken for one.
-        ------------------------------------------------------------------------- */
-
-        var VOID = {
-            area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1,
-            link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1
-        };
-
-        function isAlpha(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }
-        function isTagNameEnd(c) {
-            return c === 32 || c === 9 || c === 10 || c === 13 || c === 12 || c === 47 || c === 62;
-        }
-
-        /**
-         * Every element carrying `attr`, with its inner HTML and the attribute value.
-         *
-         * PERFORMANCE NOTE: this is one flat loop over char codes on purpose. The
-         * first version walked tags through a callback and allocated a descriptor
-         * object per tag; V8 ran it at ~14ms for three calls and then, once the
-         * function was optimised, at ~575ms on the SAME 140KB input - a 40x deopt
-         * cliff that would land squarely inside the send budget. Do not reintroduce
-         * a per-tag callback or per-tag object here.
-         *
-         * @returns {Array<{value:string, inner:string, tag:string, start:number, end:number}>}
-         *   start/end bracket the whole element, so a caller can compare against a
-         *   quote boundary and discard copies sitting in the quoted thread.
-         */
-        function extractMarkedRegions(html, attr) {
-            var s = String(html == null ? "" : html);
-            var a = String(attr).toLowerCase();
-            var found = [];
-            if (!s || s.indexOf("<") === -1) return found;
-
-            var lower = s.toLowerCase();
-            if (lower.indexOf(a) === -1) return found;   // no marker anywhere: done
-
-            var n = s.length, i = 0;
-            var openTag = "", depth = 0, innerStart = 0, openValue = "", openStart = 0;
-
-            while (i < n) {
-                var lt = s.indexOf("<", i);
-                if (lt < 0) break;
-
-                // <!-- comment -->  (also swallows IE conditional comment blocks)
-                if (s.charCodeAt(lt + 1) === 33 && s.charCodeAt(lt + 2) === 45 && s.charCodeAt(lt + 3) === 45) {
-                    var ec = s.indexOf("-->", lt + 4);
-                    i = ec < 0 ? n : ec + 3;
-                    continue;
-                }
-                var nc = s.charCodeAt(lt + 1);
-                if (nc === 33 || nc === 63) {              // doctype / PI / bogus comment
-                    var eb = s.indexOf(">", lt + 2);
-                    i = eb < 0 ? n : eb + 1;
-                    continue;
-                }
-
-                var isEnd = nc === 47;
-                var ns = lt + (isEnd ? 2 : 1);
-                if (!isAlpha(s.charCodeAt(ns))) { i = lt + 1; continue; }
-
-                var p = ns;
-                while (p < n && !isTagNameEnd(s.charCodeAt(p))) p++;
-                var tag = lower.slice(ns, p);
-
-                var q = p, quote = 0;
-                while (q < n) {
-                    var c = s.charCodeAt(q);
-                    if (quote) { if (c === quote) quote = 0; }
-                    else if (c === 34 || c === 39) quote = c;
-                    else if (c === 62) break;
-                    q++;
-                }
-                var afterTag = (q < n ? q + 1 : n);
-                // "/>" or a void element never opens a depth level.
-                var selfClosing = !!VOID[tag] || (function () {
-                    var k = q - 1;
-                    while (k > p && isTagNameEnd(s.charCodeAt(k)) && s.charCodeAt(k) !== 47) k--;
-                    return s.charCodeAt(k) === 47;
-                })();
-
-                if (depth > 0) {
-                    if (tag === openTag) {
-                        if (isEnd) {
-                            if (--depth === 0) {
-                                found.push({
-                                    value: openValue, tag: openTag, inner: s.slice(innerStart, lt),
-                                    start: openStart, end: afterTag
-                                });
-                            }
-                        } else if (!selfClosing) depth++;
-                    }
-                } else if (!isEnd && !selfClosing && q - p > a.length) {
-                    // Search WITHIN this tag only. `lower.indexOf(a, p)` would scan to the
-                    // end of the document for every tag that lacks the marker - O(n^2), and
-                    // ~155ms on a 140KB reply thread.
-                    var attrSrc = lower.slice(p, q);
-                    var attrs = attrSrc.indexOf(a) === -1 ? null : parseAttrs(s.slice(p, q));
-                    if (attrs && attrs.hasOwnProperty(a)) {
-                        openTag = tag;
-                        depth = 1;
-                        innerStart = afterTag;
-                        openStart = lt;
-                        openValue = decodeEntities(attrs[a] || "");
-                    }
-                }
-
-                i = afterTag;
-                // Never look for markers inside <style>/<script>/<textarea>/<title>.
-                if (!isEnd && RAW_TEXT[tag]) {
-                    var close = lower.indexOf("</" + tag, i);
-                    i = close < 0 ? n : close;
-                }
-            }
-
-            // Unclosed marker (truncated body, or the host mangled the wrapper): take
-            // everything after it rather than reporting nothing.
-            if (depth > 0) {
-                found.push({
-                    value: openValue, tag: openTag, inner: s.slice(innerStart),
-                    start: openStart, end: s.length
-                });
-            }
-            return found;
-        }
-
-        /* ------------------------------------------------- draft / quote splitting
-      
-           A reply or forward body is NOT just the signature and the user's text: it
-           also carries the quoted thread, which very often contains an intact copy of
-           the same signature (any earlier mail in the thread that we signed). Search
-           the whole body and that copy answers "is the signature intact?" on behalf
-           of the live one — so an edited or deleted live signature reads as
-           identical. Verification must be scoped to the live part.
-      
-           These markers are the separators Outlook and other clients put in front of
-           the quoted section. They are deliberately high-signal: the EARLIEST match
-           wins, so a false positive would truncate too early, report the signature as
-           absent, and cause a rewrite - the safe direction. A bare <hr> is not in the
-           list precisely because signatures contain them.
-        ------------------------------------------------------------------------- */
-
-        var QUOTE_MARKERS = [
-            "appendonsend",                                 // OWA / New Outlook anchor
-            "divrplyfwdmsg",                                // Outlook desktop (and x_ prefixed)
-            "mail-editor-reference-message-container",       // OWA
-            "-----original message-----",                    // Outlook plain separator
-            "-------- original message --------",            // mobile / other clients
-            "id=\"stopspelling\"", "id='stopspelling'",      // Outlook Windows separator
-            "blockquote type=\"cite\"", "blockquote type='cite'", // Mac Outlook, Apple Mail
-            "gmail_quote",                                   // Gmail
-            "yahoo_quoted",                                  // Yahoo
-            "ms-outlook-mobile-reference-message",            // Outlook mobile
-            "border-top:solid #e1e1e1 1.0pt"                 // Word's reply separator
-        ];
-
-        /**
-         * Split a draft body into the live compose area and the quoted thread.
-         * @returns {{live:string, quoted:string, boundary:number}}
-         *   boundary === html.length when no quoted section was found.
-         */
-        function splitDraftAtQuote(html) {
-            var s = String(html == null ? "" : html);
-            var lower = s.toLowerCase();
-            var at = -1;
-            for (var i = 0; i < QUOTE_MARKERS.length; i++) {
-                var hit = lower.indexOf(QUOTE_MARKERS[i]);
-                if (hit !== -1 && (at === -1 || hit < at)) at = hit;
-            }
-            if (at === -1) return { live: s, quoted: "", boundary: s.length };
-            // Rewind to the start of the tag the marker sits in, so a marked signature
-            // ending right before the separator is not clipped mid-element.
-            var lt = s.lastIndexOf("<", at);
-            if (lt !== -1) at = lt;
-            return { live: s.slice(0, at), quoted: s.slice(at), boundary: at };
-        }
-
-        // Ready-made option sets. `body` is the one to use against a draft body.
-        var PROFILES = {
-            // Byte-for-byte content equality. For comparing two stored copies.
-            strict: {},
-            // For comparing a stored signature against what is in an Outlook draft.
-            // CSS and script bodies are excluded because the Word and OWA editors
-            // rewrite style blocks and inline CSS wholesale - keeping them guarantees a
-            // mismatch on every desktop draft. What remains is what tampering has to
-            // touch to be harmful: visible text, link targets, image identity, order.
-            body: { css: false, scriptBodies: false, hostRewrittenUrls: true }
-        };
-
-        function keyOf(tok) { return JSON.stringify(tok); }
-
-        /**
-         * Token equality with ONE asymmetric allowance: when hostRewrittenUrls is on,
-         * "@embedded" in the URL slot of a ["u", tag, attr, url] token matches any
-         * URL on the other side. The cached copy says
-         * src="https://cdn.example/logo.png"; the draft says src="cid:image001.png"
-         * because Outlook attached and rewrote it. Both describe the same image.
-         *
-         * KNOWN LIMIT: this means an attacker who replaces the logo with ANOTHER
-         * cid: attachment is not caught by URL. Image count, position, and every
-         * text and href token are still compared strictly, which is what makes a
-         * misleading signature hard to build.
-         */
-        function tokEq(x, y, wild) {
-            if (x.length !== y.length) return false;
-            for (var i = 0; i < x.length; i++) {
-                if (x[i] === y[i]) continue;
-                if (wild && x[0] === "u" && i === 3 && (x[3] === "@embedded" || y[3] === "@embedded")) continue;
-                return false;
-            }
-            return true;
-        }
-
-        function runsEqual(a, b, wild) {
-            if (a.length !== b.length) return false;
-            for (var i = 0; i < a.length; i++) if (!tokEq(a[i], b[i], wild)) return false;
-            return true;
-        }
-
-        function stripEdgeBreaks(toks) {
-            var a = 0, b = toks.length;
-            while (a < b && toks[a].length === 1 && toks[a][0] === "b") a++;
-            while (b > a && toks[b - 1].length === 1 && toks[b - 1][0] === "b") b--;
-            return toks.slice(a, b);
-        }
-
-        // Index of the first contiguous occurrence of `needle` in `hay`, or -1.
-        // Exact string-key pass first (fast); only retried with the URL wildcard if
-        // that misses and the caller asked for host tolerance.
-        function indexOfTokenRun(hay, needle, wild) {
-            if (!needle.length) return -1;
-            var hk = hay.map(keyOf), nk = needle.map(keyOf);
-            var limit = hk.length - nk.length, i, j, ok;
-            for (i = 0; i <= limit; i++) {
-                ok = true;
-                for (j = 0; j < nk.length; j++) if (hk[i + j] !== nk[j]) { ok = false; break; }
-                if (ok) return i;
-            }
-            if (!wild) return -1;
-            for (i = 0; i <= limit; i++) {
-                ok = true;
-                for (j = 0; j < needle.length; j++) if (!tokEq(hay[i + j], needle[j], true)) { ok = false; break; }
-                if (ok) return i;
-            }
-            return -1;
-        }
-
-        // Fraction of the expected tokens present anywhere in the body (multiset).
-        // Diagnostic only: it separates "edited" from "not there at all".
-        function overlap(expected, actual) {
-            var want = stripEdgeBreaks(expected).filter(function (t) { return t[0] !== "b"; });
-            if (!want.length) return 1;
-            var bag = {}, i, k;
-            for (i = 0; i < actual.length; i++) {
-                k = keyOf(actual[i]);
-                bag[k] = (bag[k] || 0) + 1;
-            }
-            var hit = 0;
-            for (i = 0; i < want.length; i++) {
-                k = keyOf(want[i]);
-                if (bag[k] > 0) { bag[k]--; hit++; }
-            }
-            return hit / want.length;
-        }
-
-        /**
-         * Is `expectedHtml` present, unmodified, inside `containerHtml`?
-         *
-         * @returns {{verdict:"identical"|"modified"|"absent", at:number, overlap:number}}
-         *   identical - found as an intact contiguous run
-         *   modified  - much of it is there but not intact
-         *   absent    - not meaningfully there at all
-         */
-        function verifyRegion(expectedHtml, containerHtml, o) {
-            var opt = options(o);
-            var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
-            var act = tokenize(containerHtml, opt);
-            if (!exp.length) return { verdict: "absent", at: -1, overlap: 0 };
-            var at = indexOfTokenRun(act, exp, opt.hostRewrittenUrls);
-            if (at >= 0) return { verdict: "identical", at: at, overlap: 1 };
-            var ov = overlap(exp, act);
-            return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
-        }
-
-        /** Direct equality of two HTML fragments under a profile. */
-        function verifyExact(expectedHtml, actualHtml, o) {
-            var opt = options(o);
-            var exp = stripEdgeBreaks(tokenize(expectedHtml, opt));
-            var act = stripEdgeBreaks(tokenize(actualHtml, opt));
-            if (runsEqual(exp, act, opt.hostRewrittenUrls)) return { verdict: "identical", at: 0, overlap: 1 };
-            var ov = overlap(exp, act);
-            return { verdict: ov >= 0.5 ? "modified" : "absent", at: -1, overlap: ov };
-        }
-
-        /**
-         * THE POLICY BOTH BUILDS SHARE. Is our signature still intact on this DRAFT?
-         *
-         * Everything here exists because a draft is not a fragment. On a reply or
-         * forward it contains the quoted thread, and that thread routinely holds an
-         * intact copy of the very signature being checked. So:
-         *
-         *   1. The body is split at the quoted-thread boundary; only the LIVE part is
-         *      ever searched. A pristine copy sitting in the quote can no longer
-         *      answer for an edited live one.
-         *   2. Marked regions inside the quote are discarded rather than counted as
-         *      duplicates - otherwise every reply in a thread we have signed before
-         *      reports "duplicate" and gets rewritten for nothing.
-         *   3. If the live part has no copy at all, the verdict is absent/modified and
-         *      the caller rewrites, even when the quote holds a perfect copy. That is
-         *      the point: what matters is what the recipient will read at the top.
-         *
-         * DELIBERATE COST: with Outlook configured to place the signature BELOW the
-         * quoted text, the live block falls outside the live slice, so the verdict is
-         * always "absent" and every send rewrites. That is exactly the pre-
-         * verification behaviour, and it is preferred over the alternative - trusting
-         * a trailing marked block, which on a reply-to-our-own-mail is indistinguish-
-         * able from the oldest quoted signature at the bottom of the thread.
-         *
-         * @param {string} expectedHtml  the signature as resolved from cache
-         * @param {string} bodyHtml      the whole draft body
-         * @param {object} o             { markAttr, sigId, ...profile options }
-         * @returns {{verdict:string, reason:string, scope:string, quotedCopy:boolean}}
-         *   verdict: identical | modified | absent | duplicate | id-changed
-         */
-        function verifyInDraft(expectedHtml, bodyHtml, o) {
-            var opt = options(o);
-            var attr = (o && o.markAttr) || "data-cb-sig";
-            var sigId = o && o.sigId != null ? String(o.sigId) : null;
-
-            var split = splitDraftAtQuote(bodyHtml);
-            var hasQuote = split.boundary < String(bodyHtml == null ? "" : bodyHtml).length;
-            var scope = hasQuote ? "live-of-reply" : "whole-body";
-
-            var all = extractMarkedRegions(bodyHtml, attr);
-            var live = [], quoted = 0;
-            for (var i = 0; i < all.length; i++) {
-                if (all[i].start < split.boundary) live.push(all[i]);
-                else quoted++;
-            }
-
-            // Is there an intact copy in the quoted thread? Diagnostic only - it never
-            // changes the verdict, but it is the single most useful fact in a log when
-            // someone asks why a reply was rewritten. Computed LAZILY: tokenising a long
-            // quoted thread costs ~12ms on a 137KB reply, and it is pointless when the
-            // live block already verified clean.
-            var quotedCopy = null;
-            function describe(extra) {
-                if (quotedCopy === null) {
-                    quotedCopy = !!split.quoted &&
-                        verifyRegion(expectedHtml, split.quoted, opt).verdict === "identical";
-                }
-                return extra +
-                    (quoted ? ", " + quoted + " marked copy/copies in the quote" : "") +
-                    (quotedCopy ? ", intact copy in the quote (ignored)" : "");
-            }
-
-            if (live.length > 1) {
-                return {
-                    verdict: "duplicate", scope: scope, quotedCopy: quotedCopy,
-                    reason: describe(live.length + " signature blocks in the live area")
-                };
-            }
-
-            if (live.length === 1) {
-                if (sigId !== null && String(live[0].value) !== sigId) {
-                    return {
-                        verdict: "id-changed", scope: scope, quotedCopy: quotedCopy,
-                        reason: describe("live block has id=" + live[0].value + ", target=" + sigId)
-                    };
-                }
-                var r = verifyExact(expectedHtml, live[0].inner, opt);
-                // Clean live block: skip the quoted-thread scan entirely.
-                if (r.verdict === "identical") {
-                    return {
-                        verdict: "identical", scope: scope, quotedCopy: false,
-                        reason: "marked live block, overlap=1.00" +
-                            (quoted ? ", " + quoted + " marked copy/copies in the quote (ignored)" : "")
-                    };
-                }
-                return {
-                    verdict: r.verdict, scope: scope, quotedCopy: quotedCopy,
-                    reason: describe("marked live block, overlap=" + r.overlap.toFixed(2))
-                };
-            }
-
-            // No marked block in the live area: a pre-wrapper draft, a stripped
-            // attribute, or a signature that was never written here. Search the LIVE
-            // slice only - never the quote.
-            var r2 = verifyRegion(expectedHtml, split.live, opt);
-            if (r2.verdict === "identical") {
-                return {
-                    verdict: "identical", scope: scope, quotedCopy: false,
-                    reason: "unmarked live area, overlap=1.00"
-                };
-            }
-            return {
-                verdict: r2.verdict, scope: scope, quotedCopy: quotedCopy,
-                reason: describe("unmarked live area, overlap=" + r2.overlap.toFixed(2))
-            };
-        }
-
-        /* -------------------------------------------------------------- public API */
-
-        function tokensOf(html, o) { return tokenize(html, options(o)); }
-
-        function serialize(tokens) {
-            return VERSION + ":" + tokens.length + ":" + JSON.stringify(tokens);
-        }
-
-        function signature(html, o) { return serialize(tokensOf(html, o)); }
-
-        function signatureFromDom(html, o) {
-            var t = tokenizeDom(html, options(o));
-            return t ? serialize(t) : null;
-        }
-
-        function equal(a, b, o) {
-            var sa = signature(a, o), sb = signature(b, o);
-            return sa.length === sb.length && sa === sb;
-        }
-
-        function diff(a, b, o) {
-            var ta = tokensOf(a, o), tb = tokensOf(b, o);
-            var n = Math.max(ta.length, tb.length);
-            for (var i = 0; i < n; i++) {
-                var x = ta[i] ? JSON.stringify(ta[i]) : "(missing)";
-                var y = tb[i] ? JSON.stringify(tb[i]) : "(missing)";
-                if (x !== y) return { equal: false, index: i, left: x, right: y };
-            }
-            return { equal: true, index: -1, left: null, right: null };
-        }
-
-        // FNV-1a 32-bit + length. Short, stable, NOT cryptographic - do not use it
-        // as the sole tamper check against a motivated attacker.
-        function digest(html, o) {
-            var s = signature(html, o), h = 0x811c9dc5;
-            for (var i = 0; i < s.length; i++) {
-                h ^= s.charCodeAt(i);
-                h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
-            }
-            return ("0000000" + h.toString(16)).slice(-8) + "-" + s.length.toString(36);
-        }
-
-        return {
-            VERSION: VERSION,
-            DEFAULTS: DEFAULTS,
-            PROFILES: PROFILES,
-            extractMarkedRegions: extractMarkedRegions,
-            splitDraftAtQuote: splitDraftAtQuote,
-            verifyInDraft: verifyInDraft,
-            verifyRegion: verifyRegion,
-            verifyExact: verifyExact,
-            indexOfTokenRun: indexOfTokenRun,
-            signature: signature,
-            signatureFromDom: signatureFromDom,
-            tokens: tokensOf,
-            equal: equal,
-            diff: diff,
-            digest: digest,
-            domParserSupportsHtml: domParserSupportsHtml,
-            _internals: { decodeEntities: decodeEntities, normalizeUrl: normalizeUrl }
-        };
-    });
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v7.5)
+//  CardByte Outlook Add-in — event-handler.js (v7.7.0-mobile-fix)
 //
-//  ARCHITECTURE: THE SIGNATURE ID IS THE STATE. THE HTML IS A DISPOSABLE CACHE.
-//
-//  Every decision point produces an id (a rule's signatureId, or DEFAULT_ID).
-//  The id is persisted on the item; HTML is always re-derivable from the id via
-//  cache-then-network. Consequences:
-//
-//   • Send time is uniform: decide id -> resolve html -> ONE body write.
-//     No "trust whatever is in the body", so a deleted or race-clobbered
-//     signature block is corrected at send.
-//   • The Mac send runtime (fresh WKWebView, empty localStorage) is no longer a
-//     special case — a cache miss is just a bounded fetch.
-//   • Compose does ONE body write per event instead of four (v6 ran
-//     applySignatureCore's cached-apply + its post-network re-apply, twice
-//     over, concurrently with the rule apply — see WRITE TOKEN below).
-//
-//  WRITE TOKEN. Windows/OWA share one runtime, so OnNewMessageCompose and
-//  OnMessageRecipientsChanged overlap and both write the body across long
-//  awaits. Each entry point takes a seq from beginWrite(); a write is dropped
-//  if seq is no longer current. Last decision wins deterministically instead of
-//  by network luck.
-//
-// -----------------------------------------------------------------------------
-//  CHANGES IN v7.5.2 — THE MANUAL PIN IS READ THE WAY CLASSIC READS IT
-//
-//  X. THE TASKPANE'S MANUAL OVERRIDE WAS INVISIBLE, AND THEN DELETED. The
-//     Classic build (event-handler-classic.js) calls loadCustomPropertiesAsync
-//     on every single read and writes item properties from exactly one place,
-//     additively. That is the whole reason a pane-applied signature stays put
-//     there. This build memoised ONE CustomProperties handle per item in a
-//     WeakMap for the runtime's entire life, and on Windows/OWA — one long-lived
-//     runtime shared by every activation — that produced two failures:
-//
-//       READ STALENESS. OnNewMessageCompose cached the bag before the user
-//       opened the pane. The pane wrote cardbyte_manual_sig_id through its own
-//       handle. The next OnMessageRecipientsChanged read the CACHED bag, saw no
-//       pin, evaluated the rules, and switched the signature — the reported
-//       "event-handler keeps overriding my choice".
-//
-//       WRITE CLOBBER. saveAsync serialises the whole in-memory bag, so
-//       markActiveSignature writing a stale one DELETED the pin from the item.
-//       After that even a correct read finds nothing, which is why the pin
-//       seemed to work once and then never again.
-//
-//     Mac and mobile were unaffected: a fresh WKWebView per activation leaves
-//     the WeakMap empty, accidentally matching Classic. Windows/OWA only.
-//
-//     Now: invalidateProps() at the top of all four entry points (fresh at the
-//     start of every activation) and getProps({fresh:true}) before every write
-//     (so no save can drop a key written since we loaded). Reads WITHIN one
-//     activation still share the handle — full per-read reloading would cost
-//     ~13 round trips and a cold Mac/mobile send budget cannot absorb that.
-//
-//  Y. THE PIN IS CHECKED BEFORE THE COMPOSE-TIME STATE RESET, as in Classic's
-//     runPipeline. applySignature cleared P_ACTIVE_SIG unconditionally, which
-//     forced a body rewrite every time a pinned draft was reopened.
-//
-//  Z. VALIDATION MOVED INTO getManualOverride, so both call sites agree: an
-//     unresolvable pin ("", "null", "undefined") is treated as no pin, instead
-//     of outranking every rule and then failing to fetch.
-//
-//  AA. OPTIMISATIONS. revalidate:false at compose (it fetched the same id again
-//     on every cache-hit apply, duplicating SIG_TTL_MS and bypassing the dedupe
-//     map); the in-flight dedupe key is account-scoped so a fetch for the
-//     previous identity cannot repopulate the new one's cache after a From
-//     change; the dead `html = html` self-assignment is gone.
-//
-//     UNCHANGED ON PURPOSE: every Mac/mobile fix (cold budgets, the recipient
-//     re-read retry, the roamed-id guard, DEFAULT_ID prefetch), the whole
-//     send-time verification and replacement path, and X_PLATFORM_MAP.
-//
-// -----------------------------------------------------------------------------
-//  CHANGES IN v7.5.1 — VERIFICATION IS SCOPED TO THE LIVE COMPOSE AREA
-//
-//  W. TAMPERING WAS NOT DETECTED ON REPLIES OR FORWARDS. A draft body is not
-//     just the signature and the user's text: on a reply or forward it also
-//     carries the quoted thread, and that thread routinely holds an INTACT COPY
-//     of the same signature — any earlier mail in the thread that we signed.
-//     v7.5.0 searched the whole body, so that copy answered "is the signature
-//     intact?" on behalf of the live one: an edited or deleted live signature
-//     came back "identical" and nothing was re-inserted. New compose was
-//     unaffected because it has no quoted text, which is exactly how the bug
-//     presented in the field.
-//
-//     verifySignatureOnBody now delegates to HCS.verifyInDraft, which splits
-//     the body at the quoted-thread boundary (appendonsend, divRplyFwdMsg,
-//     -----Original Message-----, blockquote type=cite, gmail_quote, Word's
-//     reply separator, and the mobile variants) and inspects only the LIVE
-//     part. Marked copies inside the quote are DISCARDED rather than counted as
-//     duplicates — that was a second, quieter bug: every reply in a thread we
-//     had signed before reported "duplicate" and got rewritten for nothing.
-//
-//     The classification now lives in the module, shared verbatim with the
-//     Classic build, so the two cannot drift apart on this.
-//
-//     DELIBERATE COST: with Outlook set to place the signature BELOW the quoted
-//     text, the live block falls outside the live slice, the verdict is always
-//     "absent", and every send rewrites — i.e. pre-verification behaviour. That
-//     is preferred over trusting a trailing marked block, which on a
-//     reply-to-our-own-mail is indistinguishable from the oldest quoted
-//     signature at the bottom of the thread.
-//
-// -----------------------------------------------------------------------------
-//  CHANGES IN v7.5.0 — THE SEND NO LONGER REWRITES A SIGNATURE THAT IS ALREADY
-//  CORRECT (requires html-content-signature.js concatenated ahead of this file)
-//
-//  Q. onSendCore resolved an id and then rewrote the body every single time,
-//     including the overwhelmingly common case where the body already carried
-//     exactly that signature. Send time now READS the draft, compares it against
-//     the resolved HTML, and writes ONLY when the draft's copy is missing,
-//     edited, duplicated, or belongs to a different id.
-//
-//     The comparison is content-based, not textual: Outlook rewrites a
-//     signature the moment it lands (remote images become cid: attachments,
-//     Word rewrites CSS and injects MsoNormal/o:p/lang markup, entities and
-//     whitespace reflow), so comparing HTML strings would report every desktop
-//     draft as tampered. See PROFILES.body in html-content-signature.js for
-//     exactly what is and is not compared, and why.
-//
-//  R. EVERY WRITE IS NOW WRAPPED IN <div data-cb-sig="{id}">. There is no API
-//     for reading back just the signature, and setSignatureAsync does not put
-//     the block at the end of a reply, so the wrapper is the only reliable
-//     anchor. Drafts written by v7.4 have no wrapper and fall back to a
-//     token-run search over the whole body.
-//
-//  S. EVERY UNCERTAIN OUTCOME STILL WRITES. Body unreadable, module not loaded,
-//     marker stripped, HTML rewritten past recognition — all resolve to "write
-//     it", i.e. v7.4 behaviour. A false positive costs one body write; a false
-//     negative never leaves a wrong signature. VERIFY_AT_SEND=false restores
-//     v7.4 unconditionally, in one flag.
-//
-//  T. APPEND-ONLY HOSTS ARE DETECT-ONLY BY DEFAULT. Mobile has no
-//     setSignatureAsync, only appendOnSendAsync, so "re-insert" there means
-//     "add a second signature next to the edited one". When the signature is
-//     merely ABSENT (the normal mobile path — nothing runs at compose) it is
-//     still appended. When it is present but wrong, v7.5 logs and leaves it;
-//     set APPEND_ON_TAMPER=true to append regardless.
-//
-//  U. P_SIG_DIGEST records what was written, so a mismatch caused by an admin
-//     updating the signature server-side is logged as such instead of as a
-//     user edit. Informational only — both cases re-insert. It rides the same
-//     saveAsync as the id and snapshot: no extra round trip.
-//
-//  V. OPTIMISATIONS. encryptEmail is memoised (static IV = deterministic
-//     output; it was paying an importKey+encrypt per API call, once per id in
-//     prefetch). The signature cache map is parsed once per runtime instead of
-//     JSON.parsing every cached signature's HTML on every get/set/purge; the
-//     from-change handler invalidates the parsed copy along with the keys.
-//
-//  NOT ADDRESSED, ON PURPOSE: this detects tampering, it does not prove
-//  authorship. The expected copy comes from the local cache, which anyone with
-//  the device can edit; and a user who edits the signature after OnMessageSend
-//  completes is outside the add-in's reach entirely. If the requirement is
-//  "the recipient can verify the signature was not altered", enforce it on the
-//  server or gateway, not here.
-//
-// -----------------------------------------------------------------------------
-//  CHANGES IN v7.4.0 — THE NOTIFICATION BAR IS TWO MESSAGES, NOT SIX
-//
-//  M. ONLY TWO THINGS ARE WORTH INTERRUPTING THE USER WITH: "the signature is
-//     on the mail", and "it is not / may be wrong, and here is why".
-//     "Preparing your signature...", "Loading your signature...",
-//     "Verifying signature..." and the per-phase timings are gone, along with
-//     NOTIFY_LEVEL — there is no longer anything to set a level on. Timings
-//     still go to the console via timed(), which is where QA reads them.
-//
-//  N. FAILURES ARE REPORTED FROM ONE PLACE, AT THE END OF THE RUN. Previously
-//     every notifyError call site fired the instant it was reached, which had
-//     two bad consequences: a failure that was subsequently recovered from
-//     still flashed at the user, and — because notificationMessages is
-//     last-write-wins on one key — a later "Signature applied" could silently
-//     overwrite a real error.
-//
-//     Every step that can fail now RECORDS the failure (recordFailure) in a
-//     per-run ledger, and reportOutcome() emits exactly one message once the
-//     outcome is actually known:
-//
-//       fatal failure recorded -> that failure's message (persistent)
-//       degraded (rules)       -> rules could not be consulted, so the applied
-//                                 signature may not be the one a rule wanted
-//       applied, nothing wrong -> "Signature applied", auto-cleared
-//       nothing to say         -> silence: manual override, a deferred mobile
-//                                 compose (L), or a stale write dropped by the
-//                                 write token
-//
-//     The ledger is reset by beginWrite(), i.e. exactly once per decision, so
-//     an error from a superseded evaluation cannot be reported against a newer
-//     one.
-//
-//  O. EVERY API STEP FEEDS THE LEDGER, NOT JUST THE FINAL BODY WRITE. Covered:
-//     /rules-config/get-active, /html/outlook/get-active,
-//     /rules-config/get/{id}, each of their timeouts, the MAX_SIG_BYTES
-//     ceiling, and both setSignatureAsync and appendOnSendAsync. An HTTP
-//     status and a transport failure stay distinct all the way to the message,
-//     because "check your connection" and "contact Admin" are different
-//     instructions to give someone — see prereq (a) for why the distinction is
-//     load-bearing on Mac/mobile.
-//
-//     BACKGROUND WORK IS SILENT BY DESIGN. prefetchSignatures (J) and
-//     revalidateSigHtml never record: neither has any bearing on what is on
-//     the mail right now, and a warm-up failure is not the user's problem.
-//
-//  P. SEND TIME RAISES FAILURES ONLY. The send is still never blocked
-//     (allowEvent: true), and a success message at send has nothing to land on
-//     because the item is already closing — so onSendCore reports a failure if
-//     there is one and otherwise clears the bar.
-//
-// -----------------------------------------------------------------------------
-//  CHANGES IN v7.3.0 — THE EMPTY-RECIPIENT DEFAULT NOW WORKS ON MOBILE
-//
-//  v7.2 fixed the empty-recipient case for Windows/OWA by making "no
-//  recipients" an evaluable state. Mobile still failed, for reasons entirely
-//  separate from that change. Mobile is the platform where NOTHING runs at
-//  compose time, so every one of these lands at send:
-//
-//   F. STRICT COMPOSE-TYPE BLOCKED THE SEND-TIME EVALUATION, AND THE FALLBACK
-//      WAS THE OLD RULE ID. Most likely cause of the reported symptom. Mobile
-//      does not support getComposeTypeAsync, so detectComposeType returns null;
-//      at send `strictComposeType` is on, so findMatchingRule returned
-//      `blocked: true` immediately. decideSendId then hit
-//      `if (blocked && fallback) return fallback` — and the fallback is the
-//      PREVIOUSLY PERSISTED RULE ID. Emptying the recipients therefore
-//      reapplied the rule signature at send, which is exactly "the default is
-//      not applied".
-//
-//      The blocking is now granular. Compose type is consulted only when it can
-//      still change the answer: sender and recipient are filtered FIRST, and if
-//      no enabled rule survives that filter, no rule can match whatever the
-//      compose type is — so the default applies and nothing is blocked. With an
-//      empty recipient list every internal/external rule drops out, which for
-//      most tenants leaves zero candidates. If candidates do survive and the
-//      highest-priority one is context-agnostic ("all"/unset), it wins outright
-//      without needing the compose type either.
-//
-//   G. THE BLOCKED FALLBACK REUSED AN ID DECIDED FOR A DIFFERENT RECIPIENT SET.
-//      By construction, decideSendId only reaches the blocked branch when the
-//      persisted snapshot does NOT match the current one — so the persisted id
-//      was chosen under recipients that no longer exist. When the current list
-//      is confirmed EMPTY, that id cannot be right and the default is used
-//      instead. (Left alone when the list is merely different: dropping a
-//      possibly-correct rule signature is worse than reapplying it.)
-//
-//   H. ROAMED ACTIVE ID LEAKED ACROSS DEVICES. R_ACTIVE_SIG is mailbox-scoped,
-//      so a rule id decided on the desktop roams to the phone. On mobile —
-//      where nothing is persisted on the item because no compose event fires —
-//      getActiveSignatureId() fell through to that roamed value and applied
-//      another device's decision to this mail. The roamed tier is now consulted
-//      only when the recipient list could not be read at all.
-//
-//   I. X_PLATFORM_MAP CONTRADICTED ITS OWN DOCUMENTATION. Fix (D) says MAC and
-//      MOBILE are collapsed onto WINDOWS because the backend has no bucket for
-//      them — but the map shipped as `{ MAC: "MAC", ... }`, so Mac and every
-//      mobile client (which resolve to MAC) kept sending a value the header
-//      itself says comes back non-2xx. Every fetch on those platforms then
-//      fails, and the default signature is the id least likely to be in cache
-//      when the recipients are emptied. Now mapped to WINDOWS as documented.
-//      VERIFY AGAINST YOUR BACKEND: if it does accept MAC, revert this one line
-//      rather than the rest of the fix.
-//
-//   J. DEFAULT_ID IS NOW PREFETCHED ON MOBILE. prefetching was skipped wholesale
-//      on mobile, so when a rule matched, the default HTML was never warmed —
-//      and the empty-recipient transition needs precisely that id, on a cold
-//      runtime, inside the send budget. Rule signatures are still not
-//      prefetched on mobile (bandwidth); the single default is.
-//
-//   K. COLD-RUNTIME BUDGETS NOW COVER MOBILE. Mobile got the 5s desktop send
-//      budget and the 2.5s recipient-read budget despite starting as cold as
-//      Mac. Both now use the cold-start values, and the Mac-only recipient
-//      re-read retry applies to mobile too. A slow read that times out is
-//      classified as UNREADABLE, which blocks evaluation — so a budget that is
-//      too tight reintroduces the bug it was meant to prevent.
-//
-//   L. HOSTS WITHOUT setSignatureAsync NO LONGER LOSE THE COMPOSE DECISION.
-//      Mobile has no setSignatureAsync, so a compose-time apply cannot succeed
-//      there; evaluateAndApply treated that as "nothing applied" and skipped
-//      persisting the id, discarding the decision. The id is now persisted
-//      anyway so the send runtime can act on it via appendOnSendAsync, and the
-//      user-facing error is suppressed when the host simply cannot write yet.
-//
-//  MOBILE PLATFORM LIMIT, NOT FIXABLE HERE: OnMessageRecipientsChanged is not
-//  raised by Outlook mobile. The signature therefore does not visibly update
-//  while composing on a phone — the correction happens at send. If it must be
-//  live there, that is the one place recipient polling would have to come back.
-//
-// -----------------------------------------------------------------------------
-//  CHANGES IN v7.2.0 — "NO RECIPIENTS" IS AN ANSWER, NOT A FAILURE
-//  (v7.1 symptom: remove every recipient from a mail that had already matched a
-//   rule, and the rule's signature stayed on the body. The default never came
-//   back.)
-//
-//   E. EMPTY RECIPIENT LIST vs FAILED RECIPIENT READ. v7.1 conflated the two:
-//      officeAsync falls back to null on timeout/error, getRecipients turned
-//      that into [], and findMatchingRule returned `blocked: true` for any
-//      empty list. evaluateAndApply's blocked branch then found the previously
-//      persisted P_ACTIVE_SIG and returned early — so the rule signature was
-//      pinned to the body for the rest of the compose session. It only ever
-//      looked right on first compose, where applySignature clears the active id
-//      before evaluating and so has nothing to keep.
-//
-//      Zero recipients is a perfectly evaluable state: hasInternal and
-//      hasExternal are both false, "internal"/"external" rules correctly fail
-//      to match, and an "all" rule (or DEFAULT_ID) legitimately wins. What
-//      actually prevents evaluation is a read that never returned.
-//
-//      getRecipients / getAllRecipientEmails / serializeRecipients now return
-//      null for "the host did not answer" and [] / "" for "genuinely none".
-//      findMatchingRule blocks on null only. Every snapshot call site is
-//      null-guarded; markActiveSignature already removes P_RECIP_SNAPSHOT when
-//      handed null, which makes send time re-evaluate rather than trust a
-//      snapshot that was never taken.
-//
-//      SUPERSEDES v7.1 change note 2. That note is why this bug shipped: it
-//      described "an empty recipient list no longer resets the body to the
-//      default" as the intended cure for OWA's mid-typing flicker. The flicker
-//      is real, but blocking on emptiness was too blunt a fix. The flicker is
-//      now handled where it belongs — EMPTY_RECIP_SETTLE_MS in
-//      onRecipientsChangedHandler re-reads before acting on a newly empty list,
-//      so deleting the last recipient in order to retype it does not churn the
-//      body. Do NOT reinstate the block; widen the debounce instead.
-//
-//  CHANGES IN v7.1.0 — RULES ARE FETCHED / EVALUATED CORRECTLY
-//  (v7.0 symptom: rules looked right in the React taskpane but were wrong or
-//   frozen here. All four causes were in this file, not the backend.)
-//
-//   A. ROAMED RULES NOW EXPIRE. v7.0's readRoamedRules() had no timestamp, so
-//      once cb_rules was written getCachedRules() returned non-null FOREVER.
-//      That poisoned every "null means go fetch" caller — applySignature's
-//      warm-up (`if (getCachedRules()) return;`) and findMatchingRule's live
-//      fetch — so admin edits never reached the event runtime. The roamed copy
-//      now carries R_RULES_TS and is TTL-checked exactly like the local copy;
-//      skipTtl (send time) still accepts it, which is what keeps the Mac cold
-//      start working.
-//
-//   B. FROM-CHANGE NOW CLEARS THE ROAMED COPY. onFromChangedHandler removed the
-//      localStorage keys only, so after an account switch the empty local cache
-//      fell through to roaming and matched against the PREVIOUS identity's
-//      rules. R_RULES / R_RULES_TS / R_ACTIVE_SIG are now cleared too.
-//
-//   C. RULES WITH NO signatureId ARE NO LONGER CANDIDATES. v7.0 filtered on
-//      `r.enabled` alone (the React view also requires r.signatureId). Such a
-//      rule would match, stringify to the literal "null", request
-//      /rules-config/get/null, 404, leave the body untouched — and shadow the
-//      lower-priority rule that should have won. Priority is also coerced with
-//      `?? 0`: a missing priority produced NaN, and a NaN comparator makes
-//      Array#sort return an arbitrary order, i.e. an arbitrary "first match".
-//
-//   D. X-PLATFORM. v7.0 started reporting the REAL platform (MAC / MOBILE),
-//      which the backend has no bucket for — hence non-2xx on
-//      /rules-config/get-active. The React taskpane read the non-existent
-//      Office.context.platform, always got "", and therefore always sent
-//      WINDOWS, which is why it worked. X_PLATFORM_MAP now collapses MAC and
-//      MOBILE onto WINDOWS. Empty the map once the backend accepts the real
-//      values — that is the only reason to touch it.
-//
-//  CHANGES FROM v6 THAT ALTER BEHAVIOUR — VALIDATE THESE:
-//   1. Recipient POLLING and the 4-minute MAC_KEEPALIVE are gone. Deferring
-//      event.completed() for 4 min can delay or drop OnMessageSend, since the
-//      event runtime serialises activations. Recipient tracking now relies on
-//      the OnMessageRecipientsChanged LaunchEvent. Confirm it fires on your Mac
-//      build; if it does not, re-add polling there specifically.
-//   2. (Superseded by (E) above.) Emptying the recipient list DOES return the
-//      body to the default signature — that is the correct evaluation result,
-//      not a reset. Mid-typing flicker is suppressed by debouncing, not by
-//      refusing to evaluate.
-//   3. X_PLATFORM_FORCE is removed. The real platform is detected, including a
-//      new "OWA" value, then mapped through X_PLATFORM_MAP before it is sent.
-//   4. Default-signature HTML shares the one id-keyed cache (id = "default").
-//      The legacy cardbyte_cached_signature key is still read, so a warm cache
-//      written by the taskpane build is not thrown away.
-//
-//  DEPLOYMENT PREREQS FOR MAC / MOBILE (not fixable in this file):
-//   a) /.well-known/microsoft-officeaddins-allowed.json must list the add-in id
-//      and this file's URL, and the API must send CORS headers. Otherwise every
-//      fetch from the Mac event runtime rejects with "TypeError: Load failed".
-//      Note the shape of the failure: an HTTP status in the log is (D) above,
-//      a "Load failed" TypeError is this. The two now also reach the user as
-//      different notifications — see (O).
-//   b) XML (add-in only) manifest with LaunchEvents: OnNewMessageCompose,
-//      OnMessageRecipientsChanged, OnMessageFromChanged, OnMessageSend.
-//      Mobile honours only a subset — confirm which ones your build actually
-//      raises before assuming a handler ran.
-//   c) Mac debugging: defaults write com.microsoft.Outlook
-//      OfficeWebAddinDeveloperExtras -bool true, then Safari > Develop.
+//  FIX: Mobile signature insertion - removed early-return that broke mobile flow
+//  The normal flow now handles mobile via hostCanSetSignature() returning false,
+//  which triggers the "deferred" status and persists the decision for send time.
 // =============================================================================
 
-const CB_VERSION = "v7.5.2";
+const CB_VERSION = "v7.8.0-purge-and-quiet";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -1409,22 +53,43 @@ const P_RECIP_SNAPSHOT = "cardbyte_recip_snapshot";
 
 // v7.5. Digest of the signature HTML that was actually written, so send time can
 // tell "the user edited the signature" from "the signature changed on the server
-// since compose". Purely informational — both outcomes re-insert — but without
-// it every legitimate admin edit looks like tampering in the logs.
+// since compose". Purely informational — both outcomes re-insert.
 const P_SIG_DIGEST = "cardbyte_sig_digest";
 
 // roamingSettings — mailbox-scoped, ~32KB total. Small values only; never HTML.
 // NOTE (H): mailbox-scoped means CROSS-DEVICE. R_ACTIVE_SIG is a last-resort
 // hint, never evidence about the item currently being composed.
 const R_ACTIVE_SIG = "cb_active_sig";
+const R_ACTIVE_SIG_TS = "cb_active_sig_ts";  // v7.8: roamed ids were immortal without this
 const R_RULES = "cb_rules";
 const R_RULES_TS = "cb_rules_ts";   // FIX (A): roamed rules were immortal without this
 const R_RULES_MAX_BYTES = 20 * 1024;
 
-const SIG_TTL_MS = 5 * 60 * 1000;
-const SIG_PURGE_MS = 5 * 60 * 1000;
-const RULES_TTL_MS = 5 * 60 * 1000;
+// FRESHNESS. These are now actually enforced on the read path — see v7.6 (α).
+// Lower them and signatures refresh sooner at the cost of more requests; the
+// in-flight dedupe map and the HTTP cache buster together keep that bounded.
+// v7.7: ONE freshness window for everything this file caches.
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const SIG_TTL_MS = CACHE_TTL_MS;
+const RULES_TTL_MS = CACHE_TTL_MS;
 const ACTIVE_SIG_MAX_AGE_MS = 1 * 60 * 1000;
+
+// EVICTION, NOT FRESHNESS. Nothing this file writes may OUTLIVE PURGE_MS in
+// any tier — memory, localStorage or roamingSettings — and the default
+// signature may not outlive DEFAULT_SIG_PURGE_MS. purgeExpiredStorage()
+// enforces both once per decision, from beginWrite().
+//
+// Freshness (*_TTL_MS) decides whether a value may be USED; this decides
+// whether it may still EXIST. Must stay > SIG_TTL_MS or the offline fallback
+// in resolveSigHtml is lost.
+const PURGE_MS = 30 * 60 * 1000;
+const SIG_PURGE_MS = PURGE_MS;
+
+// ⚠ DEFAULT_SIG_PURGE_MS === SIG_TTL_MS, by request. The default signature is
+// therefore deleted the moment it goes stale: it can never be served as a
+// stale copy and never covers for an unreachable network. Raise it above
+// SIG_TTL_MS to get the offline default back.
+const DEFAULT_SIG_PURGE_MS = 5 * 60 * 1000;
 
 // One size ceiling, actually enforced. v6 declared 500KB/200KB constants and
 // then hardcoded 100KB in the apply path; observed rule signatures are ~42KB.
@@ -1439,7 +104,7 @@ const MAX_SIG_BYTES = 100 * 1024;
 // token-run path, so it is safe, just less precise for one compose session.
 const SIG_MARK_ATTR = "data-cb-sig";
 // Prepended to the signature when send-time verification found the draft's copy
-// altered and re-inserted it.
+// altered and re-inserted it. Not currently emitted — see the note in applyById.
 const TAMPER_TAG =
     `<div style="margin:0 0 6px 0;font:italic 11px Arial,Helvetica,sans-serif;color:#7a6134;">` +
     `Signature re-inserted</div>`;
@@ -1464,12 +129,8 @@ const SIG_PROFILE = HCS ? HCS.PROFILES.body : null;
 
 // Send budgets. FIX (K): "cold" is Mac AND mobile — both get a fresh runtime
 // with empty localStorage per event, so both may have to fetch inside the send.
-// const SEND_BUDGET_MS_COLD = 12_000;
-// const SEND_BUDGET_MS = 5_000;
-// const FETCH_BUDGET_MS = 2_500;
-// const FETCH_BUDGET_MS_COLD = 5_000;
 const SEND_BUDGET_MS_COLD = 20_000;
-const SEND_BUDGET_MS = 10_000;
+const SEND_BUDGET_MS = 5_000;
 
 const FETCH_BUDGET_MS_COLD = 8_000;
 const FETCH_BUDGET_MS = 5_000;
@@ -1486,12 +147,15 @@ const RECIPIENT_SETTLE_MS = 350;
 // treating "empty" as "cannot evaluate".
 const EMPTY_RECIP_SETTLE_MS = 400;
 
-// FIX (I). This map exists because the backend accepts WINDOWS only — MAC and
-// MOBILE come back non-2xx, which is what makes every fetch fail on those
-// platforms. v7.1/v7.2 documented that collapse but shipped `MAC: "MAC"`, so it
-// never actually happened; mobile resolves to MAC and was hit hardest.
-// Empty this map — `{}` — once the API accepts the real values. If your backend
-// DOES accept MAC, change this line back and re-test; nothing else depends on it.
+// ⚠ FIX (I), STILL CONTRADICTORY — READ BEFORE TOUCHING.
+// The surrounding documentation says the backend accepts WINDOWS only, and that
+// MAC/MOBILE come back non-2xx, which is what makes every fetch fail on those
+// platforms. The v7.6 review deliberately did NOT change this line: the shipped
+// value maps MAC -> "MAC", so either the note is out of date or the fix was
+// reverted after testing and the note was not. VERIFY AGAINST YOUR BACKEND and
+// then correct whichever of the two is wrong. If MAC is rejected, this must
+// read `{ MAC: "WINDOWS", MOBILE: "WINDOWS", OWA: "WINDOWS" }`.
+// Empty the map — `{}` — once the API accepts the real values.
 const X_PLATFORM_MAP = { MAC: "MAC", MOBILE: "MAC", OWA: "WINDOWS" };
 
 // PRODUCT DECISION, all platforms.
@@ -1505,14 +169,16 @@ const X_PLATFORM_MAP = { MAC: "MAC", MOBILE: "MAC", OWA: "WINDOWS" };
 // (or the default) can win. That is deliberate — see (E) and (F).
 const INTERNAL_REQUIRES_NO_EXTERNAL = false;
 
+// v7.7 (3). PRODUCT DECISION: with no recipients at all, the DEFAULT signature
+// applies — no rule is consulted. Set false to let sender-only "all" rules win
+// an empty recipient set (pre-7.7 behaviour).
+const EMPTY_RECIPIENTS_MEANS_DEFAULT = true;
+
 const NOTIF_KEY = "cardbyte_sig_status";
 
 // FIX (M). The bar carries exactly two kinds of message:
 //   • "Signature applied" — success, auto-cleared after NOTIFY_CLEAR_MS
 //   • a failure reason    — raised only once the outcome is known, and left up
-//                           (errorMessage is dismissed by the user, not by us)
-// There is no progress chatter and no NOTIFY_LEVEL any more; per-phase timings
-// are console-only via timed().
 const NOTIFY_CLEAR_MS = 3000;
 const MSG_APPLIED = "Signature applied";
 // Shown while the signature is being decided and fetched. Raised only by
@@ -1532,9 +198,8 @@ const timed = (label, t0) => log(`⏱ ${label}: ${since(t0)}`);
 // ─────────────────────────────────────────────────────────────────────────────
 //  PLATFORM
 //  v6 read Office.context.platform, which does not exist — it resolved to ""
-//  and every classification fell through to a user-agent guess (and, with
-//  X_PLATFORM_FORCE set, to the literal "WINDOWS"). The real property is
-//  Office.context.diagnostics.platform (Mailbox 1.5+); UA stays as fallback.
+//  and every classification fell through to a user-agent guess. The real
+//  property is Office.context.diagnostics.platform (Mailbox 1.5+).
 // ─────────────────────────────────────────────────────────────────────────────
 
 let _platform = null;
@@ -1582,19 +247,23 @@ const isMobile = () => detectPlatform().startsWith("mobile-");
 // behave the same way here and get the same budgets — see (K).
 const isColdRuntime = () => isMac() || isMobile();
 
+// Resolved once: detectPlatform() is memoised, but this ran a map lookup and a
+// chain of comparisons on every request and every log line.
+let _xPlatform = null;
+
 function getXPlatform() {
+    if (_xPlatform) return _xPlatform;
     const p = detectPlatform();
     const base =
         p === "mac" ? "MAC" :
             // Outlook for iOS reports MAC: the backend has no iOS bucket, and
             // iOS shares the Apple/WebKit rendering path, so MAC is the closest
-            // accepted value. Must precede the isMobile() branch, which would
-            // otherwise claim it. Android still reports MOBILE.
+            // accepted value. Must precede the isMobile() branch.
             p === "mobile-ios" ? "MAC" :
                 p === "owa" ? "OWA" :
                     isMobile() ? "MAC" :
                         "WINDOWS";
-    return X_PLATFORM_MAP[base] || base;
+    return (_xPlatform = X_PLATFORM_MAP[base] || base);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1613,6 +282,9 @@ function withTimeout(promise, ms, label = "operation") {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The one place the per-call Office/network ceiling is decided.
+const budgetMs = () => (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
 
 // Wrap a callback-style Office API in a promise with a hard ceiling, resolving
 // to `fallback` on failure or timeout so no caller can hang.
@@ -1641,6 +313,22 @@ function officeAsync(fn, { ms = COMPOSE_TYPE_TIMEOUT_MS, fallback = null, label 
     });
 }
 
+// UTF-8 byte length without allocating a Blob. The old `new Blob([payload]).size`
+// materialised a copy of up to MAX_SIG_BYTES on every write purely to measure it,
+// and Blob is the sort of constructor the classic bundle's runtime is least
+// reliable about.
+function utf8Len(s) {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }  // surrogate pair
+        else n += 3;
+    }
+    return n;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  WRITE TOKEN
 //  Guards every body/state write against a newer decision made during an await.
@@ -1648,18 +336,27 @@ function officeAsync(fn, { ms = COMPOSE_TYPE_TIMEOUT_MS, fallback = null, label 
 //  FIX (N): taking a new seq also RESETS THE FAILURE LEDGER. A decision and the
 //  failures reported against it are the same unit of work — an error from an
 //  evaluation that has since been superseded must never surface against the new
-//  one. beginWrite() is called at the top of every entry point, before any
-//  fetch, which is exactly the boundary we want.
+//  one.
+//
+//  v7.6 (ζ): it also resets the RECIPIENT MEMO, for the same reason. One
+//  decision reads the recipient list once; the next decision reads it again.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let _writeSeq = 0;
-const beginWrite = () => { clearFailures(); return ++_writeSeq; };
+
+function beginWrite() {
+    clearFailures();
+    _recipCache = { seq: -1, emails: null };
+    _writeSeq++;
+    // Cheap, and the only per-decision hook that runs on every host —
+    // Office.onReady does not fire in the Windows classic event runtime.
+    purgeExpiredStorage();
+    return _writeSeq;
+}
+
 const isCurrent = (seq) => seq === _writeSeq;
 
-// Recipient snapshot of the last evaluation in THIS runtime. Declared up here
-// rather than between the entry points so it is unambiguously initialised
-// before any handler can read it.
-//
+// Recipient snapshot of the last evaluation in THIS runtime.
 // "" is a real value (evaluated, no recipients) and must never be conflated
 // with null (never read). Only ever assign a non-null snapshot to it.
 let _lastSnapshot = "";
@@ -1673,13 +370,8 @@ let _lastSnapshot = "";
 // ─────────────────────────────────────────────────────────────────────────────
 
 // `icon` must be an image resource id declared in the manifest's
-// <Resources><bt:Images>, and it is resolved against the VersionOverrides in
-// effect — event handlers run under V1_1, so the v11.* ids are the right ones.
-// "none" is not a declared id: OWA tolerates that and renders no icon, while
-// Windows desktop falls back to its generic information glyph, which is why
-// the CardByte icon never appeared. Change this if your manifest names the
-// 16x16 image differently (the classic manifest declares v10.icon16 for
-// VersionOverrides 1.0 and v11.icon16 for V1_1).
+// <Resources><bt:Images>, resolved against the VersionOverrides in effect —
+// event handlers run under V1_1, so the v11.* ids are the right ones.
 const NOTIF_ICON = "v11.icon16";
 
 // Guards the auto-clear timer: it only clears the message it was scheduled for,
@@ -1741,8 +433,7 @@ function clearNotificationSoon(item, ms = NOTIFY_CLEAR_MS) {
 //  Any step may fail: the rules call, either signature call, their timeouts,
 //  the size ceiling, or the body write itself. None of them notify at the point
 //  of failure — they record here, and reportOutcome() raises ONE message when
-//  the outcome is known. That is what makes "recovered from a failure" silent
-//  and "applied, but the rules were unreachable" honest.
+//  the outcome is known.
 //
 //  RANK breaks ties when several things go wrong in one run: the most specific
 //  and most actionable message wins, and a fatal failure always outranks a
@@ -1773,10 +464,7 @@ const FAILURES = {
         msg: "Signature could not be applied. Please contact Admin.",
     },
     // ── DEGRADED: something WAS applied, but the rules could not be consulted,
-    //    so it may be the default where a rule should have won. Worth saying;
-    //    not worth the fatal wording. Deliberately outcome-neutral, because
-    //    this is reported both when the default was applied and when a
-    //    previously applied signature was left in place.
+    //    so it may be the default where a rule should have won.
     rules_offline: {
         rank: 2, fatal: false,
         msg: "Couldn't reach the signature service, so your signature rules weren't checked. Check your connection.",
@@ -1826,41 +514,30 @@ const noteRulesFetchError = (kind) => { _rulesFetchError = kind; };
 const rulesFailureKind = () => (_rulesFetchError === "offline" ? "rules_offline" : "rules_error");
 
 /**
- * THE ONLY PLACE A NOTIFICATION IS RAISED.
+ * The progress message. Deliberately NOT recorded in _reported: this is
+ * progress, not an outcome, so an entry-point catch block must still treat
+ * "only the loading message was shown" as nothing having been said. Every path
+ * that raises it ends in reportOutcome(), which replaces it on success/failure
+ * and removes it on "quiet" — so it cannot get stranded on the bar.
+ */
+// function showLoading(item) {
+//     showNotification(item, MSG_LOADING, "informationalMessage");
+// }
+
+/**
+ * THE ONLY PLACE A NOTIFICATION IS RAISED — and it raises one ONLY on error.
  *
  * @param {"applied"|"failed"|"quiet"} outcome
- *   applied — the signature is on the body
+ *   applied — the signature is on the body. Silent, UNLESS a degradation was
+ *             recorded (the rules could not be checked, say) — that is still
+ *             an error worth showing.
  *   failed  — it is not, and no more specific failure was recorded
  *   quiet   — there was nothing to do (manual override, deferred mobile
  *             compose, blocked evaluation that kept a good signature)
  */
-/**
- * The progress message. v7.4 removed it (FIX (M)) because six messages flashed
- * at the user; with only two messages left, a compose that takes a cold-runtime
- * fetch otherwise shows an empty bar until "Signature applied" appears.
- *
- * Deliberately NOT recorded in _reported: this is progress, not an outcome, so
- * an entry-point catch block must still treat "only the loading message was
- * shown" as nothing having been said. Every path that raises it ends in
- * reportOutcome(), which replaces it on success/failure and removes it on
- * "quiet" — so it cannot get stranded on the bar.
- */
-function showLoading(item) {
-    showNotification(item, MSG_LOADING, "informationalMessage");
-}
-
 function reportOutcome(item, outcome) {
-    // _reported is set only when something is actually put on the bar, so the
-    // entry-point catch blocks can tell "nothing was said" from "already said".
-    const show = (msg, type) => { _reported = true; showNotification(item, msg, type); };
-
-    if (_failure) return show(_failure.msg, "errorMessage");
-    if (outcome === "applied") {
-        show(MSG_APPLIED, "informationalMessage");
-        clearNotificationSoon(item);
-        return;
-    }
-    if (outcome === "failed") return show(FAILURES.write_failed.msg, "errorMessage");
+    if (_failure) { _reported = true; showNotification(item, _failure.msg, "errorMessage"); return; }
+    if (outcome === "failed") { _reported = true; showNotification(item, FAILURES.write_failed.msg, "errorMessage"); return; }
     removeNotification(item);
 }
 
@@ -1881,7 +558,13 @@ function base64ToArrayBuffer(base64) {
 function arrayBufferToBase64(buffer) {
     const bytes = new Uint8Array(buffer);
     let bin = "";
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    // Chunked: String.fromCharCode.apply on a 100KB array blows the argument
+    // limit on some hosts, and a per-byte += on a large payload is the slowest
+    // thing in the decrypt path.
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
     return btoa(bin);
 }
 
@@ -1913,8 +596,8 @@ async function aesDecrypt(encryptedText) {
 
 // v7.5 OPTIMISATION: memoised. The IV is static, so the ciphertext for a given
 // email never changes — yet this was called once per API request, including
-// once per id inside prefetchSignatures, each call paying a WebCrypto importKey
-// + encrypt round trip. One entry is enough: the runtime serves one mailbox.
+// once per id inside prefetchSignatures, each paying a WebCrypto importKey +
+// encrypt round trip. One entry is enough: the runtime serves one mailbox.
 let _encCache = { plain: null, cipher: null };
 
 async function encryptEmail(email = "") {
@@ -1942,27 +625,74 @@ async function encryptEmail(email = "") {
 //  L1 memory (this runtime) / L2 localStorage (empty in Mac and mobile event
 //  runtimes) / L3 roamingSettings (mailbox-scoped, so it reaches every runtime
 //  AND every device, tiny budget).
+//
+//  v7.6 (β): _mem is per-runtime and the taskpane writes the SAME origin's
+//  localStorage. Anything that can be written by the pane must be dropped from
+//  _mem at the start of every activation — see invalidateCaches().
 // ─────────────────────────────────────────────────────────────────────────────
 
 const _mem = new Map();
 
+// ── v7.7 (1)/(2): the sending account, resolved once per activation ──────────
+//
+// Every store/roam key is suffixed with this. "unknown" is a real namespace on
+// purpose: a runtime that could not resolve a sender must not read another
+// account's cache, and it must not write into it either.
+let _senderEmail = "";
+
+const accountKey = () => (_senderEmail || "unknown").replace(/[\s/\\'"]/g, "_");
+const nsKey = (key) => `${key}:${accountKey()}`;
+
+async function resolveSender(item, mailbox) {
+    const profile = (() => {
+        try { return String(mailbox?.userProfile?.emailAddress || "").trim().toLowerCase(); }
+        catch (_) { return ""; }
+    })();
+    let from = "";
+    if (typeof item?.from?.getAsync === "function") {
+        const res = await officeAsync((cb) => item.from.getAsync(cb), { ms: budgetMs(), label: "from getAsync" });
+        from = String(res?.value?.emailAddress || "").trim().toLowerCase();
+    }
+    const next = from || profile;
+    if (next !== _senderEmail) {
+        // A different account owns whatever the memo layer holds.
+        _mem.clear();
+        _sigMap = null;
+        _rulesParsed = { raw: null, json: null };
+        _enabledCache = { src: null, list: null };
+        _inFlight.clear();
+        _encCache = { plain: null, cipher: null };
+    }
+    _senderEmail = next;
+    if (from && profile && from !== profile) log(`sender=${from} (From dropdown) differs from profile=${profile} — From wins`);
+    return _senderEmail;
+}
+
+// All keys below are account data, so the namespace is applied here, once, and
+// nothing else in the file needs to know about it.
 const store = {
     get(key) {
-        if (_mem.has(key)) return _mem.get(key);
+        const k = nsKey(key);
+        if (_mem.has(k)) return _mem.get(k);
         try {
-            const v = localStorage.getItem(key);
-            if (v != null) { _mem.set(key, v); return v; }
+            const v = localStorage.getItem(k);
+            if (v != null) { _mem.set(k, v); return v; }
         } catch (_) { }
         return null;
     },
     set(key, val) {
-        _mem.set(key, val);
-        try { localStorage.setItem(key, val); } catch (_) { }
+        const k = nsKey(key);
+        _mem.set(k, val);
+        try { localStorage.setItem(k, val); } catch (_) { }
     },
     remove(...keys) {
-        keys.forEach((k) => _mem.delete(k));
-        try { keys.forEach((k) => localStorage.removeItem(k)); } catch (_) { }
+        keys.forEach((key) => _mem.delete(nsKey(key)));
+        try { keys.forEach((key) => localStorage.removeItem(nsKey(key))); } catch (_) { }
     },
+    // Unscoped read/remove, for the one legacy key the taskpane wrote before
+    // namespacing existed. Nothing else may use these.
+    getRaw(key) { try { return localStorage.getItem(key); } catch (_) { return null; } },
+    removeRaw(key) { try { localStorage.removeItem(key); } catch (_) { } },
     getJson(key) {
         try { const v = store.get(key); return v ? JSON.parse(v) : null; } catch (_) { return null; }
     },
@@ -1973,13 +703,13 @@ const store = {
 
 const roam = {
     get(key) {
-        try { return Office?.context?.roamingSettings?.get(key) ?? null; } catch (_) { return null; }
+        try { return Office?.context?.roamingSettings?.get(nsKey(key)) ?? null; } catch (_) { return null; }
     },
     set(key, val) {
         try {
             const rs = Office?.context?.roamingSettings;
             if (!rs) return;
-            rs.set(key, val);
+            rs.set(nsKey(key), val);
             rs.saveAsync(() => { });
         } catch (_) { }
     },
@@ -1987,7 +717,7 @@ const roam = {
         try {
             const rs = Office?.context?.roamingSettings;
             if (!rs) return;
-            rs.remove(key);
+            rs.remove(nsKey(key));
             rs.saveAsync(() => { });
         } catch (_) { }
     },
@@ -2006,61 +736,131 @@ function getSessionId() {
     }
 }
 
+/**
+ * v7.6 (β). DROP EVERY CROSS-RUNTIME MEMO. Called at the top of all four entry
+ * points, beside invalidateProps(item).
+ *
+ * The parsed signature map, the parsed ruleset and store's raw-string cache all
+ * survived for the life of the runtime, which on Windows/OWA is every
+ * activation of the whole Outlook session. The taskpane writes the same
+ * localStorage; so does another window on the same profile. Without this, a
+ * refresh performed anywhere else was invisible here forever — the exact
+ * failure mode v7.5.2 fixed one layer up, for CustomProperties.
+ *
+ * Cost: one JSON.parse of each key, once per activation. That is what the
+ * within-activation memo was actually worth; holding it longer was never a
+ * measured saving, only an unmeasured staleness.
+ */
+function invalidateCaches() {
+    flushSigCache();          // never discard a pending write
+    _sigMap = null;
+    _rulesParsed = { raw: null, json: null };
+    _enabledCache = { src: null, list: null };
+    _mem.clear();             // v7.7: keys are namespaced, so drop the lot
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  SIGNATURE HTML CACHE — one id-keyed map, DEFAULT_ID included.
 //  HTML is disposable: a miss costs a fetch, never correctness.
+//
+//  v7.6: writes COALESCE. Each set() previously JSON.stringified the entire map
+//  — every cached signature's HTML, up to 100KB apiece — and prefetchSignatures
+//  fires several sets in the same tick. They now mark the map dirty and one
+//  flush runs at the end of the tick (or explicitly, via flushSigCache()).
+//  Losing an unflushed write costs a refetch, never correctness.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// v7.5 OPTIMISATION: the map is parsed once and mutated in memory. read()
-// previously JSON.parsed the FULL map — every cached signature's HTML, up to
-// 100KB apiece — on every get/set/purge; prefetchSignatures alone triggered
-// one full parse per candidate id. Writes still go straight through to
-// localStorage; only the parse is cached. Single-runtime safe: nothing else in
-// this runtime writes K_SIG_CACHE (the taskpane writes the LEGACY key, which
-// is read directly below and never cached here).
 let _sigMap = null;
+let _sigDirty = false;
+let _sigFlushTimer = null;
+
+function flushSigCache() {
+    if (_sigFlushTimer) { clearTimeout(_sigFlushTimer); _sigFlushTimer = null; }
+    if (!_sigDirty || !_sigMap) return;
+    _sigDirty = false;
+    store.setJson(K_SIG_CACHE, _sigMap);
+}
+
+function scheduleSigFlush() {
+    _sigDirty = true;
+    if (_sigFlushTimer) return;
+    _sigFlushTimer = setTimeout(() => { _sigFlushTimer = null; flushSigCache(); }, 0);
+}
 
 const sigCache = {
     read() {
         if (_sigMap) return _sigMap;
         _sigMap = store.getJson(K_SIG_CACHE) || {};
+        sigCache.migrateLegacy();
         return _sigMap;
     },
-    write(map) { _sigMap = map; store.setJson(K_SIG_CACHE, map); },
 
+    /**
+     * v7.6 (γ). The taskpane's legacy default key carried no timestamp, so once
+     * present it shadowed the id-keyed entry forever — nothing could expire it
+     * and nothing could refresh it. Fold it in ONCE with ts=0: usable as an
+     * offline fallback, immediately stale for freshness purposes, and gone from
+     * the legacy key so this can never run twice.
+     */
+    migrateLegacy() {
+        // The pane wrote this key UNSCOPED, so it is read raw. It can only
+        // ever be attributed to the profile mailbox, so it is folded in only
+        // when this runtime is serving that mailbox.
+        let legacy = null;
+        try { legacy = store.getRaw(K_SIG_CACHE_LEGACY_DEFAULT) || store.get(K_SIG_CACHE_LEGACY_DEFAULT); } catch (_) { }
+        if (!legacy) return;
+        if (!_sigMap[DEFAULT_ID]) {
+            _sigMap[DEFAULT_ID] = { html: legacy, ts: 0 };
+            log("sig cache: migrated the legacy default key (marked stale)");
+        }
+        store.removeRaw(K_SIG_CACHE_LEGACY_DEFAULT);
+        store.remove(K_SIG_CACHE_LEGACY_DEFAULT);
+        scheduleSigFlush();
+    },
+
+    /**
+     * @param {boolean} skipTtl  return an aged entry anyway. Callers use this
+     *   ONLY for the offline/failure fallback and for send-time last resorts —
+     *   never as the primary read, which is what made SIG_TTL_MS dead code
+     *   before v7.6 (α).
+     */
     get(id, { skipTtl = false } = {}) {
-        const key = String(id);
-        const entry = sigCache.read()[key];
-        if (entry?.html) {
-            if (skipTtl || Date.now() - entry.ts <= SIG_TTL_MS) return entry.html;
-            log(`sig cache stale for id=${key}`);
-        }
-        // Migration: a warm default written by the taskpane build.
-        if (key === DEFAULT_ID) {
-            const legacy = store.get(K_SIG_CACHE_LEGACY_DEFAULT);
-            if (legacy) { log("sig cache: using legacy default key"); return legacy; }
-        }
+        const entry = sigCache.read()[String(id)];
+        if (!entry?.html) return null;
+        if (skipTtl || Date.now() - entry.ts <= SIG_TTL_MS) return entry.html;
         return null;
+    },
+
+    age(id) {
+        const entry = sigCache.read()[String(id)];
+        return entry ? Date.now() - (entry.ts || 0) : null;
     },
 
     set(id, html) {
         if (!html) return;
-        const map = sigCache.read();
-        map[String(id)] = { html, ts: Date.now() };
-        sigCache.write(map);
+        sigCache.read()[String(id)] = { html, ts: Date.now() };
+        scheduleSigFlush();
     },
 
+    // Eviction, not expiry — see PURGE_MS. DEFAULT_ID gets its own, much
+    // shorter ceiling. Runs per decision (via purgeExpiredStorage) because
+    // Office.onReady does not fire in the Windows classic event runtime.
     purge() {
-        const map = sigCache.read();
+        let map;
+        try { map = sigCache.read(); } catch (_) { return; }
         const now = Date.now();
         let n = 0;
         for (const id of Object.keys(map)) {
-            if (now - (map[id]?.ts || 0) > SIG_PURGE_MS) { delete map[id]; n++; }
+            const ceiling = id === DEFAULT_ID ? DEFAULT_SIG_PURGE_MS : SIG_PURGE_MS;
+            if (now - (map[id]?.ts || 0) > ceiling) { delete map[id]; n++; }
         }
-        if (n) { sigCache.write(map); log(`purged ${n} stale signature cache entr${n === 1 ? "y" : "ies"}`); }
+        if (n) { scheduleSigFlush(); log(`purged ${n} expired signature cache entr${n === 1 ? "y" : "ies"}`); }
     },
+
     wipe() {
         _sigMap = {};
+        _sigDirty = false;
+        if (_sigFlushTimer) { clearTimeout(_sigFlushTimer); _sigFlushTimer = null; }
         store.remove(K_SIG_CACHE, K_SIG_CACHE_LEGACY_DEFAULT);
         log("signature cache wiped");
     },
@@ -2070,12 +870,28 @@ const sigCache = {
 //  RULES CACHE — mirrored to roaming when small enough, so the Mac and mobile
 //  send runtimes can evaluate without a network round trip.
 //
-//  FIX (A). Both tiers are now age-checked against the SAME TTL. v7.0 checked
-//  only the local timestamp and then fell back to an untimestamped roamed copy,
-//  so `getCachedRules()` could never return null once roaming had been written
-//  — and null is what every caller uses to mean "go fetch". skipTtl still
-//  accepts an aged copy: at send time a stale ruleset beats no ruleset.
+//  FIX (A). Both tiers are age-checked against the SAME TTL. v7.0 checked only
+//  the local timestamp and then fell back to an untimestamped roamed copy, so
+//  getCachedRules() could never return null once roaming had been written — and
+//  null is what every caller uses to mean "go fetch". skipTtl still accepts an
+//  aged copy: at send time a stale ruleset beats no ruleset.
+//
+//  v7.6 (η). Parsed once per raw string. This was JSON.parsing the whole
+//  ruleset on every call, including from describeRulesSource(), which needed
+//  nothing but "is there one".
 // ─────────────────────────────────────────────────────────────────────────────
+
+let _rulesParsed = { raw: null, json: null };
+
+function parseRules(raw) {
+    if (!raw) return null;
+    if (_rulesParsed.raw === raw) return _rulesParsed.json;
+    try {
+        const json = JSON.parse(raw);
+        _rulesParsed = { raw, json };
+        return json;
+    } catch (_) { return null; }
+}
 
 function readRoamedRules({ skipTtl = false } = {}) {
     try {
@@ -2086,14 +902,14 @@ function readRoamedRules({ skipTtl = false } = {}) {
             log(`roamed rules stale (age=${ts ? Date.now() - ts : "unknown"}ms)`);
             return null;
         }
-        return JSON.parse(raw);
+        return parseRules(raw);
     } catch (_) { return null; }
 }
 
 function getCachedRules({ skipTtl = false } = {}) {
     const ts = parseInt(store.get(K_RULES_TS) || "0", 10);
     if (skipTtl || (ts && Date.now() - ts <= RULES_TTL_MS)) {
-        const local = store.getJson(K_RULES);
+        const local = parseRules(store.get(K_RULES));
         if (local) return local;
     } else if (ts) {
         log(`rules cache stale (age=${Date.now() - ts}ms)`);
@@ -2102,16 +918,23 @@ function getCachedRules({ skipTtl = false } = {}) {
 }
 
 function setCachedRules(rulesJson) {
-    store.setJson(K_RULES, rulesJson);
+    let s = null;
+    try { s = JSON.stringify(rulesJson); } catch (_) { }
+    if (s == null) return;
+
+    store.set(K_RULES, s);
     store.set(K_RULES_TS, Date.now().toString());
+    // Prime the parse memo with the object we already hold, so the evaluation
+    // that follows this fetch does not re-parse what it just serialised.
+    _rulesParsed = { raw: s, json: rulesJson };
+
     try {
-        const s = JSON.stringify(rulesJson);
         if (s.length <= R_RULES_MAX_BYTES) {
             roam.set(R_RULES, s);
             roam.set(R_RULES_TS, Date.now().toString());
         } else {
-            // Drop the roamed copy rather than leaving an older, smaller
-            // ruleset in place — a stale roam is worse than a cold fetch.
+            // Drop the roamed copy rather than leaving an older, smaller ruleset
+            // in place — a stale roam is worse than a cold fetch.
             roam.remove(R_RULES);
             roam.remove(R_RULES_TS);
             warn(`rulesJson too large to roam (${s.length}B) — cold runtimes will fetch live`);
@@ -2123,15 +946,59 @@ function clearRulesCache() {
     store.remove(K_RULES, K_RULES_TS);
     roam.remove(R_RULES);
     roam.remove(R_RULES_TS);
+    _rulesParsed = { raw: null, json: null };
+    _enabledCache = { src: null, list: null };
 }
 
-// Which tier answered, for the log line in findMatchingRule. Diagnostic only.
+// Which tier answered, for the log line in findMatchingRule. Diagnostic only —
+// so it inspects raw strings and never parses.
 function describeRulesSource() {
     const ts = parseInt(store.get(K_RULES_TS) || "0", 10);
-    if (store.getJson(K_RULES)) return `local (age=${ts ? Date.now() - ts : "?"}ms)`;
+    if (store.get(K_RULES)) return `local (age=${ts ? Date.now() - ts : "?"}ms)`;
     const rts = parseInt(roam.get(R_RULES_TS) || "0", 10);
     if (roam.get(R_RULES)) return `roamed (age=${rts ? Date.now() - rts : "unknown"}ms)`;
     return "none";
+}
+/**
+ * ONE EVICTION SWEEP, EVERY TIER. Called from beginWrite(), i.e. once per
+ * decision, on every platform.
+ *
+ * An entry with no timestamp counts as expired: every writer in this file
+ * stamps one, so an unstamped value is either legacy or was written by a build
+ * that predates its ceiling. Item CustomProperties are not swept — they are
+ * item-scoped and die with the draft.
+ */
+function purgeExpiredStorage() {
+    const now = Date.now();
+    const tsOf = (v) => parseInt(v || "0", 10);
+    const expired = (ts) => !ts || now - ts > PURGE_MS;
+
+    sigCache.purge();
+
+    try {
+        if (store.get(K_RULES) && expired(tsOf(store.get(K_RULES_TS)))) {
+            store.remove(K_RULES, K_RULES_TS);
+            _rulesParsed = { raw: null, json: null };
+            _enabledCache = { src: null, list: null };
+            log("purged the local rules cache");
+        }
+        if (roam.get(R_RULES) && expired(tsOf(roam.get(R_RULES_TS)))) {
+            roam.remove(R_RULES);
+            roam.remove(R_RULES_TS);
+            log("purged the roamed rules cache");
+        }
+        if (store.get(K_ACTIVE_SIG) && expired(tsOf(store.get(K_ACTIVE_SIG_TS)))) {
+            store.remove(K_ACTIVE_SIG, K_ACTIVE_SIG_TS);
+            log("purged the local active signature id");
+        }
+        if (roam.get(R_ACTIVE_SIG) && expired(tsOf(roam.get(R_ACTIVE_SIG_TS)))) {
+            roam.remove(R_ACTIVE_SIG);
+            roam.remove(R_ACTIVE_SIG_TS);
+            log("purged the roamed active signature id");
+        }
+    } catch (e) {
+        warn("purgeExpiredStorage threw, ignoring:", e);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2144,33 +1011,25 @@ function describeRulesSource() {
 const _propsByItem = new WeakMap();
 
 /**
- * v7.5.2. THE HANDLE IS NO LONGER TRUSTED ACROSS ACTIVATIONS OR ACROSS WRITES.
+ * v7.5.2. THE HANDLE IS NOT TRUSTED ACROSS ACTIVATIONS OR ACROSS WRITES.
  *
  * The Classic build calls loadCustomPropertiesAsync on EVERY read, and that is
  * why the taskpane's manual pin has always worked there. This build memoised one
- * handle per item for the runtime's whole life, which on Windows/OWA (one
- * long-lived runtime shared by every activation) broke the pin two ways:
- *
- *   READ STALENESS — OnNewMessageCompose cached the bag before the user opened
- *   the pane. The pane then wrote cardbyte_manual_sig_id through its OWN handle.
- *   The next OnMessageRecipientsChanged read the cached bag, saw no pin, and let
- *   the rules switch the signature. That is the reported bug.
- *
- *   WRITE CLOBBER, worse — CustomProperties.saveAsync serialises the WHOLE
- *   in-memory bag. Saving a stale one does not merely miss the pin, it DELETES
- *   it from the item, permanently, so even a later correct read finds nothing.
+ * handle per item for the runtime's whole life, which on Windows/OWA broke the
+ * pin two ways: a stale READ missed a pin written by the pane, and — worse —
+ * saveAsync serialises the WHOLE in-memory bag, so saving a stale one DELETED
+ * the pin from the item permanently.
  *
  * Reloading on every read (full Classic parity) would cost ~13 round trips per
  * activation, which a cold Mac/mobile send budget cannot absorb. So: fresh at
- * the START of every activation (invalidateProps in each entry point) and fresh
- * before every WRITE, with reads inside one activation sharing that handle.
- * Equivalent in effect — the Classic JSRuntime is itself new per activation.
+ * the START of every activation (invalidateProps) and fresh before every WRITE,
+ * with reads inside one activation sharing that handle.
  */
 function getProps(item, { fresh = false } = {}) {
     if (fresh) _propsByItem.delete(item);
     if (_propsByItem.has(item)) return _propsByItem.get(item);
     const p = officeAsync((cb) => item.loadCustomPropertiesAsync(cb), {
-        ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS,
+        ms: budgetMs(),
         label: "loadCustomPropertiesAsync",
     }).then((res) => res?.value ?? null);
     _propsByItem.set(item, p);
@@ -2178,8 +1037,6 @@ function getProps(item, { fresh = false } = {}) {
 }
 
 // Called once at the top of every entry point, BEFORE anything reads or writes.
-// One extra loadCustomPropertiesAsync per event, versus silently eating whatever
-// the taskpane wrote since the last activation.
 function invalidateProps(item) { if (item) _propsByItem.delete(item); }
 
 async function getItemProp(item, key) {
@@ -2204,7 +1061,7 @@ async function setItemProps(item, kv) {
             else props.set(k, String(v));
         }
         const res = await officeAsync((cb) => props.saveAsync(cb), {
-            ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS,
+            ms: budgetMs(),
             label: "customProps saveAsync",
         });
         return !!res;
@@ -2216,11 +1073,9 @@ async function setItemProps(item, kv) {
 
 /**
  * The pinned signature id, or null. Classic parity: validation lives HERE, so
- * every caller gets the same answer.
- *
- * An unresolvable pin ("", "null", "undefined" — a pane that passed a display id
- * or a failed lookup) would otherwise outrank every rule and then fail to fetch,
- * leaving the mail with whatever happened to be on it. Treated as no pin at all.
+ * every caller gets the same answer. An unresolvable pin ("", "null",
+ * "undefined") would otherwise outrank every rule and then fail to fetch,
+ * leaving the mail with whatever happened to be on it.
  */
 async function getManualOverride(item) {
     const raw = await getItemProp(item, P_MANUAL_SIG);
@@ -2246,10 +1101,12 @@ async function markActiveSignature(item, id, snapshot = null, digest = null) {
     if (id == null) {
         store.remove(K_ACTIVE_SIG, K_ACTIVE_SIG_TS);
         roam.remove(R_ACTIVE_SIG);
+        roam.remove(R_ACTIVE_SIG_TS);
     } else {
         store.set(K_ACTIVE_SIG, String(id));
         store.set(K_ACTIVE_SIG_TS, Date.now().toString());
         roam.set(R_ACTIVE_SIG, String(id));
+        roam.set(R_ACTIVE_SIG_TS, Date.now().toString());
     }
     if (!item) return;
 
@@ -2297,11 +1154,29 @@ async function getActiveSignatureId(item = null, { allowRoam = true } = {}) {
 //  caller — `failure` for the signature calls, noteRulesFetchError for the
 //  rules call — and resolveSigHtml / findMatchingRule decide whether it is
 //  worth telling the user about.
+//
+//  v7.6 (δ). EVERY REQUEST BUSTS THE HTTP CACHE. Without this, a correct
+//  app-level refetch could still be answered from the WebView's own cache, and
+//  the result would then be re-stamped with a fresh ts — which is what made the
+//  5-minute TTLs look inert even where they were implemented correctly.
+//  Request-side Cache-Control headers are deliberately NOT used: they widen the
+//  CORS preflight and would fail closed against a backend whose
+//  Access-Control-Allow-Headers does not list them (prereq (a)).
 // ─────────────────────────────────────────────────────────────────────────────
+
+function apiUrl(path) {
+    return `${BASE_URL}${path}${path.indexOf("?") === -1 ? "?" : "&"}_=${Date.now()}`;
+}
 
 function apiHeaders(encryptedMail, extra = {}) {
     return { username: encryptedMail, "X-Platform": getXPlatform(), ...extra };
 }
+
+const apiInit = (encryptedMail, extra) => ({
+    method: "GET",
+    cache: "no-store",
+    headers: apiHeaders(encryptedMail, extra),
+});
 
 // Shown verbatim only when it is a real sentence: an exception class name or an
 // over-long string falls back to the canned wording rather than putting Java
@@ -2327,28 +1202,20 @@ async function readApiError(res) {
 async function fetchRules(encryptedMail) {
     const xp = getXPlatform();
     try {
-        const res = await fetch(`${BASE_URL}/rules-config/get-active`, {
-            method: "GET",
-            headers: apiHeaders(encryptedMail, { "Content-Type": "application/json" }),
-        });
-        // if (!res.ok) {
-        //     // Status is logged WITH the platform header: a 4xx that disappears
-        //     // when X-Platform is WINDOWS is fix (I), not a backend outage.
-        //     let body = "";
-        //     try { body = (await res.text()).slice(0, 200); } catch (_) { }
-        //     warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, body);
-        //     noteRulesFetchError(failureKindFor(res.status));
-        //     return null;
-        // }
+        const res = await fetch(
+            apiUrl("/rules-config/get-active"),
+            apiInit(encryptedMail, { "Content-Type": "application/json" })
+        );
         if (!res.ok) {
+            // Status is logged WITH the platform header: a 4xx that disappears
+            // when X-Platform is WINDOWS is fix (I), not a backend outage.
             const { message, planExpired, raw } = await readApiError(res);
             warn(`rules fetch returned ${res.status} (X-Platform=${xp})`, raw);
             if (planExpired) {
                 // Recorded directly, breaking the "fetches never record" rule of
                 // (O) deliberately: this is an account-level fact, not a rules
                 // degradation, and it is true whether or not a cached ruleset
-                // covers for the failed fetch. noteRulesFetchError still runs so
-                // the existing degraded path is unchanged.
+                // covers for the failed fetch.
                 recordFailure("plan_expired", "rules-config", message);
             }
             noteRulesFetchError(planExpired ? "server" : failureKindFor(res.status));
@@ -2372,30 +1239,15 @@ async function fetchRules(encryptedMail) {
     }
 }
 
-// Default signature. Returns { html, explicit, failure }:
+// Default signature. Returns { html, explicit, failure, failureMsg }:
 //   explicit — the server gave a definitive answer, so an empty result means
 //              "unassigned", not "unknown".
 //   failure  — ledger kind for a genuine failure, or null. A 404 is NOT a
-//              failure here: it is the definitive "nothing assigned" answer,
-//              and resolveSigHtml turns that into the unassigned message.
+//              failure here: it is the definitive "nothing assigned" answer.
 async function fetchDefaultSignature(encryptedMail) {
     const xp = getXPlatform();
     try {
-        const res = await fetch(`${BASE_URL}/html/outlook/get-active`, {
-            method: "GET",
-            headers: apiHeaders(encryptedMail),
-        });
-        // if (!res.ok) {
-        //     let msg = "";
-        //     try { const b = JSON.parse(await res.text()); msg = String(b?.message || b?.error || ""); } catch (_) { }
-        //     warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, msg);
-        //     const notFound = res.status === 404 || /not\s*found/i.test(msg);
-        //     return {
-        //         html: null,
-        //         explicit: notFound,
-        //         failure: notFound ? null : failureKindFor(res.status),
-        //     };
-        // }
+        const res = await fetch(apiUrl("/html/outlook/get-active"), apiInit(encryptedMail));
         if (!res.ok) {
             const { message, planExpired, raw } = await readApiError(res);
             warn(`default signature fetch failed: ${res.status} (X-Platform=${xp})`, raw);
@@ -2414,36 +1266,26 @@ async function fetchDefaultSignature(encryptedMail) {
         }
         let html = null;
         try {
-            html = JSON.parse(await aesDecrypt(await res.text()))?.html;
+            html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
         } catch (e) {
             // 2xx that we cannot read is a server-side problem, not a network one.
             warn("default signature response unreadable:", e.message);
-            return { html: null, explicit: false, failure: "server" };
+            return { html: null, explicit: false, failure: "server", failureMsg: null };
         }
-        return { html, explicit: true, failure: null };
+        return { html, explicit: true, failure: null, failureMsg: null };
     } catch (e) {
         warn(`fetchDefaultSignature crashed (X-Platform=${xp}):`, e);
-        return { html: null, explicit: false, failure: "offline" };
+        return { html: null, explicit: false, failure: "offline", failureMsg: null };
     }
 }
 
-// Same { html, explicit, failure } shape as fetchDefaultSignature so
-// resolveSigHtml can treat both uniformly.
+// Same shape as fetchDefaultSignature so resolveSigHtml can treat both uniformly.
 async function fetchSignatureById(id, encryptedMail) {
     try {
-        const res = await fetch(`${BASE_URL}/rules-config/get/${encodeURIComponent(id)}`, {
-            method: "GET",
-            headers: apiHeaders(encryptedMail),
-        });
-        // if (!res.ok) {
-        //     err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`);
-        //     const notFound = res.status === 404;
-        //     return {
-        //         html: null,
-        //         explicit: notFound,
-        //         failure: notFound ? null : failureKindFor(res.status),
-        //     };
-        // }
+        const res = await fetch(
+            apiUrl(`/rules-config/get/${encodeURIComponent(id)}`),
+            apiInit(encryptedMail)
+        );
         if (!res.ok) {
             const { message, planExpired, raw } = await readApiError(res);
             err(`signature fetch failed id=${id}: ${res.status} (X-Platform=${getXPlatform()})`, raw);
@@ -2463,30 +1305,16 @@ async function fetchSignatureById(id, encryptedMail) {
             html = JSON.parse(await aesDecrypt(await res.text()))?.html || null;
         } catch (e) {
             warn(`signature response unreadable id=${id}:`, e.message);
-            return { html: null, explicit: false, failure: "server" };
+            return { html: null, explicit: false, failure: "server", failureMsg: null };
         }
         if (!html) warn("signature HTML empty for id:", id);
-        return { html, explicit: true, failure: null };
+        return { html, explicit: true, failure: null, failureMsg: null };
     } catch (e) {
         err(`fetchSignatureById crashed id=${id}:`, e);
-        return { html: null, explicit: false, failure: "offline" };
+        return { html: null, explicit: false, failure: "offline", failureMsg: null };
     }
 }
 
-/**
- * THE CORE OF THE ID-AS-STATE DESIGN: id -> HTML, cache then network.
- *
- * `unassigned` distinguishes "the server answered definitively and there is no
- * signature for this user" (an admin problem) from "we could not reach or parse
- * the server" (a transient problem). The two need different messages — without
- * the distinction a misconfiguration is indistinguishable from flaky network.
- *
- * FIX (O). This is where an API failure becomes a user-facing failure, via the
- * ledger. `silent` exists for background callers (prefetch): a warm-up that
- * fails has not affected the mail in front of the user and must not notify.
- *
- * @returns {Promise<{ html: string|null, source: "cache"|"network"|"none", unassigned: boolean }>}
- */
 // Two activations overlap on Windows/OWA, and prefetch races the evaluation.
 // Without this they all miss the cold cache and all fetch the same id.
 const _inFlight = new Map();
@@ -2498,10 +1326,29 @@ function dedupe(key, make) {
     _inFlight.set(key, p);
     return p;
 }
-async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = null, silent = false } = {}) {
+
+/**
+ * THE CORE OF THE ID-AS-STATE DESIGN: id -> HTML, cache then network.
+ *
+ * v7.6 (α). FRESHNESS AND RESILIENCE ARE NOW SEPARATE. The primary read is
+ * TTL-checked; the aged copy is kept only to answer with when the network
+ * cannot. Previously this opened with skipTtl:true, which meant a cached
+ * signature was served forever on any runtime that outlived one activation —
+ * i.e. every Windows/OWA session — and SIG_TTL_MS never bound at all.
+ *
+ * `unassigned` distinguishes "the server answered definitively and there is no
+ * signature for this user" (an admin problem) from "we could not reach or parse
+ * the server" (a transient problem). The two need different messages.
+ *
+ * FIX (O). This is where an API failure becomes a user-facing failure, via the
+ * ledger. `silent` exists for background callers (prefetch): a warm-up that
+ * fails has not affected the mail in front of the user and must not notify.
+ *
+ * @returns {Promise<{html: string|null, source: "cache"|"cache-stale"|"network"|"none", unassigned: boolean}>}
+ */
+async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs: budget = null, silent = false } = {}) {
     const key = String(id);
-    const budget = budgetMs ?? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
-    // const fail = (kind, detail) => { if (!silent) recordFailure(kind, detail); };
+    const ms = budget ?? budgetMs();
     const fail = (kind, detail, msg = null) => { if (!silent) recordFailure(kind, detail, msg); };
 
     // FIX (C) belt-and-braces: a rule that slipped through with no signatureId
@@ -2513,42 +1360,50 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
         return { html: null, source: "none", unassigned: false };
     }
 
-    // ── FALLBACK: a rule signature that cannot be obtained falls back to the
-    // user's DEFAULT signature, but only if it is ALREADY IN CACHE.
-    //
-    // Cache-only on purpose. This runs at the failure point — the budget is
-    // already spent (or the network is already known to be unreachable), so a
-    // second round trip here would just turn one timeout into two. The default
-    // is warmed on every platform by prefetchSignatures (J), so in practice it
-    // is there whenever the runtime has been online once.
-    //
-    // The recorded failure kind is DELIBERATELY left untouched: the user is
-    // still told what actually went wrong, because the mail is going out with
-    // the default signature rather than the one the rule asked for.
-    const defaultFromCache = (unassigned = false) => {
-        if (key === DEFAULT_ID) return null;
-        const fallback = sigCache.get(DEFAULT_ID, { skipTtl: true });
-        if (!fallback) return null;
-        warn(`id=${key} unresolved — injecting the cached DEFAULT signature instead`);
-        return { html: fallback, source: "cache", unassigned, fellBackToDefault: true };
-    };
+    const fresh = sigCache.get(key);
+    if (fresh) return { html: fresh, source: "cache", unassigned: false };
 
-    const cached = sigCache.get(key, { skipTtl: true });
-    if (cached) return { html: cached, source: "cache", unassigned: false };
+    // Held for the failure path only. Reading it now costs nothing (the map is
+    // already parsed) and guarantees the fallback is available even if a later
+    // purge or wipe runs in between.
+    const stale = sigCache.get(key, { skipTtl: true });
+    if (stale) log(`id=${key} cache stale (age=${sigCache.age(key)}ms) — refreshing`);
+
+    // ── FALLBACK ORDER WHEN THE NETWORK CANNOT ANSWER ────────────────────────
+    //   1. our own stale copy of THIS id — still the right signature, just old
+    //   2. the cached DEFAULT — the right shape of thing, wrong id
+    //   3. nothing, and leave the body alone
+    //
+    // (2) is cache-only on purpose: this runs at the failure point, the budget
+    // is already spent (or the network is already known to be unreachable), so
+    // a second round trip would turn one timeout into two. The default is
+    // warmed on every platform by prefetchSignatures (J).
+    //
+    // The recorded failure kind is DELIBERATELY left untouched in both cases:
+    // the user is still told what actually went wrong, because the mail is
+    // going out with something other than a freshly confirmed signature.
+    const fallback = (unassigned = false) => {
+        if (stale) {
+            warn(`serving the STALE cached copy of id=${key} (age=${sigCache.age(key)}ms)`);
+            return { html: stale, source: "cache-stale", unassigned: false };
+        }
+        if (key !== DEFAULT_ID) {
+            const def = sigCache.get(DEFAULT_ID, { skipTtl: true });
+            if (def) {
+                warn(`id=${key} unresolved — injecting the cached DEFAULT signature instead`);
+                return { html: def, source: "cache-stale", unassigned, fellBackToDefault: true };
+            }
+        }
+        return { html: null, source: "none", unassigned };
+    };
 
     if (!allowNetwork || !userEmail) {
         warn(`cannot resolve id=${key} (allowNetwork=${allowNetwork}, user=${!!userEmail})`);
         fail("offline", "no network permitted or no user email");
-        return defaultFromCache() || { html: null, source: "none", unassigned: false };
+        return fallback();
     }
 
     try {
-        // const enc = await encryptEmail(userEmail);
-        // const { html, explicit, failure } = key === DEFAULT_ID
-        //     ? await withTimeout(fetchDefaultSignature(enc), budget, "default fetch")
-        //     : await withTimeout(fetchSignatureById(key, enc), budget, `sig fetch ${key}`);
-
-
         const enc = await encryptEmail(userEmail);
         // Account-scoped: onFromChangedHandler clears the cache, but a fetch
         // already in flight for the PREVIOUS identity would otherwise resolve
@@ -2563,13 +1418,17 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
             return r;
         }));
 
-        const { html, explicit, failure } = await withTimeout(
-            inner, budget, key === DEFAULT_ID ? "default fetch" : `sig fetch ${key}`);
+        // v7.6 (ε): failureMsg is destructured. It was read in the plan-expired
+        // branch below without ever being bound, so that branch threw a
+        // ReferenceError into the catch and a lapsed subscription was reported
+        // to the user as "check your connection".
+        const { html, explicit, failure, failureMsg } = await withTimeout(
+            inner, ms, key === DEFAULT_ID ? "default fetch" : `sig fetch ${key}`);
 
         if (html) return { html, source: "network", unassigned: false };
 
         if (failure === "plan_expired") {
-            // No defaultFromCache() here: the subscription is what lapsed, so a
+            // No fallback here at all: the subscription is what lapsed, so a
             // cached copy is no more licensed than the live one — and silently
             // serving it is exactly how an expiry goes unnoticed for a TTL.
             fail("plan_expired", `id=${key}`, failureMsg);
@@ -2577,18 +1436,21 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
             return { html: null, source: "none", unassigned: false, planExpired: true };
         }
 
-        // Definitive empty answer = nothing is assigned server-side.
+        // Definitive empty answer = nothing is assigned server-side. A stale
+        // copy of an id the server now disowns is still the last thing the
+        // admin published for it, so it is preferred to a blank signature —
+        // but the failure stands and the user is told.
         if (explicit) {
             fail("unassigned", `id=${key}`);
-            return defaultFromCache(true) || { html: null, source: "none", unassigned: true };
+            return fallback(true);
         }
         fail(failure || "server", `id=${key}`);
-        return defaultFromCache() || { html: null, source: "none", unassigned: false };
+        return fallback();
     } catch (e) {
         // withTimeout rejected: the call never came back inside the budget.
         warn(`resolveSigHtml failed id=${key}:`, e.message);
         fail("offline", `id=${key} ${e.message}`);
-        return defaultFromCache() || { html: null, source: "none", unassigned: false };
+        return fallback();
     }
 }
 
@@ -2597,15 +1459,15 @@ async function resolveSigHtml(id, userEmail, { allowNetwork = true, budgetMs = n
 //
 // Silent on purpose (O): the user already has a signature on the mail, and a
 // failed revalidation does not change that. Failures are logged, not reported.
+// Goes through the same dedupe map so it cannot double up with a prefetch.
 async function revalidateSigHtml(id, userEmail, appliedHtml) {
     const key = String(id);
     try {
         const enc = await encryptEmail(userEmail);
-        const { html } = key === DEFAULT_ID
-            ? await fetchDefaultSignature(enc)
-            : await fetchSignatureById(key, enc);
+        const { html } = await dedupe(`sig:${String(userEmail).toLowerCase()}:${key}`, () => (
+            key === DEFAULT_ID ? fetchDefaultSignature(enc) : fetchSignatureById(key, enc)
+        ).then((r) => { if (r.html) sigCache.set(key, r.html); return r; }));
         if (!html) return null;
-        sigCache.set(key, html);
         return html === appliedHtml ? null : html;
     } catch (e) {
         warn(`revalidate failed id=${key}:`, e.message);
@@ -2624,23 +1486,23 @@ async function revalidateSigHtml(id, userEmail, appliedHtml) {
  *
  * Silent (O): this is speculative warm-up. If it fails, the id will be fetched
  * again when it is actually needed, and THAT failure is the one worth showing.
+ *
+ * v7.6: TTL-checked, so this now genuinely re-warms an aged entry instead of
+ * seeing every entry as present forever.
  */
 async function prefetchSignatures(userEmail, { includeRules = true } = {}) {
-    const ids = [];
+    const ids = new Set([DEFAULT_ID]);
 
     if (includeRules) {
         const rulesJson = getCachedRules({ skipTtl: true });
-        for (const r of enabledRulesWithSignatures(rulesJson)) {
-            const id = String(r.signatureId);
-            if (!ids.includes(id)) ids.push(id);
-        }
+        for (const r of enabledRulesWithSignatures(rulesJson)) ids.add(String(r.signatureId));
     }
-    if (!ids.includes(DEFAULT_ID)) ids.push(DEFAULT_ID);
 
-    const missing = ids.filter((id) => !sigCache.get(id, { skipTtl: true }));
+    const missing = [...ids].filter((id) => !sigCache.get(id));
     if (!missing.length) return;
     log(`prefetching ${missing.length} signature(s):`, missing.join(", "));
     await Promise.allSettled(missing.map((id) => resolveSigHtml(id, userEmail, { silent: true })));
+    flushSigCache();   // one stringify for the whole batch
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2650,7 +1512,6 @@ async function prefetchSignatures(userEmail, { includeRules = true } = {}) {
 //     null  — the host did not answer (timeout, error, unsupported item).
 //             Nothing can be concluded; do not evaluate, do not snapshot.
 //     []    — the host answered: there are no recipients. This is a RESULT.
-//             Rules evaluate against it normally and the default wins.
 //     [...] — the host answered with recipients.
 //
 //  v7.1 collapsed the first two into [] and then treated any empty list as
@@ -2666,7 +1527,7 @@ async function getRecipients(field) {
     const res = await officeAsync((cb) => field.getAsync(cb), {
         // FIX (K): cold runtimes are slower; 2.5s was turning slow mobile reads
         // into "unreadable", which blocks evaluation entirely.
-        ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS,
+        ms: budgetMs(),
         label: "recipients getAsync",
     });
     // officeAsync resolves to its fallback (null) on failure/timeout; a
@@ -2694,18 +1555,41 @@ async function getAllRecipientEmails(item) {
 }
 
 /**
+ * ONE READ PER DECISION — v7.6 (ζ).
+ *
+ * Each call costs up to FETCH_BUDGET_MS_COLD for To plus the same for Cc, plus
+ * the (K) 400ms cold retry. It was being called three times per compose
+ * evaluation and twice inside the send budget, for the same list. The memo is
+ * keyed on the write token, so beginWrite() invalidates it and no result can
+ * ever cross a decision boundary.
+ *
+ * ONLY SUCCESSFUL READS ARE MEMOISED. A null means the host did not answer, and
+ * that must stay retryable — caching it would turn one slow read into a whole
+ * decision's worth of "unreadable", which is exactly the (K) failure mode.
+ *
  * FIX (K). Cold runtimes (Mac AND mobile) sometimes answer null or an empty
  * list on the first read of a list that is in fact populated. Retry once, and
  * prefer the retry only if it actually answered — a null retry must never
  * overwrite a good first read.
+ *
+ * @param {boolean} force  bypass the memo. Used by the empty-list recheck,
+ *   where re-reading the same list is the entire point.
  */
-async function readRecipientEmails(item) {
+let _recipCache = { seq: -1, emails: null };
+
+async function readRecipientEmails(item, { force = false } = {}) {
+    if (!force && _recipCache.seq === _writeSeq && _recipCache.emails !== null) {
+        return _recipCache.emails;
+    }
+
     let emails = await getAllRecipientEmails(item);
     if ((emails === null || emails.length === 0) && isColdRuntime()) {
         await sleep(400);
         const retry = await getAllRecipientEmails(item);
         if (retry !== null) emails = retry;
     }
+
+    if (emails !== null) _recipCache = { seq: _writeSeq, emails };
     return emails;
 }
 
@@ -2769,13 +1653,13 @@ async function getComposeType(item, { strict = false, persist = false } = {}) {
 
     // Only a value that came from getComposeTypeAsync or a subject prefix is
     // authoritative. The non-strict assumption below is a GUESS, and caching or
-    // persisting a guess poisons every later evaluation: line ~2493 short-
-    // circuits on the persisted property, so a reply guessed as "compose"
-    // (getComposeTypeAsync returns "" and the subject is not populated yet at
-    // OnNewMessageCompose) stays "compose" for the life of the draft, and every
-    // context:"reply" rule is skipped — including at send, where the API would
-    // by then have answered correctly.
-    let t = await detectComposeType(item, strict);
+    // persisting a guess poisons every later evaluation: the persisted-property
+    // short circuit above would make a reply guessed as "compose" (the API
+    // returns "" and the subject is not populated yet at OnNewMessageCompose)
+    // stay "compose" for the life of the draft, so every context:"reply" rule
+    // is skipped — including at send, where the API would by then have answered
+    // correctly.
+    const t = await detectComposeType(item, strict);
     const authoritative = t !== null;
 
     if (!t && !strict) {
@@ -2808,18 +1692,31 @@ function getDomain(email) {
  * should have applied. Priority is coerced because a missing one yields NaN,
  * and a comparator that returns NaN leaves Array#sort free to order however it
  * likes, i.e. an arbitrary "highest priority" match.
+ *
+ * v7.6: memoised on the parsed ruleset object (which parseRules keeps stable),
+ * because findMatchingRule and prefetchSignatures both call this per activation
+ * and it filters, allocates and sorts every time.
  */
+let _enabledCache = { src: null, list: null };
+
 function enabledRulesWithSignatures(rulesJson) {
-    const all = (rulesJson?.rulesList || []).filter((r) => r && r.enabled);
-    const usable = all.filter(
-        (r) => r.signatureId != null && String(r.signatureId).trim() !== ""
-    );
-    const dropped = all.length - usable.length;
-    if (dropped) {
-        warn(`${dropped} enabled rule(s) have no signatureId — ignored`,
-            all.filter((r) => !usable.includes(r)).map((r) => r.rule ?? r.priority));
+    if (!rulesJson) return [];
+    if (_enabledCache.src === rulesJson) return _enabledCache.list;
+
+    const all = (rulesJson.rulesList || []).filter((r) => r && r.enabled);
+    const usable = [];
+    const dropped = [];
+    for (const r of all) {
+        if (r.signatureId != null && String(r.signatureId).trim() !== "") usable.push(r);
+        else dropped.push(r.rule ?? r.priority);
     }
-    return usable.sort((a, b) => (Number(a.priority) || 0) - (Number(b.priority) || 0));
+    if (dropped.length) {
+        warn(`${dropped.length} enabled rule(s) have no signatureId — ignored`, dropped);
+    }
+    usable.sort((a, b) => (Number(a.priority) || 0) - (Number(b.priority) || 0));
+
+    _enabledCache = { src: rulesJson, list: usable };
+    return usable;
 }
 
 // With zero recipients both flags are false, so "internal" and "external" both
@@ -2903,30 +1800,22 @@ function senderMatches(rule, senderEmail) {
  *   blocked = we could not evaluate safely, so the caller must NOT treat a null
  *   rule as "the default applies".
  *
- *   FIX (E): an EMPTY but successfully read recipient list is NOT blocked. No
- *   recipient can be internal or external, so recipient-scoped rules drop out
- *   and `{ rule: null, blocked: false }` tells the caller the default applies.
- *
+ *   FIX (E): an EMPTY but successfully read recipient list is NOT blocked.
  *   FIX (F): NEITHER IS AN UNKNOWN COMPOSE TYPE, unless it can actually change
  *   the answer. Sender and recipient are filtered first; the compose type is
  *   consulted only when a surviving candidate is context-scoped. This is what
- *   makes mobile work — getComposeTypeAsync does not exist there, and the old
- *   unconditional bail-out sent every send-time evaluation down the "reuse the
- *   persisted rule id" path, which is precisely the reported bug.
- *
- *   FIX (O): "no rules available at all" is the one rules failure worth
- *   reporting, and it is recorded HERE rather than in fetchRules — a failed
- *   fetch that a cached ruleset covered for changed nothing the user can see.
- *   It is recorded as a DEGRADATION, not a fatal error: a signature still gets
- *   applied, it just may not be the one a rule wanted.
+ *   makes mobile work — getComposeTypeAsync does not exist there.
+ *   FIX (O): "no rules available at all" is recorded HERE rather than in
+ *   fetchRules — a failed fetch that a cached ruleset covered for changed
+ *   nothing the user can see. Recorded as a DEGRADATION, not a fatal error.
  */
 async function findMatchingRule(item, senderEmail, {
     allowNetwork = false,
-    budgetMs = null,
+    budgetMs: budget = null,
     strictComposeType = false,
     persistComposeType = false,
 } = {}) {
-    const budget = budgetMs ?? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS);
+    const ms = budget ?? budgetMs();
 
     let rulesJson = getCachedRules({ skipTtl: strictComposeType });
     let source = rulesJson ? describeRulesSource() : "none";
@@ -2934,7 +1823,7 @@ async function findMatchingRule(item, senderEmail, {
     if (!rulesJson && allowNetwork && senderEmail) {
         warn("rules not cached — live fetch");
         const enc = await encryptEmail(senderEmail);
-        rulesJson = await withTimeout(fetchRules(enc), budget, "rules fetch")
+        rulesJson = await withTimeout(fetchRules(enc), ms, "rules fetch")
             .catch((e) => { warn("rules fetch timed out:", e.message); noteRulesFetchError("offline"); return null; });
         source = rulesJson ? "network" : "none";
     }
@@ -2951,7 +1840,13 @@ async function findMatchingRule(item, senderEmail, {
         return { rule: null, blocked: true };
     }
     if (emails.length === 0) {
-        // Deliberately NOT blocked — see (E).
+        // Deliberately NOT blocked — see (E). v7.7 (3): and not evaluated
+        // either — the default is the answer for an empty recipient set.
+        if (EMPTY_RECIPIENTS_MEANS_DEFAULT) {
+            log("no recipients — default applies (EMPTY_RECIPIENTS_MEANS_DEFAULT)");
+            if (persistComposeType) getComposeType(item, { persist: true }).catch(() => { });
+            return { rule: null, blocked: false };
+        }
         log("no recipients — evaluating as an empty recipient set");
     }
 
@@ -3042,20 +1937,18 @@ async function findMatchingRule(item, senderEmail, {
 //
 //  WHY WRAP WHAT WE WRITE: there is no Office API for "give me the signature
 //  block". body.getAsync returns the whole draft, and setSignatureAsync does
-//  not put the block at the end — on a reply it sits ABOVE the quoted original
-//  — so nothing positional can be relied on. Every write is therefore wrapped
-//  in <div data-cb-sig="{id}">. Drafts written by v7.4 have no wrapper; those
-//  fall back to a token-run search over the whole body.
+//  not put the block at the end — on a reply it sits ABOVE the quoted original.
+//  Every write is therefore wrapped in <div data-cb-sig="{id}">. Drafts written
+//  by v7.4 have no wrapper and fall back to a token-run search.
 //
 //  WHAT IS COMPARED (HtmlContentSignature.PROFILES.body):
 //    IN : visible text, link hrefs, image identity and order, block structure.
 //    OUT: <style> bodies, inline CSS, <script>, cid:/blob:/data: URLs.
 //  Excluded because the Word/OWA editors rewrite CSS wholesale and Outlook
 //  rewrites remote <img src> to cid: attachment references the moment a
-//  signature is inserted — including them reports every desktop draft as
-//  tampered. A purely cosmetic CSS edit is therefore not detected; accepted
-//  deliberately, since a signature attack has to change text, a link, or an
-//  image to be worth mounting.
+//  signature is inserted. A purely cosmetic CSS edit is therefore not detected;
+//  accepted deliberately, since a signature attack has to change text, a link,
+//  or an image to be worth mounting.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function escAttr(v) {
@@ -3070,13 +1963,29 @@ function escAttr(v) {
 // mail somehow carried two), no class, no styling that could alter layout.
 const wrapSignature = (html, id) => `<div ${SIG_MARK_ATTR}="${escAttr(id)}">${html}</div>`;
 
+/**
+ * v7.6 (η). Memoised. HCS.digest tokenises the entire signature HTML, and it
+ * was called twice over the same string on every send — once by applyById for
+ * P_SIG_DIGEST and once by verifySignatureOnBody for the admin-edit note.
+ */
+let _digestCache = { html: null, digest: null };
+
+function sigDigest(html) {
+    if (!HCS || html == null) return null;
+    if (_digestCache.html === html) return _digestCache.digest;
+    let d = null;
+    try { d = HCS.digest(html, SIG_PROFILE); } catch (e) { warn("digest failed:", e); return null; }
+    _digestCache = { html, digest: d };
+    return d;
+}
+
 // null = could not read (host lacks the API, or the call failed/timed out).
 // "" is a legitimate value: an empty draft body.
 async function readBodyHtml(item) {
     if (typeof item?.body?.getAsync !== "function") return null;
     const res = await officeAsync(
         (cb) => item.body.getAsync(Office.CoercionType.Html, cb),
-        { ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS, label: "body getAsync" }
+        { ms: budgetMs(), label: "body getAsync" }
     );
     return res ? String(res.value ?? "") : null;
 }
@@ -3084,19 +1993,14 @@ async function readBodyHtml(item) {
 /**
  * Is `expectedHtml` still intact on the draft?
  *
- * v7.5.1: the region classification now lives in HCS.verifyInDraft, shared with
- * the Classic build. It splits the body at the quoted-thread boundary and only
- * ever inspects the LIVE area. Before that, a reply or forward whose quoted
- * thread contained an intact copy of the signature — any earlier mail in the
- * thread that we had signed — reported "identical" while the live signature was
- * edited or deleted, so nothing was re-inserted. New compose was unaffected
- * because there is no quoted text, which is exactly how the bug presented.
+ * v7.5.1: the region classification lives in HCS.verifyInDraft, shared with the
+ * Classic build. It splits the body at the quoted-thread boundary and only ever
+ * inspects the LIVE area.
  *
  * @returns {Promise<{verdict:string, reason:string, note:string}>}
  *   identical  — untouched. The ONLY verdict that suppresses the write.
  *   modified   — recognisably our signature, edited.
- *   absent     — not in the live area (normal on mobile, where nothing is
- *                written at compose; also "the user deleted it").
+ *   absent     — not in the live area (normal on mobile; also "user deleted it").
  *   duplicate  — more than one signature block in the live area.
  *   id-changed — the live block belongs to a different signature id.
  *   unknown    — could not tell. Treated as "write it".
@@ -3113,15 +2017,25 @@ async function verifySignatureOnBody(item, expectedHtml, id) {
     let note = "";
     try {
         const prev = await getItemProp(item, P_SIG_DIGEST);
-        if (prev && prev !== HCS.digest(expectedHtml, SIG_PROFILE)) {
+        if (prev && prev !== sigDigest(expectedHtml)) {
             note = "expected copy changed since compose (server-side update, not an edit)";
         }
     } catch (_) { }
 
     try {
-        const r = HCS.verifyInDraft(expectedHtml, body, {
-            ...SIG_PROFILE, markAttr: SIG_MARK_ATTR, sigId: id,
-        });
+        const opt = { ...SIG_PROFILE, markAttr: SIG_MARK_ATTR, sigId: id };
+        // v7.7 (4). No wrapper left on the draft (editor stripped it, or a
+        // pre-7.5 draft): fall back to a token-run search of the live area.
+        // A deleted signature still reads "absent"; an intact unmarked one
+        // reads "identical" instead of forcing a rewrite on every send.
+        const marked = HCS.extractMarkedRegions(body, SIG_MARK_ATTR);
+        if (!marked.length) {
+            const split = HCS.splitDraftAtQuote(body);
+            const scope = split.boundary < body.length ? "live-of-reply" : "whole-body";
+            const rr = HCS.verifyRegion(expectedHtml, split.live, opt);
+            return { verdict: rr.verdict, reason: `${scope}: marker-free token match`, note };
+        }
+        const r = HCS.verifyInDraft(expectedHtml, body, opt);
         return { verdict: r.verdict, reason: `${r.scope}: ${r.reason}`, note };
     } catch (e) {
         // The comparison must never take the send down with it.
@@ -3155,7 +2069,7 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
     // towards MAX_SIG_BYTES because it is part of what goes on the mail.
     const payload = sigId == null ? html : wrapSignature(html, sigId);
 
-    const bytes = new Blob([payload]).size;
+    const bytes = utf8Len(payload);
     if (bytes > MAX_SIG_BYTES) {
         warn(`signature ${bytes}B exceeds ${MAX_SIG_BYTES}B — not applying`);
         fail("too_large", `${bytes}B > ${MAX_SIG_BYTES}B`);
@@ -3165,7 +2079,7 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
     if (hostCanSetSignature(item)) {
         const res = await officeAsync(
             (cb) => item.body.setSignatureAsync(payload, { coercionType: Office.CoercionType.Html }, cb),
-            { ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS, label: "setSignatureAsync" }
+            { ms: budgetMs(), label: "setSignatureAsync" }
         );
         if (res) { log(`signature written (${bytes}B)`); return true; }
     } else if (!isSendTime) {
@@ -3181,7 +2095,7 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
     if (isSendTime && typeof item.body?.appendOnSendAsync === "function") {
         const res = await officeAsync(
             (cb) => item.body.appendOnSendAsync(payload, { coercionType: Office.CoercionType.Html }, cb),
-            { ms: isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS, label: "appendOnSendAsync" }
+            { ms: budgetMs(), label: "appendOnSendAsync" }
         );
         if (res) { log("signature appended via appendOnSendAsync"); return true; }
     }
@@ -3192,12 +2106,12 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
 
 /**
  * Apply the signature for `id`, guarded by the write token.
- * Fast path applies a cached copy immediately; revalidation rewrites only if
- * the server copy differs AND no newer decision has been made meanwhile.
  *
- * FIX (M)/(N). No notifications here at all — not the old "Loading your
- * signature...", not the success, not the errors. It returns a boolean and
- * leaves the ledger populated; the caller reports once.
+ * FIX (M)/(N). No notifications here at all. It returns a result and leaves the
+ * ledger populated; the caller reports once.
+ *
+ * @returns {Promise<{applied:boolean, status:string, verdict:string|null, digest:string|null}>}
+ *   status: written | unchanged | detected | deferred | stale | failed
  */
 async function applyById(item, id, userEmail, seq, { revalidate = false, isSendTime = false } = {}) {
     const key = String(id);
@@ -3215,12 +2129,8 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
     // OnMessageRecipientsChanged fires repeatedly as a recipient is typed and
     // resolved, and each pass previously re-resolved the HTML and rewrote the
     // body even when the decision had not changed — the visible "signatures
-    // inserted one after another until the right rule wins". The send path has
-    // always short-circuited this way (decideSendId reuses P_ACTIVE_SIG when
-    // the recipient snapshot is unchanged, and applyById returns "unchanged"
-    // when verification says the body already carries this signature); compose
-    // now behaves the same. applySignature clears P_ACTIVE_SIG on entry, so the
-    // FIRST insertion on a new draft is unaffected.
+    // inserted one after another until the right rule wins". applySignature
+    // clears P_ACTIVE_SIG on entry, so the FIRST insertion is unaffected.
     if (!isSendTime) {
         const activeNow = await getItemProp(item, P_ACTIVE_SIG);
         if (activeNow && String(activeNow) === key) {
@@ -3230,21 +2140,23 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
         }
     }
 
-    let { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
-        budgetMs: isSendTime ? (isColdRuntime() ? FETCH_BUDGET_MS_COLD : FETCH_BUDGET_MS) : 10_000,
+    const { html, source, unassigned } = await resolveSigHtml(key, userEmail, {
+        // Compose can afford a longer wait than a send; it is not racing the
+        // user's click and there is no send budget wrapping it.
+        budgetMs: isSendTime ? budgetMs() : 10_000,
     });
 
     if (!html) {
         // Never blank the body or substitute a guess: whatever is there already
         // is better than nothing. resolveSigHtml has already recorded WHY —
-        // unassigned / offline / server — so the message is specific.
+        // unassigned / offline / server / plan_expired — so the message is specific.
         warn(`could not resolve id=${key} (unassigned=${unassigned}) — leaving body as-is`);
         if (!hasFailure()) recordFailure("offline", `unresolved id=${key}`);
         return nothing("failed");
     }
     if (!isCurrent(seq)) { log(`stale write dropped (seq=${seq}, current=${_writeSeq})`); return nothing("stale"); }
 
-    const digest = HCS ? HCS.digest(html, SIG_PROFILE) : null;
+    const digest = sigDigest(html);
     let sendVerdict = null;
 
     // ── v7.5. THE ONLY NEW DECISION IN THE APPLY PATH ────────────────────────
@@ -3282,7 +2194,7 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
     if (!ok) return nothing("failed");
     log(`applied id=${key} from ${source} in ${since(t0)}`);
 
-    if (revalidate && source === "cache" && userEmail && !isSendTime) {
+    if (revalidate && source !== "network" && userEmail && !isSendTime) {
         // Background only — never blocks the user, never races the token, and
         // never touches the notification bar or the ledger.
         revalidateSigHtml(key, userEmail, html).then(async (fresh) => {
@@ -3297,13 +2209,35 @@ async function applyById(item, id, userEmail, seq, { revalidate = false, isSendT
 // ─────────────────────────────────────────────────────────────────────────────
 //  THE SINGLE DECISION PATH
 //  Everything at compose time funnels through here: pick an id, apply it once,
-//  persist it, and report ONCE. Replaces v6's applySignatureCore +
-//  onRecipientsChanged pair, which each wrote the body independently.
+//  persist it, and report ONCE.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Persist the decision, unless the item already says exactly this.
+ *
+ * v7.6: markActiveSignature costs a loadCustomPropertiesAsync + a saveAsync,
+ * and OnMessageRecipientsChanged fires repeatedly while an address is typed.
+ * When the id AND the snapshot both already match, there is nothing to write.
+ * The digest is written when supplied and different, since that is what tells
+ * send time an admin edit from a user edit.
+ */
+async function persistDecision(item, id, snapshot, digest) {
+    const [curId, curSnap] = await Promise.all([
+        getItemProp(item, P_ACTIVE_SIG),
+        getItemProp(item, P_RECIP_SNAPSHOT),
+    ]);
+    const sameId = curId != null && String(curId) === String(id);
+    const sameSnap = snapshot === null ? curSnap === null : curSnap === snapshot;
+    if (sameId && sameSnap && digest == null) {
+        log("decision unchanged — skipping customProps write");
+        return;
+    }
+    await markActiveSignature(item, id, snapshot, digest);
+}
 
 async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}) {
     const t0 = Date.now();
-    const userEmail = mailbox?.userProfile?.emailAddress;
+    const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
 
     const override = await getManualOverride(item);
     if (override) {
@@ -3312,15 +2246,14 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
         // nothing to do or say. They disagree when the pane's body write failed,
         // when a pre-contract pane pinned without wrapping, or when the write
         // lost a race — in which case doing nothing leaves the draft carrying a
-        // signature nobody chose. Reapply through the normal path so the wrapper
-        // and digest end up consistent.
+        // signature nobody chose.
         const activeNow = await getItemProp(item, P_ACTIVE_SIG);
         if (activeNow && String(activeNow) === String(override)) {
             log("manual override active and already on the body:", override);
             return;
         }
         log("manual override active but body state unknown — reapplying:", override);
-        showLoading(item);
+        // showLoading(item);
         const rOv = await applyById(item, override, userEmail, seq, { revalidate: false });
         // Snapshot is null on purpose: a manual choice is recipient-independent,
         // and markActiveSignature removes the property, so send time re-evaluates
@@ -3336,7 +2269,7 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
 
     // Progress goes up only after the override check, so a user-chosen
     // signature never flashes a message about work that is not happening.
-    showLoading(item);
+    // showLoading(item);
 
     const { rule, blocked } = await findMatchingRule(item, userEmail, {
         allowNetwork,
@@ -3364,12 +2297,12 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
     const targetId = rule ? String(rule.signatureId) : DEFAULT_ID;
     if (!isCurrent(seq)) { log("stale evaluation dropped"); return; }
 
-    // v7.5.2: revalidate:false. This fired a fetch for the SAME id on every
+    // v7.5.2 (AA): revalidate:false. This fired a fetch for the SAME id on every
     // cache-hit apply — one guaranteed request per compose and per recipient
-    // change — duplicating what SIG_TTL_MS already bounds, and bypassing the
-    // dedupe map so it could race a prefetch for the same id. Set back to true
-    // only if admin-side signature edits must land mid-compose rather than
-    // within one TTL window.
+    // change — bypassing the dedupe map so it could race a prefetch. With v7.6
+    // (α) the TTL genuinely bounds staleness at five minutes, which is what that
+    // change assumed all along. Set back to true only if admin-side edits must
+    // land mid-compose rather than within one TTL window.
     const result = await applyById(item, targetId, userEmail, seq, { revalidate: false });
     const applied = result.applied;
 
@@ -3378,14 +2311,13 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
     // was discarded and the send runtime had to start from nothing.
     const deferred = result.status === "deferred";
     if ((applied || deferred) && isCurrent(seq)) {
-        // May be null if the post-apply read failed; markActiveSignature then
-        // removes the snapshot property so send time re-evaluates rather than
-        // comparing against something we never measured.
+        // v7.6 (ζ): this is the SAME read findMatchingRule evaluated against —
+        // memoised on the write token — so the snapshot now describes the set
+        // the decision was actually made for. It may still be null if the read
+        // failed, in which case markActiveSignature removes the property and
+        // send time re-evaluates rather than comparing against nothing.
         const snapshot = serializeRecipients(await readRecipientEmails(item));
-        // v7.5: the digest travels with the id, so send time can distinguish a
-        // server-side update from a user edit. Null on a deferred compose —
-        // nothing was written, so there is nothing to have a digest of.
-        await markActiveSignature(item, targetId, snapshot, result.digest);
+        await persistDecision(item, targetId, snapshot, result.digest);
         if (deferred) log(`id=${targetId} persisted for the send runtime to apply`);
     }
 
@@ -3408,12 +2340,12 @@ async function decideSendId(item, userEmail) {
     // null = unreadable. Never used as a snapshot, and never compared equal to
     // a persisted one — an unreadable list must force re-evaluation, not a
     // lucky match. "" (no recipients) IS comparable and IS persistable.
+    // v7.6 (ζ): findMatchingRule below reuses this exact read.
     const currentSnap = serializeRecipients(await readRecipientEmails(item));
 
     // getManualOverride validates and returns null for an unresolvable pin, so
-    // an unusable value falls through to normal rule evaluation instead of
-    // outranking every rule and then failing to resolve. persist:false — a pin
-    // is the user's decision, not an evaluation result to record.
+    // an unusable value falls through to normal rule evaluation. persist:false —
+    // a pin is the user's decision, not an evaluation result to record.
     const override = await getManualOverride(item);
     if (override) {
         return { id: override, snapshot: currentSnap, reason: "manual override", persist: false };
@@ -3460,16 +2392,17 @@ async function decideSendId(item, userEmail) {
     // FIX (H). allowRoam only when we could not read the recipients at all. If
     // we read them, we have enough to decide here, and the roamed id may belong
     // to a different device entirely.
-    const fallback = activeId || await getActiveSignatureId(item, { allowRoam: currentSnap === null });
-    if (fallback) {
-        return { id: fallback, snapshot: currentSnap, reason: "evaluation blocked — persisted id", persist: false };
+    const fallbackId = activeId || await getActiveSignatureId(item, { allowRoam: currentSnap === null });
+    if (fallbackId) {
+        return { id: fallbackId, snapshot: currentSnap, reason: "evaluation blocked — persisted id", persist: false };
     }
     return { id: DEFAULT_ID, snapshot: currentSnap, reason: "last resort", persist: false };
 }
 
 async function onSendCore(item, mailbox) {
     const t0 = Date.now();
-    const userEmail = mailbox?.userProfile?.emailAddress;
+    await resolveSender(item, mailbox);     // v7.7 (2)
+    const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
     const seq = beginWrite();
 
     const { id, snapshot, reason, persist } = await decideSendId(item, userEmail);
@@ -3498,11 +2431,20 @@ async function onSendCore(item, mailbox) {
     if (r.applied && !hasFailure()) removeNotification(item);
     else reportOutcome(item, r.applied ? "applied" : "failed");
 
+    // Make sure anything the send warmed survives the runtime, which on a cold
+    // host is about to be torn down with the item.
+    flushSigCache();
     timed(`onSendCore (${r.status})`, t0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ENTRY POINTS
+//
+//  Every one of them opens with the same three lines: invalidateProps (v7.5.2 —
+//  the pane may have pinned since the last activation), invalidateCaches (v7.6
+//  β — the pane may have refreshed storage since the last activation), and
+//  beginWrite (a new decision: new write token, empty ledger, no recipient memo
+//  carried over).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Every handler completes exactly once, even if the body throws.
@@ -3511,6 +2453,7 @@ function makeCompleter(label, t0, event, args) {
     return () => {
         if (done) return;
         done = true;
+        flushSigCache();   // never end an activation with a pending cache write
         timed(label, t0);
         try { event.completed(args); } catch (_) { }
     };
@@ -3524,22 +2467,20 @@ const applySignature = async function (event = { completed: () => { } }) {
 
     try {
         if (!item) return complete();
-        // v7.5.2: drop any handle cached by a previous activation before reading
-        // a single property. See getProps().
         invalidateProps(item);
-        log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()})`);
+        invalidateCaches();
+        await resolveSender(item, mailbox);   // v7.7 (2): before ANY cache read
+        log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()}) account=${accountKey()}`);
 
         // FIX (M): no "Preparing your signature..." — the bar stays empty until
         // there is an outcome. FIX (N): beginWrite() also clears the ledger, so
         // everything below is attributed to this decision only.
         const seq = beginWrite();
-        const userEmail = mailbox?.userProfile?.emailAddress;
+        const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
 
-        // v7.5.2. The pin is checked BEFORE the state reset, matching Classic's
-        // runPipeline. Clearing P_ACTIVE_SIG on a pinned draft is not harmful in
-        // itself — evaluateAndApply reapplies the pinned id — but it forces a
-        // needless body write on every re-open of a draft the user has already
-        // chosen a signature for.
+        // v7.5.2 (Y). The pin is checked BEFORE the state reset, matching
+        // Classic's runPipeline. Clearing P_ACTIVE_SIG on a pinned draft forces
+        // a needless body write on every re-open.
         const pinned = await getManualOverride(item);
         if (pinned) log("manual override present at compose — not resetting active id:", pinned);
         else await markActiveSignature(item, null);
@@ -3552,7 +2493,8 @@ const applySignature = async function (event = { completed: () => { } }) {
 
         // Warm the rules cache before evaluating. With fix (A) getCachedRules()
         // genuinely returns null once the TTL lapses, so this actually refetches
-        // — in v7.0 an immortal roamed copy made it a permanent no-op.
+        // — and with v7.6 (β) it is no longer answered by a memo written before
+        // the taskpane's last refresh, nor (δ) by the WebView's HTTP cache.
         //
         // A failure here is NOT reported directly: fetchRules only notes the
         // reason, and findMatchingRule decides whether it mattered (O).
@@ -3565,7 +2507,8 @@ const applySignature = async function (event = { completed: () => { } }) {
         await Promise.allSettled([composeTypeP, rulesP]);
 
         // Only overwrite the baseline with a real reading — a null would make
-        // the next recipients-changed event compare against nothing.
+        // the next recipients-changed event compare against nothing. Memoised,
+        // so evaluateAndApply below reuses this read rather than repeating it.
         const snap0 = serializeRecipients(await readRecipientEmails(item));
         if (snap0 !== null) _lastSnapshot = snap0;
 
@@ -3599,6 +2542,14 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
     try {
         if (!item) return complete();
         invalidateProps(item);   // v7.5.2 — the pane may have pinned since the last event
+        invalidateCaches();      // v7.6 (β)
+        await resolveSender(item, mailbox);   // v7.7 (2)
+
+        // v7.6 (ζ): the token is taken HERE, before the first recipient read,
+        // not later when evaluateAndApply is called. It is what scopes the
+        // recipient memo, so a read taken before it would be attributed to the
+        // PREVIOUS decision and could be answered from that decision's memo.
+        const seq = beginWrite();
 
         // Let the host settle: OWA fires per keystroke-ish, and a half-typed
         // address produces a recipient set we do not want to evaluate.
@@ -3614,7 +2565,9 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
         // host still flickers; do not go back to skipping the evaluation.
         if (snapshot === "" && _lastSnapshot !== "") {
             await sleep(EMPTY_RECIP_SETTLE_MS);
-            const recheck = serializeRecipients(await readRecipientEmails(item));
+            // force:true — re-reading is the entire point, so the memo must not
+            // answer with the empty list we are trying to double-check.
+            const recheck = serializeRecipients(await readRecipientEmails(item, { force: true }));
             if (recheck === null) { log("recipient re-read failed — skipping"); return complete(); }
             snapshot = recheck;
         }
@@ -3625,7 +2578,7 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
         log(snapshot === ""
             ? "all recipients removed — re-evaluating (default expected)"
             : "recipients changed — re-evaluating");
-        await evaluateAndApply(item, mailbox, beginWrite());
+        await evaluateAndApply(item, mailbox, seq);
     } catch (e) {
         err("onRecipientsChangedHandler error:", e);
         if (item && !wasReported()) reportOutcome(item, "failed");
@@ -3643,27 +2596,35 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
     try {
         if (!item) return complete();
         invalidateProps(item);   // v7.5.2
-        log("from changed — re-evaluating for the new account");
+        invalidateCaches();      // v7.6 (β)
+        const prev = _senderEmail;
+        await resolveSender(item, mailbox);   // v7.7 (2): switches the namespace
+        log(`from changed — re-evaluating for the new account (${prev || "?"} -> ${_senderEmail || "?"})`);
 
         const seq = beginWrite();
-        const userEmail = mailbox?.userProfile?.emailAddress;
+        const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
 
-        // The account changed, so every cached signature and rule belongs to
-        // the previous identity. FIX (B): clearRulesCache() drops the ROAMED
-        // copy too — v7.0 cleared localStorage only, and the next read fell
-        // straight through to roaming and matched the old account's rules.
-        store.remove(K_SIG_CACHE, K_SIG_CACHE_LEGACY_DEFAULT);
-        _sigMap = null; // v7.5: the parsed map mirrors K_SIG_CACHE — drop it too
+        // v7.7 (1): storage is namespaced per account, so the previous
+        // identity's cache is simply no longer addressed — nothing to wipe,
+        // and nothing to refetch that a warm namespace already holds. Only the
+        // per-runtime memos that are not keyed by account are reset here.
         _inFlight.clear();
-        clearRulesCache();
+        _digestCache = { html: null, digest: null };
         await markActiveSignature(item, null);
 
-        if (userEmail) await fetchRules(await encryptEmail(userEmail));
+        if (userEmail && !getCachedRules()) await fetchRules(await encryptEmail(userEmail));
 
         const snap0 = serializeRecipients(await readRecipientEmails(item));
         if (snap0 !== null) _lastSnapshot = snap0;
 
         await evaluateAndApply(item, mailbox, seq);
+
+        // The new identity's cache may be cold — warm it now rather
+        // than at send, where the budget is tighter.
+        if (userEmail) {
+            prefetchSignatures(userEmail, { includeRules: !isMobile() })
+                .catch((e) => warn("prefetch failed:", e));
+        }
     } catch (e) {
         err("onFromChangedHandler error:", e);
         if (item && !wasReported()) reportOutcome(item, "failed");
@@ -3684,8 +2645,8 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         // v7.5.2. CRITICAL at send: the pane's pin is very often written during
         // this compose session, i.e. after the compose activation cached its bag.
         invalidateProps(item);
+        invalidateCaches();      // v7.6 (β) — and the pane may have refreshed the HTML too
         log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
-        // FIX (M): no "Verifying signature..." — onSendCore reports failures only.
 
         // FIX (K): mobile is a cold runtime too and needs the same headroom.
         const budget = isColdRuntime() ? SEND_BUDGET_MS_COLD : SEND_BUDGET_MS;
@@ -3694,6 +2655,9 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         // Ran out of budget or threw: the signature probably did not make it, so
         // report rather than silently clearing the bar as v7.3 did.
         warn("onSend timeout/error:", e.message);
+        // v7.7 (5): retire the write token so the still-running onSendCore
+        // cannot write the body after the send has been allowed.
+        _writeSeq++;
         if (!hasFailure()) recordFailure("offline", `onSendCore: ${e.message}`);
         if (!wasReported()) reportOutcome(item, "failed");
     } finally {
@@ -3704,18 +2668,21 @@ const onSendHandler = async function (event = { completed: () => { } }) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  BOOTSTRAP
 //  NOTE: on Windows classic the event runtime does not run Office.onReady —
-//  never put logic here that a handler depends on.
+//  never put logic here that a handler depends on. That is precisely why
+//  sigCache.purge() moved into beginWrite() in v7.6: purging from here evicted
+//  nothing at all on the one platform where the runtime outlives the activation.
 // ─────────────────────────────────────────────────────────────────────────────
 
-Office.onReady(() => {
-    log(`ready — ${CB_VERSION} | platform=${detectPlatform()} | X-Platform=${getXPlatform()} | session=${getSessionId()}`);
-    try {
-        const d = Office.context.mailbox?.diagnostics;
-        if (d) log(`host=${d.hostName} version=${d.hostVersion}`);
-    } catch (_) { }
-    log("rules cache at startup:", describeRulesSource());
-    sigCache.purge();
-});
+if (typeof Office !== "undefined" && typeof Office.onReady === "function") {
+    Office.onReady(() => {
+        log(`ready — ${CB_VERSION} | platform=${detectPlatform()} | X-Platform=${getXPlatform()} | session=${getSessionId()}`);
+        try {
+            const d = Office.context.mailbox?.diagnostics;
+            if (d) log(`host=${d.hostName} version=${d.hostVersion}`);
+        } catch (_) { }
+        if (!HCS) warn("html-content-signature.js not loaded — send-time verification disabled");
+    });
+}
 
 if (typeof Office !== "undefined" && Office.actions?.associate) {
     Office.actions.associate("applySignature", applySignature);
