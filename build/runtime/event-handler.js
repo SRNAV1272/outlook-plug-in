@@ -831,7 +831,7 @@ const HtmlContentSignature = (function () {
 
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-const BASE_URL = "https://ns-enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://n-enterprise.cardbyte.ai/email-signature";
 
 // The backend's one account-level refusal: HTTP 412 + PlanExpiredException.
 const HTTP_PLAN_EXPIRED = 412;
