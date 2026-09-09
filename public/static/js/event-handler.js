@@ -1,14 +1,24 @@
 "use strict";
 
 // =============================================================================
-//  CardByte Outlook Add-in — event-handler.js (v7.7.0-mobile-fix)
+//  CardByte Outlook Add-in — event-handler.js
 //
-//  FIX: Mobile signature insertion - removed early-return that broke mobile flow
-//  The normal flow now handles mobile via hostCanSetSignature() returning false,
-//  which triggers the "deferred" status and persists the decision for send time.
+//  v7.9.0. THE NOTIFICATION BAR IS NOW ERROR-ONLY AND STICKY.
+//
+//  What changed:
+//   • The bar carries exactly ONE kind of message: a failure. There is no
+//     success message, no progress message, and no auto-clear timer — so
+//     NOTIFY_CLEAR_MS, MSG_APPLIED, MSG_LOADING, showLoading() and
+//     clearNotificationSoon() are gone, along with the _notifSeq guard that
+//     existed only to stop the timer wiping a later message.
+//   • A failure is raised as an InsightMessage carrying an "Open add-in pane"
+//     action. The host adds its own "Dismiss" beside it.
+//   • The failure PERSISTS. Nothing in this file removes it while it is
+//     unacknowledged: a later "quiet" or "applied" outcome no longer wipes it,
+//     and a new activation re-raises it from an item property.
 // =============================================================================
 
-const CB_VERSION = "v7.8.1-send-path-fix";
+const CB_VERSION = "v7.9.0-sticky-error-bar";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -51,6 +61,12 @@ const P_MANUAL_SIG = "cardbyte_manual_sig_id";
 const P_COMPOSE_TYPE = "cardbyte_compose_type";
 const P_RECIP_SNAPSHOT = "cardbyte_recip_snapshot";
 
+// v7.9. The unacknowledged error bar. Item CustomProperties on purpose: it
+// survives Mac's fresh WKWebView per event AND it dies with the draft, which is
+// exactly the lifetime an error about THIS mail should have. The taskpane
+// removes it when the user opens the pane from the bar.
+const P_ERR_STICKY = "cardbyte_err_sticky";
+
 // v7.5. Digest of the signature HTML that was actually written, so send time can
 // tell "the user edited the signature" from "the signature changed on the server
 // since compose". Purely informational — both outcomes re-insert.
@@ -82,6 +98,9 @@ const ACTIVE_SIG_MAX_AGE_MS = 1 * 60 * 1000;
 // Freshness (*_TTL_MS) decides whether a value may be USED; this decides
 // whether it may still EXIST. Must stay > SIG_TTL_MS or the offline fallback
 // in resolveSigHtml is lost.
+//
+// NOTE: item CustomProperties — including P_ERR_STICKY — are NOT swept here.
+// They are item-scoped and die with the draft.
 const PURGE_MS = 30 * 60 * 1000;
 const SIG_PURGE_MS = PURGE_MS;
 
@@ -178,16 +197,39 @@ const INTERNAL_REQUIRES_NO_EXTERNAL = false;
 // an empty recipient set (pre-7.7 behaviour).
 const EMPTY_RECIPIENTS_MEANS_DEFAULT = true;
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  NOTIFICATION CONFIG (v7.9)
+//
+//  ONE key, ONE kind of message: a failure. It goes up when the outcome is
+//  known and stays up until the user acts on it.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const NOTIF_KEY = "cardbyte_sig_status";
 
-// FIX (M). The bar carries exactly two kinds of message:
-//   • "Signature applied" — success, auto-cleared after NOTIFY_CLEAR_MS
-//   • a failure reason    — raised only once the outcome is known, and left up
-const NOTIFY_CLEAR_MS = 3000;
-const MSG_APPLIED = "Signature applied";
-// Shown while the signature is being decided and fetched. Raised only by
-// showLoading(), and always superseded or removed by reportOutcome().
-const MSG_LOADING = "Applying your signature...";
+// `icon` must be an image resource id declared in the manifest's
+// <Resources><bt:Images>, resolved against the VersionOverrides in effect —
+// event handlers run under V1_1, so the v11.* ids are the right ones.
+// REQUIRED for an InsightMessage; invalid for an ErrorMessage.
+const NOTIF_ICON = "v11.icon16";
+
+// The Control id from VersionOverrides V1_1 → MessageComposeCommandSurface.
+// NOT a resid — this is the `id` attribute of the <Control>, and the control
+// must live in the VersionOverrides the event runtime is executing under.
+const TASKPANE_COMMAND_ID = "v11.msgComposeOpenButton";
+
+// ≤ 30 chars. The host renders "Dismiss" beside it automatically.
+const NOTIF_ACTION_TEXT = "Open add-in pane";
+
+// PRODUCT DECISION. false = the error stays until the user acts on it, even if
+// a later evaluation succeeds. true = a subsequent successful apply clears it.
+// false is what "persist until a button is clicked" means; true is arguably
+// more honest, since a stale error outlives the condition that caused it.
+const CLEAR_ERROR_ON_LATER_SUCCESS = false;
+
+// Re-raise ceiling. Dismiss is handled entirely by the host and reports nothing
+// back, so a dismissed bar is indistinguishable from one lost to navigation.
+// Without a cap, a user who dismisses would get it again on every reopen.
+const STICKY_MAX_SHOWS = 3;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  LOGGING
@@ -342,6 +384,9 @@ function utf8Len(s) {
 //  evaluation that has since been superseded must never surface against the new
 //  one.
 //
+//  v7.9 NOTE: this does NOT reset the sticky bar. The ledger is per-decision;
+//  the bar is per-item and outlives every decision until the user acts on it.
+//
 //  v7.6 (ζ): it also resets the RECIPIENT MEMO, for the same reason. One
 //  decision reads the recipient list once; the next decision reads it again.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -366,23 +411,59 @@ const isCurrent = (seq) => seq === _writeSeq;
 let _lastSnapshot = "";
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  NOTIFICATIONS
+//  NOTIFICATIONS (v7.9)
 //
-//  Two messages, one key, one writer (reportOutcome). Nothing in this file
-//  should call showNotification/notifyError directly except reportOutcome —
-//  everything else records a failure and lets the outcome be decided once.
+//  ONE writer: reportOutcome(). Nothing else in this file raises a message.
+//
+//  There is no auto-clear, no success message and no progress message, so there
+//  is nothing to race and nothing to schedule. The only two ways the bar comes
+//  down are the user clicking Dismiss (host-handled, invisible to us) and the
+//  taskpane clearing it after the user opens it from the bar.
+//
+//  ⚠ Actions require the InsightMessage type. `persistent` is NOT valid on an
+//  InsightMessage — nor on an ErrorMessage — so persistence is entirely the
+//  logic below, not a flag.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// `icon` must be an image resource id declared in the manifest's
-// <Resources><bt:Images>, resolved against the VersionOverrides in effect —
-// event handlers run under V1_1, so the v11.* ids are the right ones.
-const NOTIF_ICON = "v11.icon16";
+// Actionable bars are InsightMessage only, Mailbox 1.10+, desktop/web only, and
+// (in modern OWA / new Outlook) compose mode only. Mobile supports neither the
+// type nor actions, so it falls back to a plain ErrorMessage.
+const canUseInsight = () => {
+    try {
+        return !isMobile() &&
+            Office.context.requirements?.isSetSupported("Mailbox", "1.10") === true &&
+            !!Office.MailboxEnums?.ItemNotificationMessageType?.InsightMessage &&
+            !!Office.MailboxEnums?.ActionType?.ShowTaskPane;
+    } catch (_) { return false; }
+};
 
-// Guards the auto-clear timer: it only clears the message it was scheduled for,
-// so a later error can never be wiped by an earlier success's timeout.
-let _notifSeq = 0;
+// ── STICKY STATE ────────────────────────────────────────────────────────────
+// _stickyActive mirrors P_ERR_STICKY for the CURRENT item, so removeNotification
+// can stay synchronous. It is re-synced from the item at the top of every
+// activation — never assumed to carry over, because on Windows/OWA one runtime
+// serves every item in the Outlook session.
+let _stickyActive = false;
 
-function showNotification(item, message, type = "informationalMessage") {
+// Has THIS runtime already put the bar on THIS item? The item object is fresh
+// per window/reopen, so reopening a draft re-raises, while a second event in
+// the same compose session never resurrects a bar the user dismissed.
+const _stickyShownByItem = new WeakMap();
+
+function removeNotification(item, { force = false } = {}) {
+    if (_stickyActive && !force) {
+        log("removeNotification suppressed — an unacknowledged error is on the bar");
+        return;
+    }
+    try { item?.notificationMessages?.removeAsync?.(NOTIF_KEY, () => { }); } catch (_) { }
+}
+
+/**
+ * Raise the error bar. The ONLY message this file ever shows.
+ *
+ * @param {boolean} action  attach the "Open add-in pane" button. false at send
+ *   time, where the item is already closing and there is nothing to open.
+ */
+function showErrorBar(item, message, { action = true, contextData = null } = {}) {
     try {
         const nm = item?.notificationMessages;
         if (typeof nm?.replaceAsync !== "function") {
@@ -392,43 +473,126 @@ function showNotification(item, message, type = "informationalMessage") {
 
         let msg = String(message || "");
         if (!msg) return;
-        if (msg.length > 150) msg = `${msg.slice(0, 147)}...`; // host hard limit
+        if (msg.length > 150) msg = `${msg.slice(0, 147)}...`;   // host hard limit
 
-        const details = { type, message: msg };
-        if (type === "informationalMessage") {
-            details.icon = NOTIF_ICON;
-            details.persistent = false;
-        }
+        const wantsAction = action && canUseInsight();
 
-        _notifSeq++;
+        const details = wantsAction
+            ? {
+                type: Office.MailboxEnums.ItemNotificationMessageType.InsightMessage,
+                message: msg,
+                icon: NOTIF_ICON,                       // REQUIRED for insight
+                actions: [{                             // exactly one allowed
+                    actionType: Office.MailboxEnums.ActionType.ShowTaskPane,
+                    actionText: NOTIF_ACTION_TEXT,
+                    commandId: TASKPANE_COMMAND_ID,
+                    contextData: contextData ?? {},
+                }],
+            }
+            : {
+                // No icon, no persistent — both are invalid on an ErrorMessage
+                // and including either throws ArgumentException.
+                type: "errorMessage",
+                message: msg,
+            };
+
+        // replaceAsync fails when the key is absent, and can also fail when the
+        // message already under this key is a DIFFERENT type — which is exactly
+        // the errorMessage -> insightMessage transition. replace, then add, then
+        // remove-and-add.
+        const addIt = () => {
+            nm.addAsync(NOTIF_KEY, details, (r2) => {
+                if (r2?.status === Office.AsyncResultStatus.Succeeded) return;
+                try {
+                    nm.removeAsync(NOTIF_KEY, () => {
+                        nm.addAsync(NOTIF_KEY, details, (r3) => {
+                            if (r3?.status === Office.AsyncResultStatus.Succeeded) return;
+                            warn("notification failed:", r3?.error?.code, r3?.error?.message, details);
+                            // An unresolvable commandId lands here. Degrade to a
+                            // plain error bar rather than showing nothing.
+                            if (wantsAction) showErrorBar(item, message, { action: false });
+                        });
+                    });
+                } catch (e) {
+                    warn("notification remove/add threw:", e);
+                }
+            });
+        };
+
         nm.replaceAsync(NOTIF_KEY, details, (r) => {
             if (r?.status === Office.AsyncResultStatus.Succeeded) return;
-            // replaceAsync fails when the key is not present yet — add instead.
-            try {
-                nm.addAsync(NOTIF_KEY, details, (r2) => {
-                    if (r2?.status !== Office.AsyncResultStatus.Succeeded) {
-                        warn("notification failed:", r2?.error?.code, r2?.error?.message, details);
-                    }
-                });
-            } catch (e) {
-                warn("notification addAsync threw:", e);
-            }
+            try { addIt(); } catch (e) { warn("notification addAsync threw:", e); }
         });
     } catch (e) {
-        warn("showNotification threw, ignoring:", e);
+        warn("showErrorBar threw, ignoring:", e);
     }
 }
 
-function removeNotification(item) {
-    try { item?.notificationMessages?.removeAsync?.(NOTIF_KEY, () => { }); } catch (_) { }
+async function readSticky(item) {
+    const raw = await getItemProp(item, P_ERR_STICKY);
+    if (!raw) return null;
+    try {
+        const v = JSON.parse(raw);
+        return v && v.msg ? v : null;
+    } catch (_) { return null; }
 }
 
-// Clear after a delay, but only if nothing newer has been shown since.
-function clearNotificationSoon(item, ms = NOTIFY_CLEAR_MS) {
-    const mine = _notifSeq;
-    setTimeout(() => {
-        if (mine === _notifSeq) removeNotification(item);
-    }, ms);
+// Fire-and-forget on purpose: the property is only read by a LATER activation,
+// and _stickyActive already covers the current one. Awaiting a saveAsync here
+// would put a round trip on the failure path, which is the slowest path already.
+function persistSticky(item, kind, msg, shows) {
+    _stickyActive = true;
+    setItemProps(item, {
+        [P_ERR_STICKY]: JSON.stringify({ kind, msg, shows, ts: Date.now() }),
+    }).catch((e) => warn("sticky persist failed:", e));
+}
+
+async function clearSticky(item) {
+    _stickyActive = false;
+    if (item) _stickyShownByItem.delete(item);
+    removeNotification(item, { force: true });
+    try { await setItemProps(item, { [P_ERR_STICKY]: null }); }
+    catch (e) { warn("sticky clear failed:", e); }
+}
+
+/**
+ * Sync _stickyActive from the item, and re-raise the bar if one is outstanding.
+ *
+ * Called at the top of EVERY activation, before the decision runs — so a fresh
+ * failure this run simply replaces it, and a fresh success can clear it (when
+ * CLEAR_ERROR_ON_LATER_SUCCESS).
+ *
+ * @param {boolean} show  false = sync state only, write nothing. Used at send,
+ *   where an item save races the host's own commit (see v7.8.1 in onSendCore).
+ */
+async function restoreStickyError(item, { show = true } = {}) {
+    const s = item ? await readSticky(item) : null;
+    _stickyActive = !!s;                        // per-ITEM truth, not per-runtime
+    if (!s || !show) return;
+
+    // Already on the bar in this runtime, or dismissed by the user. Either way
+    // re-adding it would be wrong.
+    if (_stickyShownByItem.get(item)) return;
+
+    const shows = Number(s.shows) || 0;
+    if (shows >= STICKY_MAX_SHOWS) {
+        log(`sticky error suppressed after ${shows} shows — clearing`);
+        await clearSticky(item);
+        return;
+    }
+
+    _stickyShownByItem.set(item, true);
+    log(`re-raising the unacknowledged error bar (${s.kind}, show ${shows + 1})`);
+    showErrorBar(item, s.msg, {
+        action: true,
+        contextData: {
+            kind: s.kind,
+            version: CB_VERSION,
+            platform: detectPlatform(),
+            restored: true,
+        },
+    });
+    persistSticky(item, s.kind, s.msg, shows + 1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,30 +682,48 @@ const noteRulesFetchError = (kind) => { _rulesFetchError = kind; };
 const rulesFailureKind = () => (_rulesFetchError === "offline" ? "rules_offline" : "rules_error");
 
 /**
- * The progress message. Deliberately NOT recorded in _reported: this is
- * progress, not an outcome, so an entry-point catch block must still treat
- * "only the loading message was shown" as nothing having been said. Every path
- * that raises it ends in reportOutcome(), which replaces it on success/failure
- * and removes it on "quiet" — so it cannot get stranded on the bar.
- */
-// function showLoading(item) {
-//     showNotification(item, MSG_LOADING, "informationalMessage");
-// }
-
-/**
  * THE ONLY PLACE A NOTIFICATION IS RAISED — and it raises one ONLY on error.
+ *
+ * v7.9: a success or a no-op never touches the bar while an error is
+ * outstanding. removeNotification is a no-op in that state, so the "quiet" and
+ * "applied" paths below cannot wipe an error the user has not acted on.
  *
  * @param {"applied"|"failed"|"quiet"} outcome
  *   applied — the signature is on the body. Silent, UNLESS a degradation was
- *             recorded (the rules could not be checked, say) — that is still
- *             an error worth showing.
+ *             recorded (the rules could not be checked, say).
  *   failed  — it is not, and no more specific failure was recorded
  *   quiet   — there was nothing to do (manual override, deferred mobile
  *             compose, blocked evaluation that kept a good signature)
+ * @param {boolean} action  false at send time: no button, and no item save.
  */
-function reportOutcome(item, outcome) {
-    if (_failure) { _reported = true; showNotification(item, _failure.msg, "errorMessage"); return; }
-    if (outcome === "failed") { _reported = true; showNotification(item, FAILURES.write_failed.msg, "errorMessage"); return; }
+function reportOutcome(item, outcome, { action = true } = {}) {
+    const ctx = (kind) => ({
+        kind,
+        version: CB_VERSION,
+        platform: detectPlatform(),
+        account: accountKey(),
+        at: Date.now(),
+    });
+
+    const raise = (kind, msg) => {
+        _reported = true;
+        _stickyActive = true;
+        if (item) _stickyShownByItem.set(item, true);
+        showErrorBar(item, msg, { action, contextData: ctx(kind) });
+        // shows:1 — this counts as the first showing, so a reopen gets at most
+        // STICKY_MAX_SHOWS - 1 more. Skipped when action is false, because that
+        // is the send path and an item save there races the host's commit.
+        if (action) persistSticky(item, kind, msg, 1);
+    };
+
+    if (_failure) { raise(_failure.kind, _failure.msg); return; }
+    if (outcome === "failed") { raise("write_failed", FAILURES.write_failed.msg); return; }
+
+    if (outcome === "applied" && CLEAR_ERROR_ON_LATER_SUCCESS && _stickyActive) {
+        log("later success — clearing the outstanding error");
+        clearSticky(item).catch(() => { });
+        return;
+    }
     removeNotification(item);
 }
 
@@ -963,6 +1145,7 @@ function describeRulesSource() {
     if (roam.get(R_RULES)) return `roamed (age=${rts ? Date.now() - rts : "unknown"}ms)`;
     return "none";
 }
+
 /**
  * ONE EVICTION SWEEP, EVERY TIER. Called from beginWrite(), i.e. once per
  * decision, on every platform.
@@ -970,7 +1153,7 @@ function describeRulesSource() {
  * An entry with no timestamp counts as expired: every writer in this file
  * stamps one, so an unstamped value is either legacy or was written by a build
  * that predates its ceiling. Item CustomProperties are not swept — they are
- * item-scoped and die with the draft.
+ * item-scoped and die with the draft, P_ERR_STICKY included.
  */
 function purgeExpiredStorage() {
     const now = Date.now();
@@ -1028,6 +1211,9 @@ const _propsByItem = new WeakMap();
  * activation, which a cold Mac/mobile send budget cannot absorb. So: fresh at
  * the START of every activation (invalidateProps) and fresh before every WRITE,
  * with reads inside one activation sharing that handle.
+ *
+ * v7.9: readSticky() rides this same shared handle, so syncing the sticky bar
+ * at the top of an activation costs no extra round trip.
  */
 function getProps(item, { fresh = false } = {}) {
     if (fresh) _propsByItem.delete(item);
@@ -2261,7 +2447,6 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
             return;
         }
         log("manual override active but body state unknown — reapplying:", override);
-        // showLoading(item);
         const rOv = await applyById(item, override, userEmail, seq, { revalidate: false });
         // Snapshot is null on purpose: a manual choice is recipient-independent,
         // and markActiveSignature removes the property, so send time re-evaluates
@@ -2274,10 +2459,6 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
         }
         return;
     }
-
-    // Progress goes up only after the override check, so a user-chosen
-    // signature never flashes a message about work that is not happening.
-    // showLoading(item);
 
     const { rule, blocked } = await findMatchingRule(item, userEmail, {
         allowNetwork,
@@ -2295,7 +2476,8 @@ async function evaluateAndApply(item, mailbox, seq, { allowNetwork = true } = {}
             log("evaluation blocked — keeping active id:", active);
             // Nothing changed on the body, but if the reason we are blocked is
             // that the API is unreachable, the user should know the rules were
-            // never checked. reportOutcome stays silent when the ledger is empty.
+            // never checked. reportOutcome stays silent when the ledger is empty,
+            // and leaves any outstanding error bar exactly where it is.
             if (isCurrent(seq)) reportOutcome(item, "quiet");
             return;
         }
@@ -2408,11 +2590,8 @@ async function decideSendId(item, userEmail) {
 }
 
 async function onSendCore(item, mailbox) {
-    // const t0 = Date.now();
-    // await resolveSender(item, mailbox);     // v7.7 (2)
-    // const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
-    // const seq = beginWrite();
     const t0 = Date.now();
+
     // v7.8.1. NO resolveSender() here. item.from.getAsync costs a full Office
     // round trip at up to budgetMs() (5s warm / 8s cold) against a 5s
     // SEND_BUDGET_MS — it can consume the entire budget before a decision is
@@ -2433,13 +2612,11 @@ async function onSendCore(item, mailbox) {
     // NOT touched — the common case, and the point of the whole exercise.
     const r = await applyById(item, id, userEmail, seq, { isSendTime: true });
 
-    // if (r.applied && persist) await markActiveSignature(item, id, snapshot, r.digest);
-
-    // v7.8.1. REMOVED. This ran loadCustomPropertiesAsync + saveAsync on the
-    // item AND two roamingSettings.saveAsync calls while the host was
-    // committing the message — a save conflict there is exactly what returns
-    // the mail to Drafts. The draft is gone after this; nothing reads it.
-    // (was: if (r.applied && persist) await markActiveSignature(...))
+    // v7.8.1. The decision is NOT persisted here. markActiveSignature ran
+    // loadCustomPropertiesAsync + saveAsync on the item AND two
+    // roamingSettings.saveAsync calls while the host was committing the message
+    // — a save conflict there is exactly what returns the mail to Drafts. The
+    // draft is gone after this; nothing reads it.
     void persist;
 
     // Console-only on purpose: the item is already closing (P), and telling a
@@ -2452,11 +2629,12 @@ async function onSendCore(item, mailbox) {
             (r.status === "written" ? "re-inserted from cache" : "left as-is, host cannot replace"));
     }
 
-    // FIX (P). The mail is already on its way out, so "Signature applied" has
-    // nothing to land on — only a failure is worth raising here. The send is
-    // never blocked either way (onSendHandler always allows the event).
+    // FIX (P). The mail is already on its way out. action:false — there is
+    // nothing to open a pane onto, and persisting the sticky record would mean
+    // an item save racing the host's commit. The send is never blocked either
+    // way (onSendHandler always allows the event).
     if (r.applied && !hasFailure()) removeNotification(item);
-    else reportOutcome(item, r.applied ? "applied" : "failed");
+    else reportOutcome(item, r.applied ? "applied" : "failed", { action: false });
 
     // Make sure anything the send warmed survives the runtime, which on a cold
     // host is about to be torn down with the item.
@@ -2467,11 +2645,12 @@ async function onSendCore(item, mailbox) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  ENTRY POINTS
 //
-//  Every one of them opens with the same three lines: invalidateProps (v7.5.2 —
-//  the pane may have pinned since the last activation), invalidateCaches (v7.6
-//  β — the pane may have refreshed storage since the last activation), and
-//  beginWrite (a new decision: new write token, empty ledger, no recipient memo
-//  carried over).
+//  Every one of them opens with the same lines: invalidateProps (v7.5.2 — the
+//  pane may have pinned since the last activation), invalidateCaches (v7.6 β —
+//  the pane may have refreshed storage since the last activation),
+//  restoreStickyError (v7.9 — sync the error bar for THIS item, and re-raise it
+//  if the user never acted on it), and beginWrite (a new decision: new write
+//  token, empty ledger, no recipient memo carried over).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Every handler completes exactly once, even if the body throws.
@@ -2499,9 +2678,12 @@ const applySignature = async function (event = { completed: () => { } }) {
         await resolveSender(item, mailbox);   // v7.7 (2): before ANY cache read
         log(`applySignature start — ${CB_VERSION} on ${detectPlatform()} (X-Platform: ${getXPlatform()}) account=${accountKey()}`);
 
-        // FIX (M): no "Preparing your signature..." — the bar stays empty until
-        // there is an outcome. FIX (N): beginWrite() also clears the ledger, so
-        // everything below is attributed to this decision only.
+        // v7.9. Before the decision: a fresh failure below simply replaces this,
+        // and a fresh success can clear it when CLEAR_ERROR_ON_LATER_SUCCESS.
+        await restoreStickyError(item);
+
+        // FIX (N): beginWrite() clears the ledger, so everything below is
+        // attributed to this decision only. It does NOT clear the sticky bar.
         const seq = beginWrite();
         const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
 
@@ -2572,6 +2754,12 @@ const onRecipientsChangedHandler = async function (event = { completed: () => { 
         invalidateCaches();      // v7.6 (β)
         await resolveSender(item, mailbox);   // v7.7 (2)
 
+        // v7.9. Mostly a state SYNC here rather than a re-raise: on Windows/OWA
+        // one runtime serves every item in the session, so _stickyActive must be
+        // re-derived from THIS item. The _stickyShownByItem guard inside means a
+        // bar already shown (or dismissed) in this runtime is not re-added.
+        await restoreStickyError(item);
+
         // v7.6 (ζ): the token is taken HERE, before the first recipient read,
         // not later when evaluateAndApply is called. It is what scopes the
         // recipient memo, so a read taken before it would be attributed to the
@@ -2628,6 +2816,11 @@ const onFromChangedHandler = async function (event = { completed: () => { } }) {
         await resolveSender(item, mailbox);   // v7.7 (2): switches the namespace
         log(`from changed — re-evaluating for the new account (${prev || "?"} -> ${_senderEmail || "?"})`);
 
+        // v7.9. A different sending account: the previous identity's failure
+        // says nothing about this one, so the bar comes down unconditionally.
+        // The re-evaluation below raises a new one if this account fails too.
+        await clearSticky(item);
+
         const seq = beginWrite();
         const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
 
@@ -2675,6 +2868,11 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         invalidateCaches();      // v7.6 (β) — and the pane may have refreshed the HTML too
         log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
 
+        // v7.9. show:false — SYNC ONLY. This rides the shared property bag, so
+        // it costs no extra round trip, and it must not write to the item while
+        // the host is committing the message.
+        await restoreStickyError(item, { show: false });
+
         // FIX (K): mobile is a cold runtime too and needs the same headroom.
         const budget = isColdRuntime() ? SEND_BUDGET_MS_COLD : SEND_BUDGET_MS;
         await withTimeout(onSendCore(item, mailbox), budget, "onSendCore");
@@ -2686,7 +2884,7 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         // cannot write the body after the send has been allowed.
         _writeSeq++;
         if (!hasFailure()) recordFailure("offline", `onSendCore: ${e.message}`);
-        if (!wasReported()) reportOutcome(item, "failed");
+        if (!wasReported()) reportOutcome(item, "failed", { action: false });
     } finally {
         complete();
     }
@@ -2708,6 +2906,9 @@ if (typeof Office !== "undefined" && typeof Office.onReady === "function") {
             if (d) log(`host=${d.hostName} version=${d.hostVersion}`);
         } catch (_) { }
         if (!HCS) warn("html-content-signature.js not loaded — send-time verification disabled");
+        if (!canUseInsight()) {
+            log("actionable notifications unavailable on this host — error bars will have no button");
+        }
     });
 }
 
