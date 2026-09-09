@@ -2529,7 +2529,7 @@ const CONFIG = {
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
 
     // MUST be listed in the manifest <AppDomains>. See v6 note (3).
-    BASE_URL: "https://n-enterprise.cardbyte.ai/email-signature",
+    BASE_URL: "https://ns-enterprise.cardbyte.ai/email-signature",
 
     // The id standing for "the user's default (non-rule) signature". Shared
     // with the taskpane and the WebView build.
