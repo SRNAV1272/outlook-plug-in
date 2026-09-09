@@ -26,7 +26,7 @@ const CB_VERSION = "v7.9.0-sticky-error-bar";
 
 const AES_KEY = "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=";
 const AES_IV = "3YapeNfJDung7TXxeKXn4g==";
-const BASE_URL = "https://ns-enterprise.cardbyte.ai/email-signature";
+const BASE_URL = "https://new-enterprise.cardbyte.ai/email-signature";
 
 // The backend's one account-level refusal: HTTP 412 + PlanExpiredException.
 // Distinct from every other non-2xx because it is definitive, global to the
