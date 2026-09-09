@@ -2522,10 +2522,8 @@
 //  item.from (v5), verify-before-write with the marker-free fallback for Word's
 //  attribute stripping, redundant-write suppression, the plan-expiry latch.
 // =============================================================================
-
-// ─── Config ───────────────────────────────────────────────────────────────────
 const CONFIG = {
-    VERSION: "classic-v6.1.0-sticky-error-bar",
+    VERSION: "classic-v6.1.1-sticky-error-bar",
 
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
@@ -2541,7 +2539,7 @@ const CONFIG = {
     P_ACTIVE_SIG: "cardbyte_active_sig_id",
     P_SIG_DIGEST: "cardbyte_sig_digest",
     MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
-    
+
     // v6.1: Sticky error bar persistence
     P_ERR_STICKY: "cardbyte_err_sticky",
 
@@ -2575,50 +2573,39 @@ const CONFIG = {
     SEND_BODY_READ_TIMEOUT_MS: 2000,
 
     // ── Cache ──
-    // Storage key stems; every key is suffixed ":<account>" by K.*.
-    CACHE_KEY: "cardbyte_sig_html",           // default signature
+    CACHE_KEY: "cardbyte_sig_html",
     RULES_CACHE_KEY: "cardbyte_rules",
-    SIG_BY_ID_CACHE_KEY: "cardbyte_sig_by_id", // { [id]: { html, ts } }
+    SIG_BY_ID_CACHE_KEY: "cardbyte_sig_by_id",
     LAST_APPLIED_KEY: "cardbyte_last_applied",
 
-    // ONE freshness window for everything cached: default signature, rules and
-    // per-id signatures are all refetched once older than this.
     CACHE_TTL_MS: 5 * 60 * 1000,
-    // EVICTION, NOT FRESHNESS. Nothing survives PURGE_MS in any tier — memory
-    // or OfficeRuntime.storage. Enforced on read AND by purgeExpiredStorage().
     STALE_FALLBACK_MS: 30 * 60 * 1000,
-    // ⚠ === CACHE_TTL_MS by request: the default signature is deleted the
-    // moment it goes stale, so it is never served as an offline fallback.
     DEFAULT_SIG_PURGE_MS: 5 * 60 * 1000,
-    LAST_APPLIED_TTL_MS: 30 * 60 * 1000,   // already aligned
+    LAST_APPLIED_TTL_MS: 30 * 60 * 1000,
 
-    // Suppress an identical re-write inside this window (recipient storms).
     REDUNDANT_WRITE_WINDOW_MS: 1500,
 
     // ── Rules ──
-    // With no recipients at all the DEFAULT applies; rules are not consulted.
     EMPTY_RECIPIENTS_MEANS_DEFAULT: true,
-    // When no forward-specific rule exists, let reply rules cover forwards.
     TREAT_FORWARD_AS_REPLY: true,
 
     // ── Tamper detection ──
     VERIFY_BEFORE_WRITE: true,
     SIG_MARK_ATTR: "data-cb-sig",
 
-    // ── Notifications (v6.1) ──
-    // ONE key, ONE kind of message: a failure. The bar carries exactly one
-    // kind of message: a failure. There is no success message, no progress
-    // message, and no auto-clear timer.
+    // ── Notifications (v6.1 - Classic Compatible) ──
+    // Classic JSRuntime does NOT support InsightMessage with actions.
+    // Use errorMessage type only (no icon, no actions, no persistence flag).
+    // The "Open add-in pane" button is NOT available in the classic runtime
+    // because the notification bar in classic Outlook doesn't support actions.
     NOTIF_KEY: "cardbyte_sig_status",
-    NOTIF_ICON: "v11.icon16",          // must be a <bt:Image> id in the V1_1 manifest
-    // The Control id from VersionOverrides V1_1 → MessageComposeCommandSurface.
+    NOTIF_ICON: "v11.icon16",          // Only used if InsightMessage is supported
     TASKPANE_COMMAND_ID: "v11.msgComposeOpenButton",
     NOTIF_ACTION_TEXT: "Open add-in pane",
-    // PRODUCT DECISION. false = the error stays until the user acts on it.
     CLEAR_ERROR_ON_LATER_SUCCESS: false,
     STICKY_MAX_SHOWS: 3,
 
-    // ── Plan expiry (HTTP 412 + PlanExpiredException) ──
+    // ── Plan expiry ──
     HTTP_PLAN_EXPIRED: 412,
     PLAN_EXPIRED_MSG: "Your subscription plan has expired. Please contact your Admin.",
     CLEAR_CACHE_ON_PLAN_EXPIRED: true,
@@ -2628,7 +2615,7 @@ const CONFIG = {
     DIAG_MAX_LINES: 400,
 };
 
-// ─── Diagnostic log (bounded) ─────────────────────────────────────────────────
+// ─── Diagnostic log ──────────────────────────────────────────────────────────
 
 const _diag = (function () {
     const t0 = Date.now();
@@ -2782,7 +2769,7 @@ const K = {
     lastApplied: function () { return CONFIG.LAST_APPLIED_KEY + ":" + accountKey(); }
 };
 
-// ─── CryptoJS helpers (synchronous) ──────────────────────────────────────────
+// ─── CryptoJS helpers ─────────────────────────────────────────────────────────
 
 function encryptEmail(email) {
     if (!email || !email.trim()) return "";
@@ -2867,7 +2854,7 @@ function _storageRemove(key, cb) {
     } catch (_) { if (cb) cb(); }
 }
 
-// ─── In-memory layer (owner-tagged) ───────────────────────────────────────────
+// ─── In-memory layer ──────────────────────────────────────────────────────────
 
 let _memSig = null, _memSigOwner = null, _memSigTs = 0;
 let _memRules = null, _memRulesOwner = null, _memRulesTs = 0;
@@ -2960,7 +2947,7 @@ function setCachedRules(rules, cb) {
     _storageSet(K.rules(), rules, cb || function () { });
 }
 
-// ─── Per-signatureId HTML cache ───────────────────────────────────────────────
+// ─── Per-signatureId HTML cache ──────────────────────────────────────────────
 
 function getSigById(signatureId, cb) {
     _storageGetRaw(K.sigById(), function (map) {
@@ -3016,7 +3003,7 @@ function setLastApplied(item, sigKey, htmlLen, digest, cb) {
     _storageSet(K.lastApplied(), rec, cb || function () { });
 }
 
-// ─── XHR (bounded, retries only in compose mode) ─────────────────────────────
+// ─── XHR ─────────────────────────────────────────────────────────────────────
 
 function xhrGet(url, headers, cb) {
     let attempt = 0;
@@ -3084,21 +3071,30 @@ function authHeaders(extra) {
     return h;
 }
 
-// ─── NOTIFICATIONS (v6.1 - Sticky Error Bar) ─────────────────────────────────
+// ─── NOTIFICATIONS (v6.1 - Classic Compatible) ──────────────────────────────
 //
-// ONE kind of message: a failure. There is no success message, no progress
-// message, and no auto-clear timer. The bar stays until the user acts on it.
-// Actionable bars are InsightMessage only, Mailbox 1.10+, desktop/web only.
-// Mobile falls back to a plain ErrorMessage.
+// In the classic JSRuntime, notifications are limited to errorMessage type.
+// InsightMessage with actions is NOT supported - the button would never appear.
+// We use the sticky error pattern but without the action button.
 
 const _canUseInsight = (function () {
     try {
-        return !_isMobile() &&
-            Office.context.requirements?.isSetSupported("Mailbox", "1.10") === true &&
+        // Check if we're in a modern runtime that supports InsightMessage
+        return Office.context.requirements?.isSetSupported("Mailbox", "1.10") === true &&
             !!Office.MailboxEnums?.ItemNotificationMessageType?.InsightMessage &&
-            !!Office.MailboxEnums?.ActionType?.ShowTaskPane;
+            !!Office.MailboxEnums?.ActionType?.ShowTaskPane &&
+            !_isClassicRuntime();
     } catch (_) { return false; }
 })();
+
+function _isClassicRuntime() {
+    try {
+        // Classic JSRuntime doesn't have these modern APIs
+        const host = Office.context.diagnostics?.hostName || "";
+        return host.indexOf("Outlook") !== -1 &&
+            typeof Office.context.requirements?.isSetSupported !== "function";
+    } catch (_) { return true; } // Assume classic if we can't tell
+}
 
 function _isMobile() {
     try {
@@ -3117,14 +3113,16 @@ function removeNotification(item, { force = false } = {}) {
         _diag.step("removeNotification", "suppressed — unacknowledged error on bar");
         return;
     }
-    try { item?.notificationMessages?.removeAsync?.(CONFIG.NOTIF_KEY, function () { }); } catch (_) { }
+    try {
+        if (item?.notificationMessages && typeof item.notificationMessages.removeAsync === "function") {
+            item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { });
+        }
+    } catch (_) { }
 }
 
 /**
- * Raise the error bar. The ONLY message this file ever shows.
- *
- * @param {boolean} action  attach the "Open add-in pane" button. false at send
- *   time, where the item is already closing and there is nothing to open.
+ * Show an error notification. In classic runtime, only errorMessage is supported.
+ * The "Open add-in pane" button is NOT available in classic Outlook.
  */
 function showErrorBar(item, message, { action = true, contextData = null } = {}) {
     try {
@@ -3138,35 +3136,50 @@ function showErrorBar(item, message, { action = true, contextData = null } = {})
         if (!msg) return;
         if (msg.length > 150) msg = msg.slice(0, 147) + "...";
 
-        const wantsAction = action && _canUseInsight;
+        // Classic JSRuntime only supports errorMessage type.
+        // Even if we try InsightMessage, it will fail silently or throw.
+        // So we always use errorMessage in this build.
+        const details = {
+            type: "errorMessage",
+            message: msg,
+        };
 
-        const details = wantsAction
-            ? {
-                type: Office.MailboxEnums.ItemNotificationMessageType.InsightMessage,
-                message: msg,
-                icon: CONFIG.NOTIF_ICON,
-                actions: [{
-                    actionType: Office.MailboxEnums.ActionType.ShowTaskPane,
-                    actionText: CONFIG.NOTIF_ACTION_TEXT,
-                    commandId: CONFIG.TASKPANE_COMMAND_ID,
-                    contextData: contextData ?? {},
-                }],
+        // In classic, we cannot attach actions to notifications.
+        // The "Open add-in pane" button is not supported in the notification bar.
+        // Users must open the pane manually from the ribbon.
+        if (action && _canUseInsight) {
+            // Only use InsightMessage if we're 100% sure it's supported
+            try {
+                const insightDetails = {
+                    type: Office.MailboxEnums.ItemNotificationMessageType.InsightMessage,
+                    message: msg,
+                    icon: CONFIG.NOTIF_ICON,
+                    actions: [{
+                        actionType: Office.MailboxEnums.ActionType.ShowTaskPane,
+                        actionText: CONFIG.NOTIF_ACTION_TEXT,
+                        commandId: CONFIG.TASKPANE_COMMAND_ID,
+                        contextData: contextData ?? {},
+                    }],
+                };
+                // Try the insight version first
+                nm.replaceAsync(CONFIG.NOTIF_KEY, insightDetails, function (r) {
+                    if (r?.status === Office.AsyncResultStatus.Succeeded) return;
+                    // Fall back to errorMessage
+                    nm.replaceAsync(CONFIG.NOTIF_KEY, details, function () { });
+                });
+                return;
+            } catch (_) {
+                // Fall through to errorMessage
             }
-            : {
-                type: "errorMessage",
-                message: msg,
-            };
+        }
 
+        // Classic compatible: errorMessage only
         const addIt = function () {
             nm.addAsync(CONFIG.NOTIF_KEY, details, function (r2) {
                 if (r2?.status === Office.AsyncResultStatus.Succeeded) return;
                 try {
                     nm.removeAsync(CONFIG.NOTIF_KEY, function () {
-                        nm.addAsync(CONFIG.NOTIF_KEY, details, function (r3) {
-                            if (r3?.status === Office.AsyncResultStatus.Succeeded) return;
-                            _diag.step("notification:failed", (r3?.error?.message) || "?");
-                            if (wantsAction) showErrorBar(item, message, { action: false });
-                        });
+                        nm.addAsync(CONFIG.NOTIF_KEY, details, function () { });
                     });
                 } catch (e) { _diag.step("notification:remove/add-threw", e.message); }
             });
@@ -3179,17 +3192,15 @@ function showErrorBar(item, message, { action = true, contextData = null } = {})
     } catch (e) { _diag.step("showErrorBar:threw", e.message); }
 }
 
-async function readSticky(item) {
-    const raw = await new Promise(function (resolve) {
-        loadCustomProps(item, function (props) {
-            try { resolve(props ? props.get(CONFIG.P_ERR_STICKY) : null); } catch (_) { resolve(null); }
-        });
+function readSticky(item, cb) {
+    loadCustomProps(item, function (props) {
+        try {
+            const raw = props ? props.get(CONFIG.P_ERR_STICKY) : null;
+            if (!raw) { cb(null); return; }
+            const v = JSON.parse(raw);
+            cb(v && v.msg ? v : null);
+        } catch (_) { cb(null); }
     });
-    if (!raw) return null;
-    try {
-        const v = JSON.parse(raw);
-        return v && v.msg ? v : null;
-    } catch (_) { return null; }
 }
 
 function persistSticky(item, kind, msg, shows) {
@@ -3210,7 +3221,7 @@ function clearSticky(item) {
 
 function restoreStickyError(item, { show = true } = {}) {
     if (!item) return;
-    readSticky(item).then(function (s) {
+    readSticky(item, function (s) {
         _stickyActive = !!s;
         if (!s || !show) return;
         if (_stickyShownByItem.get(item)) return;
@@ -3224,14 +3235,8 @@ function restoreStickyError(item, { show = true } = {}) {
 
         _stickyShownByItem.set(item, true);
         _diag.step("sticky:re-raising", s.kind + " (show " + (shows + 1) + ")");
-        showErrorBar(item, s.msg, {
-            action: true,
-            contextData: {
-                kind: s.kind,
-                version: CONFIG.VERSION,
-                restored: true,
-            },
-        });
+        // In classic, no action button - just show the error
+        showErrorBar(item, s.msg, { action: false });
         persistSticky(item, s.kind, s.msg, shows + 1);
     });
 }
@@ -3682,7 +3687,6 @@ function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
 function writeSignature(item, html, sigKey, onDone) {
     if (!item || !item.body || typeof item.body.setSignatureAsync !== "function") {
         _diag.step("writeSignature:unavailable");
-        // Failure is now raised via reportOutcome-style pattern
         onDone(false);
         return;
     }
@@ -3746,10 +3750,7 @@ function flushDiagnostics(item, onDone) {
     catch (_) { onDone(); }
 }
 
-// ─── REPORT OUTCOME (v6.1) ────────────────────────────────────────────────────
-//
-// THE ONLY PLACE a notification is raised — and it raises one ONLY on error.
-// A success or a no-op never touches the bar while an error is outstanding.
+// ─── REPORT OUTCOME ──────────────────────────────────────────────────────────
 
 const FAILURES = {
     offline: { msg: "Couldn't reach the signature service. Check your connection and try again, or contact Admin." },
@@ -3792,11 +3793,12 @@ function reportOutcome(item, outcome, { action = true } = {}) {
         _reported = true;
         _stickyActive = true;
         if (item) _stickyShownByItem.set(item, true);
-        showErrorBar(item, msg, { action: action, contextData: ctx(kind) });
+        // In classic, action buttons are not supported in notifications
+        // Always pass action:false to avoid trying InsightMessage
+        showErrorBar(item, msg, { action: false, contextData: ctx(kind) });
         if (action) persistSticky(item, kind, msg, 1);
     };
 
-    // Plan expiry is the truest cause of any other failure.
     if (_plan.isExpired()) {
         raise("plan_expired", _plan.message());
         return;
@@ -3849,7 +3851,6 @@ function determineTarget(item, cb) {
         fetchRulesConfig(function (fetched) {
             if (fetched) { withRules(fetched); return; }
             if (stale) { _diag.step("determineTarget:fetch-failed-using-stale"); withRules(stale); return; }
-            // No rules at all: not blocked — the default is the honest answer.
             cb({ key: null, id: null, blocked: true, noRules: true });
         });
     });
@@ -3906,17 +3907,14 @@ function runPipeline(item, guarded, opts) {
     clearFailure();
 
     function finish(finalKey, appliedSomething) {
-        // v6.1: notifyApplied is removed — only errors are shown.
         if (!finalKey && !appliedSomething) {
             if (!hasFailure() && !_plan.isExpired()) {
                 recordFailure("unassigned", "no signature could be resolved");
             }
         }
-        // Report outcome ONLY if something went wrong or we want to clear.
         if (hasFailure() || _plan.isExpired()) {
             reportOutcome(item, "failed", { action: !_sendMode });
         } else {
-            // Success path: clear any outstanding error if allowed.
             if (CONFIG.CLEAR_ERROR_ON_LATER_SUCCESS && _stickyActive) {
                 clearSticky(item);
             } else {
@@ -4028,7 +4026,6 @@ function onSendHandler(event) {
         resolveComposeItem(function (item) {
             if (!item) { guarded.completed(ALLOW); return; }
             resolveSender(item, function () {
-                // v6.1: show:false — SYNC ONLY, no writes at send time.
                 restoreStickyError(item, { show: false });
                 runPipeline(item, guarded, { skipDefaultPhase: true });
             });
