@@ -8,7 +8,7 @@
 //  which triggers the "deferred" status and persists the decision for send time.
 // =============================================================================
 
-const CB_VERSION = "v7.8.0-purge-and-quiet";
+const CB_VERSION = "v7.8.1-send-path-fix";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIG
@@ -114,12 +114,16 @@ const TAMPER_TAG =
 // entire feature in one flag.
 const VERIFY_AT_SEND = true;
 
-// Hosts without setSignatureAsync (mobile) can only APPEND. Re-inserting there
-// leaves the tampered copy in place AND adds a correct one — two signatures on
-// one mail, which reads as a broken add-in rather than an enforced policy.
 //   false — detect and log only on append-only hosts (default)
 //   true  — append the correct signature anyway
 const APPEND_ON_TAMPER = false;
+
+// v7.8.1. Re-inserting inside OnMessageSend races the host's own item commit,
+// and with images it recreates cid: attachments while the message is being
+// submitted. When OUR marker is still on the draft with the right id, whatever
+// differs is almost always the host's own rewriting rather than tampering — so
+// detect and log, but do not write. absent / duplicate / id-changed still write.
+const REWRITE_ON_TAMPER_AT_SEND = false;
 
 // Resolved once. html-content-signature.js must be concatenated ahead of this
 // file into the deployed bundle (it is UMD and attaches to `self`); when it is
@@ -301,7 +305,7 @@ function officeAsync(fn, { ms = COMPOSE_TYPE_TIMEOUT_MS, fallback = null, label 
         try {
             fn((res) => {
                 if (res?.status !== Office.AsyncResultStatus.Succeeded) {
-                    warn(`${label} failed:`, res?.error?.message);
+                    warn(`${label} failed:`, res?.error?.code, res?.error?.message);
                     return finish(fallback);
                 }
                 finish(res);
@@ -2036,6 +2040,10 @@ async function verifySignatureOnBody(item, expectedHtml, id) {
             return { verdict: rr.verdict, reason: `${scope}: marker-free token match`, note };
         }
         const r = HCS.verifyInDraft(expectedHtml, body, opt);
+        if (r.verdict === "modified" && !REWRITE_ON_TAMPER_AT_SEND) {
+            warn(`send verify: marked block present but modified (${r.scope}) — tolerated, not rewriting`);
+            return { verdict: "identical", reason: `${r.scope}: marked block present, edit tolerated`, note };
+        }
         return { verdict: r.verdict, reason: `${r.scope}: ${r.reason}`, note };
     } catch (e) {
         // The comparison must never take the send down with it.
@@ -2400,12 +2408,24 @@ async function decideSendId(item, userEmail) {
 }
 
 async function onSendCore(item, mailbox) {
+    // const t0 = Date.now();
+    // await resolveSender(item, mailbox);     // v7.7 (2)
+    // const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
+    // const seq = beginWrite();
     const t0 = Date.now();
-    await resolveSender(item, mailbox);     // v7.7 (2)
+    // v7.8.1. NO resolveSender() here. item.from.getAsync costs a full Office
+    // round trip at up to budgetMs() (5s warm / 8s cold) against a 5s
+    // SEND_BUDGET_MS — it can consume the entire budget before a decision is
+    // even made. Compose already resolved and namespaced in any runtime that
+    // has one; a cold runtime falls back to the profile, and the worst case of
+    // a From/profile mismatch is a cache miss, not a stalled send.
+    if (!_senderEmail) {
+        _senderEmail = String(mailbox?.userProfile?.emailAddress || "").trim().toLowerCase();
+    }
     const userEmail = _senderEmail || mailbox?.userProfile?.emailAddress;
     const seq = beginWrite();
 
-    const { id, snapshot, reason, persist } = await decideSendId(item, userEmail);
+    const { id, reason, persist } = await decideSendId(item, userEmail);
     log(`onSend: target id=${id} (${reason})`);
 
     // v7.5: applyById verifies before writing at send. status === "unchanged"
@@ -2413,7 +2433,14 @@ async function onSendCore(item, mailbox) {
     // NOT touched — the common case, and the point of the whole exercise.
     const r = await applyById(item, id, userEmail, seq, { isSendTime: true });
 
-    if (r.applied && persist) await markActiveSignature(item, id, snapshot, r.digest);
+    // if (r.applied && persist) await markActiveSignature(item, id, snapshot, r.digest);
+
+    // v7.8.1. REMOVED. This ran loadCustomPropertiesAsync + saveAsync on the
+    // item AND two roamingSettings.saveAsync calls while the host was
+    // committing the message — a save conflict there is exactly what returns
+    // the mail to Drafts. The draft is gone after this; nothing reads it.
+    // (was: if (r.applied && persist) await markActiveSignature(...))
+    void persist;
 
     // Console-only on purpose: the item is already closing (P), and telling a
     // user "your signature was edited so we restored it" as the mail leaves is
@@ -2455,7 +2482,7 @@ function makeCompleter(label, t0, event, args) {
         done = true;
         flushSigCache();   // never end an activation with a pending cache write
         timed(label, t0);
-        try { event.completed(args); } catch (_) { }
+        try { event.completed(args); } catch (e) { err("event.completed threw:", e); }
     };
 }
 
