@@ -2593,11 +2593,9 @@ const CONFIG = {
     VERIFY_BEFORE_WRITE: true,
     SIG_MARK_ATTR: "data-cb-sig",
 
-    // ── Notifications (v6.1 - Classic Compatible) ──
-    // Classic JSRuntime does NOT support InsightMessage with actions.
-    // Use errorMessage type only (no icon, no actions, no persistence flag).
-    // The "Open add-in pane" button is NOT available in the classic runtime
-    // because the notification bar in classic Outlook doesn't support actions.
+    // ── Notifications (v6.1 - Universal with HTML Links) ──
+    // Uses informationalMessage with HTML links for classic Outlook.
+    // Uses InsightMessage with actions for modern Outlook.
     NOTIF_KEY: "cardbyte_sig_status",
     NOTIF_ICON: "v11.icon16",          // Only used if InsightMessage is supported
     TASKPANE_COMMAND_ID: "v11.msgComposeOpenButton",
@@ -3071,35 +3069,52 @@ function authHeaders(extra) {
     return h;
 }
 
-// ─── NOTIFICATIONS (v6.1 - Classic Compatible) ──────────────────────────────
-//
-// In the classic JSRuntime, notifications are limited to errorMessage type.
-// InsightMessage with actions is NOT supported - the button would never appear.
-// We use the sticky error pattern but without the action button.
+// ─── NOTIFICATIONS (v6.1 - Universal with HTML Links) ──────────────────────
 
-const _canUseInsight = (function () {
+/**
+ * Opens the add-in taskpane using the command ID from the manifest.
+ * Works in both classic and modern Outlook.
+ */
+function executeTaskpaneCommand() {
     try {
-        // Check if we're in a modern runtime that supports InsightMessage
-        return Office.context.requirements?.isSetSupported("Mailbox", "1.10") === true &&
-            !!Office.MailboxEnums?.ItemNotificationMessageType?.InsightMessage &&
-            !!Office.MailboxEnums?.ActionType?.ShowTaskPane &&
-            !_isClassicRuntime();
-    } catch (_) { return false; }
-})();
+        // Try the modern way first
+        if (typeof Office.actions !== "undefined" && typeof Office.actions.execute === "function") {
+            Office.actions.execute(CONFIG.TASKPANE_COMMAND_ID);
+            _diag.step("executeTaskpaneCommand", "via Office.actions.execute");
+            return;
+        }
+        // Fallback: try to open via URL
+        const url = "https://signature.cardbyte.ai/taskpane.html";
+        if (typeof Office.context.ui !== "undefined" && typeof Office.context.ui.displayDialogAsync === "function") {
+            Office.context.ui.displayDialogAsync(url, { width: 30, height: 50 });
+            _diag.step("executeTaskpaneCommand", "via displayDialogAsync");
+        }
+    } catch (e) {
+        _diag.step("executeTaskpaneCommand:failed", e.message);
+    }
+}
 
 function _isClassicRuntime() {
     try {
-        // Classic JSRuntime doesn't have these modern APIs
         const host = Office.context.diagnostics?.hostName || "";
-        return host.indexOf("Outlook") !== -1 &&
-            typeof Office.context.requirements?.isSetSupported !== "function";
-    } catch (_) { return true; } // Assume classic if we can't tell
+        const platform = Office.context.diagnostics?.platform || "";
+        // Classic Outlook on Windows
+        if ((host === "Outlook" || host === "OutlookWin32") && platform === "PC") {
+            const ua = window.navigator?.userAgent || "";
+            if (ua.indexOf("Trident") !== -1 || ua.indexOf("MSIE") !== -1) {
+                return true;
+            }
+        }
+        return false;
+    } catch (_) { return false; }
 }
 
-function _isMobile() {
+function _canUseInsight() {
     try {
-        const p = Office.context.diagnostics.platform;
-        return p === Office.PlatformType.iOS || p === Office.PlatformType.Android;
+        if (_isClassicRuntime()) return false;
+        return Office.context.requirements?.isSetSupported("Mailbox", "1.10") === true &&
+            typeof Office.MailboxEnums?.ItemNotificationMessageType?.InsightMessage !== "undefined" &&
+            typeof Office.MailboxEnums?.ActionType?.ShowTaskPane !== "undefined";
     } catch (_) { return false; }
 }
 
@@ -3121,8 +3136,9 @@ function removeNotification(item, { force = false } = {}) {
 }
 
 /**
- * Show an error notification. In classic runtime, only errorMessage is supported.
- * The "Open add-in pane" button is NOT available in classic Outlook.
+ * Show an error notification with "Open add-in pane" link.
+ * Uses informationalMessage with HTML links - works in classic Outlook.
+ * CodeTwo's approach: HTML links in the notification message.
  */
 function showErrorBar(item, message, { action = true, contextData = null } = {}) {
     try {
@@ -3134,21 +3150,38 @@ function showErrorBar(item, message, { action = true, contextData = null } = {})
 
         let msg = String(message || "");
         if (!msg) return;
-        if (msg.length > 150) msg = msg.slice(0, 147) + "...";
+        if (msg.length > 120) msg = msg.slice(0, 117) + "...";
 
-        // Classic JSRuntime only supports errorMessage type.
-        // Even if we try InsightMessage, it will fail silently or throw.
-        // So we always use errorMessage in this build.
+        // Build the message with HTML link for the action (CodeTwo's approach)
+        let fullMessage = msg;
+
+        if (action) {
+            // Use HTML with onclick - this works in classic Outlook!
+            fullMessage = msg +
+                ' <a href="#" onclick="try{' +
+                // Optionally close the notification first
+                'Office.context.mailbox.item.notificationMessages.removeAsync(\'' + CONFIG.NOTIF_KEY + '\', function(){});' +
+                // Execute the taskpane command
+                'Office.actions.execute(\'' + CONFIG.TASKPANE_COMMAND_ID + '\');' +
+                '}catch(e){}return false;" ' +
+                'style="color:#0072C6;text-decoration:underline;cursor:pointer;">' +
+                CONFIG.NOTIF_ACTION_TEXT + '</a>';
+
+            // Add Dismiss link too (like CodeTwo)
+            fullMessage += ' | <a href="#" onclick="try{Office.context.mailbox.item.notificationMessages.removeAsync(\'' + CONFIG.NOTIF_KEY + '\', function(){});}catch(e){}return false;" style="color:#666;text-decoration:underline;cursor:pointer;">Dismiss</a>';
+        }
+
+        // Use informationalMessage type - this supports HTML in classic Outlook!
+        // This is the KEY difference from errorMessage
         const details = {
-            type: "errorMessage",
-            message: msg,
+            type: "informationalMessage",
+            message: fullMessage,
         };
 
-        // In classic, we cannot attach actions to notifications.
-        // The "Open add-in pane" button is not supported in the notification bar.
-        // Users must open the pane manually from the ribbon.
-        if (action && _canUseInsight) {
-            // Only use InsightMessage if we're 100% sure it's supported
+        // Only add icon in modern runtimes that support it
+        if (_canUseInsight()) {
+            details.icon = CONFIG.NOTIF_ICON;
+            // For modern, we can use the proper action instead of HTML links
             try {
                 const insightDetails = {
                     type: Office.MailboxEnums.ItemNotificationMessageType.InsightMessage,
@@ -3161,19 +3194,23 @@ function showErrorBar(item, message, { action = true, contextData = null } = {})
                         contextData: contextData ?? {},
                     }],
                 };
-                // Try the insight version first
                 nm.replaceAsync(CONFIG.NOTIF_KEY, insightDetails, function (r) {
-                    if (r?.status === Office.AsyncResultStatus.Succeeded) return;
-                    // Fall back to errorMessage
+                    if (r?.status === Office.AsyncResultStatus.Succeeded) {
+                        _diag.step("showErrorBar", "InsightMessage succeeded");
+                        return;
+                    }
+                    // Fall back to informationalMessage with HTML
+                    _diag.step("showErrorBar", "InsightMessage failed, using informationalMessage");
                     nm.replaceAsync(CONFIG.NOTIF_KEY, details, function () { });
                 });
                 return;
             } catch (_) {
-                // Fall through to errorMessage
+                // Fall through to informationalMessage
             }
         }
 
-        // Classic compatible: errorMessage only
+        _diag.step("showErrorBar", "using informationalMessage with HTML link");
+
         const addIt = function () {
             nm.addAsync(CONFIG.NOTIF_KEY, details, function (r2) {
                 if (r2?.status === Office.AsyncResultStatus.Succeeded) return;
@@ -3189,7 +3226,17 @@ function showErrorBar(item, message, { action = true, contextData = null } = {})
             if (r?.status === Office.AsyncResultStatus.Succeeded) return;
             try { addIt(); } catch (e) { _diag.step("notification:addAsync-threw", e.message); }
         });
-    } catch (e) { _diag.step("showErrorBar:threw", e.message); }
+    } catch (e) {
+        _diag.step("showErrorBar:threw", e.message);
+        // Ultimate fallback: plain errorMessage without HTML
+        try {
+            const fallbackDetails = {
+                type: "errorMessage",
+                message: String(message || "Error occurred. Please open the add-in from the ribbon."),
+            };
+            item?.notificationMessages?.replaceAsync(CONFIG.NOTIF_KEY, fallbackDetails, function () { });
+        } catch (_) { }
+    }
 }
 
 function readSticky(item, cb) {
@@ -3793,9 +3840,8 @@ function reportOutcome(item, outcome, { action = true } = {}) {
         _reported = true;
         _stickyActive = true;
         if (item) _stickyShownByItem.set(item, true);
-        // In classic, action buttons are not supported in notifications
-        // Always pass action:false to avoid trying InsightMessage
-        showErrorBar(item, msg, { action: false, contextData: ctx(kind) });
+        // Pass action:true to show the "Open add-in pane" link
+        showErrorBar(item, msg, { action: action, contextData: ctx(kind) });
         if (action) persistSticky(item, kind, msg, 1);
     };
 
