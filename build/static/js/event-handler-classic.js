@@ -2522,11 +2522,8 @@
 //  item.from (v5), verify-before-write with the marker-free fallback for Word's
 //  attribute stripping, redundant-write suppression, the plan-expiry latch.
 // =============================================================================
-
-// ─── Config ───────────────────────────────────────────────────────────────────
-
 const CONFIG = {
-    VERSION: "classic-v6.0.0",
+    VERSION: "classic-v6.1.1-sticky-error-bar",
 
     AES_KEY_B64: "fnItrY2YfozBqCC2B4XsfqHIvZku3kUOq3DFkbO64kk=",
     AES_IV_B64: "3YapeNfJDung7TXxeKXn4g==",
@@ -2542,6 +2539,9 @@ const CONFIG = {
     P_ACTIVE_SIG: "cardbyte_active_sig_id",
     P_SIG_DIGEST: "cardbyte_sig_digest",
     MANUAL_OVERRIDE_PROP: "cardbyte_manual_sig_id",
+
+    // v6.1: Sticky error bar persistence
+    P_ERR_STICKY: "cardbyte_err_sticky",
 
     // ── Network ──
     XHR_TIMEOUT_MS: 5000,
@@ -2573,46 +2573,37 @@ const CONFIG = {
     SEND_BODY_READ_TIMEOUT_MS: 2000,
 
     // ── Cache ──
-    // Storage key stems; every key is suffixed ":<account>" by K.*.
-    CACHE_KEY: "cardbyte_sig_html",           // default signature
+    CACHE_KEY: "cardbyte_sig_html",
     RULES_CACHE_KEY: "cardbyte_rules",
-    SIG_BY_ID_CACHE_KEY: "cardbyte_sig_by_id", // { [id]: { html, ts } }
+    SIG_BY_ID_CACHE_KEY: "cardbyte_sig_by_id",
     LAST_APPLIED_KEY: "cardbyte_last_applied",
 
-    // ONE freshness window for everything cached: default signature, rules and
-    // per-id signatures are all refetched once older than this.
     CACHE_TTL_MS: 5 * 60 * 1000,
-    // EVICTION, NOT FRESHNESS. Nothing survives PURGE_MS in any tier — memory
-    // or OfficeRuntime.storage. Enforced on read AND by purgeExpiredStorage().
     STALE_FALLBACK_MS: 30 * 60 * 1000,
-    // ⚠ === CACHE_TTL_MS by request: the default signature is deleted the
-    // moment it goes stale, so it is never served as an offline fallback.
     DEFAULT_SIG_PURGE_MS: 5 * 60 * 1000,
-    LAST_APPLIED_TTL_MS: 30 * 60 * 1000,   // already aligned
+    LAST_APPLIED_TTL_MS: 30 * 60 * 1000,
 
-    // Suppress an identical re-write inside this window (recipient storms).
     REDUNDANT_WRITE_WINDOW_MS: 1500,
 
     // ── Rules ──
-    // With no recipients at all the DEFAULT applies; rules are not consulted.
     EMPTY_RECIPIENTS_MEANS_DEFAULT: true,
-    // When no forward-specific rule exists, let reply rules cover forwards.
     TREAT_FORWARD_AS_REPLY: true,
 
     // ── Tamper detection ──
     VERIFY_BEFORE_WRITE: true,
     SIG_MARK_ATTR: "data-cb-sig",
 
-    // ── Notifications ──
+    // ── Notifications (v6.1 - Universal with HTML Links) ──
+    // Uses informationalMessage with HTML links for classic Outlook.
+    // Uses InsightMessage with actions for modern Outlook.
     NOTIF_KEY: "cardbyte_sig_status",
-    NOTIF_ICON: "v11.icon16",          // must be a <bt:Image> id in the V1_1 manifest
-    NOTIFY_CLEAR_MS: 3000,
-    MSG_LOADING: "Applying your signature...",
-    MSG_APPLIED: "Signature applied",
-    MSG_UNAVAILABLE: "Signature not available. Please contact Admin.",
-    MSG_WRITE_FAILED: "Signature could not be applied. Please contact Admin.",
+    NOTIF_ICON: "v11.icon16",          // Only used if InsightMessage is supported
+    TASKPANE_COMMAND_ID: "v11.msgComposeOpenButton",
+    NOTIF_ACTION_TEXT: "Open add-in pane",
+    CLEAR_ERROR_ON_LATER_SUCCESS: false,
+    STICKY_MAX_SHOWS: 3,
 
-    // ── Plan expiry (HTTP 412 + PlanExpiredException) ──
+    // ── Plan expiry ──
     HTTP_PLAN_EXPIRED: 412,
     PLAN_EXPIRED_MSG: "Your subscription plan has expired. Please contact your Admin.",
     CLEAR_CACHE_ON_PLAN_EXPIRED: true,
@@ -2622,7 +2613,7 @@ const CONFIG = {
     DIAG_MAX_LINES: 400,
 };
 
-// ─── Diagnostic log (bounded) ─────────────────────────────────────────────────
+// ─── Diagnostic log ──────────────────────────────────────────────────────────
 
 const _diag = (function () {
     const t0 = Date.now();
@@ -2639,7 +2630,6 @@ const _diag = (function () {
         const line = "+ " + (Date.now() - t0) + "ms " + id + " \u25B8 " + label +
             (detail !== undefined && detail !== null && detail !== "" ? " :: " + detail : "");
         buf.push(line);
-        // The runtime can live for the whole Outlook session; never grow unbounded.
         if (buf.length > CONFIG.DIAG_MAX_LINES) buf.splice(0, buf.length - CONFIG.DIAG_MAX_LINES);
         try { if (typeof console !== "undefined") console.log("[CardByte]", line); } catch (_) { }
     }
@@ -2664,9 +2654,6 @@ const _diag = (function () {
 })();
 
 // ─── Activation mode ──────────────────────────────────────────────────────────
-//
-// Send mode shrinks every ceiling on the critical path. Set by onSendHandler,
-// cleared by the compose handlers, read by everything that waits on something.
 
 let _sendMode = false;
 
@@ -2675,8 +2662,6 @@ function bodyReadTimeoutMs() { return _sendMode ? CONFIG.SEND_BODY_READ_TIMEOUT_
 function xhrTimeoutMs() { return _sendMode ? CONFIG.SEND_XHR_TIMEOUT_MS : CONFIG.XHR_TIMEOUT_MS; }
 function xhrMaxAttempts() { return _sendMode ? CONFIG.SEND_XHR_MAX_ATTEMPTS : CONFIG.XHR_MAX_ATTEMPTS; }
 
-// Wraps a callback so it fires exactly once, within ms. Office.js callbacks on
-// the critical path occasionally never return in the classic runtime.
 function once(ms, label, cb) {
     let fired = false;
     const timer = setTimeout(function () {
@@ -2715,7 +2700,7 @@ const _plan = (function () {
 function _serverMessageOf(raw) {
     const s = String(raw == null ? "" : raw).trim();
     if (!s) return null;
-    if (/^[\w$]+(\.[\w$]+){2,}$/.test(s)) return null;   // FQCN, not a message
+    if (/^[\w$]+(\.[\w$]+){2,}$/.test(s)) return null;
     return s.length <= 140 ? s : null;
 }
 
@@ -2734,12 +2719,7 @@ function _classifyErrorBody(status, rawBody) {
     };
 }
 
-// ─── Account scoping (multiple accounts in one Outlook profile) ──────────────
-//
-// OfficeRuntime.storage is shared by every account in the profile. The sender
-// is read from item.from (the From dropdown), profile mailbox as fallback, and
-// every storage key is namespaced by it. The in-memory copies carry an owner
-// tag and are ignored when the owner differs.
+// ─── Account scoping ─────────────────────────────────────────────────────────
 
 let _senderEmail = "";
 
@@ -2748,7 +2728,6 @@ function _profileEmail() {
     catch (_) { return ""; }
 }
 
-// Runs once per activation, before any cache read or backend call.
 function resolveSender(item, cb) {
     const fallback = _profileEmail();
     const done = once(stepTimeoutMs(), "resolveSender", function (email, timedOut) {
@@ -2778,7 +2757,7 @@ function getUserEmail() { return _senderEmail || _profileEmail(); }
 
 function accountKey() {
     const e = getUserEmail() || "unknown";
-    return e.replace(/[\s/\\'"]/g, "_");   // storage keys: no whitespace, slashes, quotes
+    return e.replace(/[\s/\\'"]/g, "_");
 }
 
 const K = {
@@ -2788,7 +2767,7 @@ const K = {
     lastApplied: function () { return CONFIG.LAST_APPLIED_KEY + ":" + accountKey(); }
 };
 
-// ─── CryptoJS helpers (synchronous) ──────────────────────────────────────────
+// ─── CryptoJS helpers ─────────────────────────────────────────────────────────
 
 function encryptEmail(email) {
     if (!email || !email.trim()) return "";
@@ -2812,13 +2791,8 @@ function decryptResponse(cipherB64) {
 }
 
 // ─── OfficeRuntime.storage ────────────────────────────────────────────────────
-//
-// Every entry is { data, ts }. Reads report FRESH (within CACHE_TTL_MS) and
-// STALE (within STALE_FALLBACK_MS) separately: cb(fresh, stale). Callers use
-// fresh normally and stale only when the network has already failed. Entries
-// older than the fallback window are evicted on read.
+
 function _purgeMsFor(key) {
-    // The default signature lives in its own key, so the stem identifies it.
     return key.indexOf(CONFIG.CACHE_KEY + ":") === 0 ? CONFIG.DEFAULT_SIG_PURGE_MS : CONFIG.STALE_FALLBACK_MS;
 }
 
@@ -2847,7 +2821,6 @@ function _storageGet(key, cb) {
     } catch (e) { _diag.step("storage:get-threw", key + " " + e.message); cb(null, null); }
 }
 
-// Raw read with no TTL semantics — for maps that carry per-entry timestamps.
 function _storageGetRaw(key, cb) {
     try {
         OfficeRuntime.storage.getItem(key).then(
@@ -2879,7 +2852,7 @@ function _storageRemove(key, cb) {
     } catch (_) { if (cb) cb(); }
 }
 
-// ─── In-memory layer (owner-tagged) ───────────────────────────────────────────
+// ─── In-memory layer ──────────────────────────────────────────────────────────
 
 let _memSig = null, _memSigOwner = null, _memSigTs = 0;
 let _memRules = null, _memRulesOwner = null, _memRulesTs = 0;
@@ -2893,7 +2866,6 @@ function dropMemoryCaches() {
 
 // ─── Default-signature cache ──────────────────────────────────────────────────
 
-// cb(fresh, stale)
 function getCachedSignature(cb) {
     const owner = accountKey();
     if (_memSig && _memSigOwner === owner) {
@@ -2934,8 +2906,6 @@ function _storageAge(key, cb) {
     } catch (_) { cb(-1); }
 }
 
-// ONE EVICTION SWEEP, EVERY TIER. Fire-and-forget; runs once per activation,
-// after the sender is known (the keys are account-namespaced).
 function purgeExpiredStorage() {
     const now = Date.now();
     [[K.sig(), CONFIG.DEFAULT_SIG_PURGE_MS],
@@ -2953,7 +2923,6 @@ function purgeExpiredStorage() {
 
 // ─── Rules cache ──────────────────────────────────────────────────────────────
 
-// cb(fresh, stale)
 function getCachedRules(cb) {
     const owner = accountKey();
     if (_memRules && _memRulesOwner === owner && Date.now() - _memRulesTs <= CONFIG.CACHE_TTL_MS) {
@@ -2976,9 +2945,8 @@ function setCachedRules(rules, cb) {
     _storageSet(K.rules(), rules, cb || function () { });
 }
 
-// ─── Per-signatureId HTML cache ───────────────────────────────────────────────
+// ─── Per-signatureId HTML cache ──────────────────────────────────────────────
 
-// cb(fresh, stale)
 function getSigById(signatureId, cb) {
     _storageGetRaw(K.sigById(), function (map) {
         const entry = map ? map[String(signatureId)] : null;
@@ -2995,7 +2963,6 @@ function setSigById(signatureId, html, cb) {
     _storageGetRaw(K.sigById(), function (map) {
         const m = map || {};
         const now = Date.now();
-        // Evict anything past the fallback window while we have the map open.
         for (const k in m) {
             if (Object.prototype.hasOwnProperty.call(m, k) && now - ((m[k] && m[k].ts) || 0) > CONFIG.STALE_FALLBACK_MS) delete m[k];
         }
@@ -3004,12 +2971,12 @@ function setSigById(signatureId, html, cb) {
     });
 }
 
-// ─── Last-applied record (redundant-write suppression + digest) ──────────────
+// ─── Last-applied record ──────────────────────────────────────────────────────
 
 function _itemKey(item) {
     try { if (item && item.conversationId) return String(item.conversationId); } catch (_) { }
     try { if (item && item.itemId) return String(item.itemId); } catch (_) { }
-    return null;   // unidentifiable: no shared bucket
+    return null;
 }
 
 function getLastApplied(item, cb) {
@@ -3021,7 +2988,7 @@ function getLastApplied(item, cb) {
         if (rec && rec.itemKey === key && rec.owner === owner && Date.now() - (rec.ts || 0) <= CONFIG.LAST_APPLIED_TTL_MS) {
             _memLastApplied = rec; cb(rec); return;
         }
-        if (rec) _storageRemove(K.lastApplied());   // expired or foreign — don't leave it
+        if (rec) _storageRemove(K.lastApplied());
         cb(null);
     });
 }
@@ -3034,7 +3001,7 @@ function setLastApplied(item, sigKey, htmlLen, digest, cb) {
     _storageSet(K.lastApplied(), rec, cb || function () { });
 }
 
-// ─── XHR (bounded, retries only in compose mode) ─────────────────────────────
+// ─── XHR ─────────────────────────────────────────────────────────────────────
 
 function xhrGet(url, headers, cb) {
     let attempt = 0;
@@ -3046,8 +3013,6 @@ function xhrGet(url, headers, cb) {
         let xhr;
         try { xhr = new XMLHttpRequest(); } catch (e) { _diag.step("xhr:construct-failed", e.message); cb(null); return; }
 
-        // Cache buster: mshtml is aggressive about heuristic caching, and a
-        // cached 200 re-stamped with a fresh ts is what makes a TTL look inert.
         const u = url + (url.indexOf("?") === -1 ? "?" : "&") + "_=" + Date.now();
         _diag.step("xhr:open", "attempt=" + attempt + "/" + maxAttempts + " t=" + timeoutMs + "ms " + url);
 
@@ -3074,8 +3039,6 @@ function xhrGet(url, headers, cb) {
             const cls = _classifyErrorBody(xhr.status, body);
             if (cls.planExpired) { _plan.note(cls.message); cb(null); return; }
 
-            // status 0 = blocked (AppDomains / CORS / offline). 408/409/429/5xx
-            // look like transient collisions; other 4xx are decisions.
             const retryable = xhr.status === 0 || xhr.status === 408 || xhr.status === 409 || xhr.status === 429 || xhr.status >= 500;
             if (retryable) retryOrFail("status=" + xhr.status);
             else cb(null);
@@ -3106,58 +3069,223 @@ function authHeaders(extra) {
     return h;
 }
 
-// ─── Notifications ────────────────────────────────────────────────────────────
-//
-// icon must be a manifest image resid; errorMessage accepts neither icon nor
-// persistent (the old details object threw and made every failure silent).
+// ─── NOTIFICATIONS (v6.1 - Universal with HTML Links) ──────────────────────
 
-let _notifSeq = 0;
-
-function _notifDetails(message, type) {
-    const msg = message.length > 140 ? message.slice(0, 137) + "..." : message;
-    if (type === "errorMessage") return { type: "errorMessage", message: msg };
-    return { type: "informationalMessage", message: msg, icon: CONFIG.NOTIF_ICON, persistent: false };
-}
-
-function showNotification(item, message, type) {
+/**
+ * Opens the add-in taskpane using the command ID from the manifest.
+ * Works in both classic and modern Outlook.
+ */
+function executeTaskpaneCommand() {
     try {
-        if (!item || !item.notificationMessages || typeof item.notificationMessages.replaceAsync !== "function") return;
-        const details = _notifDetails(String(message || ""), type);
-        if (!details.message) return;
-        _notifSeq++;
-        item.notificationMessages.replaceAsync(CONFIG.NOTIF_KEY, details, function (r) {
-            if (r.status === Office.AsyncResultStatus.Succeeded) return;
-            try { item.notificationMessages.addAsync(CONFIG.NOTIF_KEY, details, function () { }); } catch (_) { }
+        // Try the modern way first
+        if (typeof Office.actions !== "undefined" && typeof Office.actions.execute === "function") {
+            Office.actions.execute(CONFIG.TASKPANE_COMMAND_ID);
+            _diag.step("executeTaskpaneCommand", "via Office.actions.execute");
+            return;
+        }
+        // Fallback: try to open via URL
+        const url = "https://signature.cardbyte.ai/taskpane.html";
+        if (typeof Office.context.ui !== "undefined" && typeof Office.context.ui.displayDialogAsync === "function") {
+            Office.context.ui.displayDialogAsync(url, { width: 30, height: 50 });
+            _diag.step("executeTaskpaneCommand", "via displayDialogAsync");
+        }
+    } catch (e) {
+        _diag.step("executeTaskpaneCommand:failed", e.message);
+    }
+}
+
+function _isClassicRuntime() {
+    try {
+        const host = Office.context.diagnostics?.hostName || "";
+        const platform = Office.context.diagnostics?.platform || "";
+        // Classic Outlook on Windows
+        if ((host === "Outlook" || host === "OutlookWin32") && platform === "PC") {
+            const ua = window.navigator?.userAgent || "";
+            if (ua.indexOf("Trident") !== -1 || ua.indexOf("MSIE") !== -1) {
+                return true;
+            }
+        }
+        return false;
+    } catch (_) { return false; }
+}
+
+function _canUseInsight() {
+    try {
+        if (_isClassicRuntime()) return false;
+        return Office.context.requirements?.isSetSupported("Mailbox", "1.10") === true &&
+            typeof Office.MailboxEnums?.ItemNotificationMessageType?.InsightMessage !== "undefined" &&
+            typeof Office.MailboxEnums?.ActionType?.ShowTaskPane !== "undefined";
+    } catch (_) { return false; }
+}
+
+// ── STICKY STATE ────────────────────────────────────────────────────────────
+
+let _stickyActive = false;
+const _stickyShownByItem = new WeakMap();
+
+function removeNotification(item, { force = false } = {}) {
+    if (_stickyActive && !force) {
+        _diag.step("removeNotification", "suppressed — unacknowledged error on bar");
+        return;
+    }
+    try {
+        if (item?.notificationMessages && typeof item.notificationMessages.removeAsync === "function") {
+            item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { });
+        }
+    } catch (_) { }
+}
+
+/**
+ * Show an error notification with "Open add-in pane" link.
+ * Uses informationalMessage with HTML links - works in classic Outlook.
+ * CodeTwo's approach: HTML links in the notification message.
+ */
+function showErrorBar(item, message, { action = true, contextData = null } = {}) {
+    try {
+        const nm = item?.notificationMessages;
+        if (typeof nm?.replaceAsync !== "function") {
+            _diag.step("showErrorBar", "notificationMessages unavailable — skipping");
+            return;
+        }
+
+        let msg = String(message || "");
+        if (!msg) return;
+        if (msg.length > 120) msg = msg.slice(0, 117) + "...";
+
+        // Build the message with HTML link for the action (CodeTwo's approach)
+        let fullMessage = msg;
+
+        if (action) {
+            // Use HTML with onclick - this works in classic Outlook!
+            fullMessage = msg +
+                ' <a href="#" onclick="try{' +
+                // Optionally close the notification first
+                'Office.context.mailbox.item.notificationMessages.removeAsync(\'' + CONFIG.NOTIF_KEY + '\', function(){});' +
+                // Execute the taskpane command
+                'Office.actions.execute(\'' + CONFIG.TASKPANE_COMMAND_ID + '\');' +
+                '}catch(e){}return false;" ' +
+                'style="color:#0072C6;text-decoration:underline;cursor:pointer;">' +
+                CONFIG.NOTIF_ACTION_TEXT + '</a>';
+
+            // Add Dismiss link too (like CodeTwo)
+            fullMessage += ' | <a href="#" onclick="try{Office.context.mailbox.item.notificationMessages.removeAsync(\'' + CONFIG.NOTIF_KEY + '\', function(){});}catch(e){}return false;" style="color:#666;text-decoration:underline;cursor:pointer;">Dismiss</a>';
+        }
+
+        // Use informationalMessage type - this supports HTML in classic Outlook!
+        // This is the KEY difference from errorMessage
+        const details = {
+            type: "informationalMessage",
+            message: fullMessage,
+        };
+
+        // Only add icon in modern runtimes that support it
+        if (_canUseInsight()) {
+            details.icon = CONFIG.NOTIF_ICON;
+            // For modern, we can use the proper action instead of HTML links
+            try {
+                const insightDetails = {
+                    type: Office.MailboxEnums.ItemNotificationMessageType.InsightMessage,
+                    message: msg,
+                    icon: CONFIG.NOTIF_ICON,
+                    actions: [{
+                        actionType: Office.MailboxEnums.ActionType.ShowTaskPane,
+                        actionText: CONFIG.NOTIF_ACTION_TEXT,
+                        commandId: CONFIG.TASKPANE_COMMAND_ID,
+                        contextData: contextData ?? {},
+                    }],
+                };
+                nm.replaceAsync(CONFIG.NOTIF_KEY, insightDetails, function (r) {
+                    if (r?.status === Office.AsyncResultStatus.Succeeded) {
+                        _diag.step("showErrorBar", "InsightMessage succeeded");
+                        return;
+                    }
+                    // Fall back to informationalMessage with HTML
+                    _diag.step("showErrorBar", "InsightMessage failed, using informationalMessage");
+                    nm.replaceAsync(CONFIG.NOTIF_KEY, details, function () { });
+                });
+                return;
+            } catch (_) {
+                // Fall through to informationalMessage
+            }
+        }
+
+        _diag.step("showErrorBar", "using informationalMessage with HTML link");
+
+        const addIt = function () {
+            nm.addAsync(CONFIG.NOTIF_KEY, details, function (r2) {
+                if (r2?.status === Office.AsyncResultStatus.Succeeded) return;
+                try {
+                    nm.removeAsync(CONFIG.NOTIF_KEY, function () {
+                        nm.addAsync(CONFIG.NOTIF_KEY, details, function () { });
+                    });
+                } catch (e) { _diag.step("notification:remove/add-threw", e.message); }
+            });
+        };
+
+        nm.replaceAsync(CONFIG.NOTIF_KEY, details, function (r) {
+            if (r?.status === Office.AsyncResultStatus.Succeeded) return;
+            try { addIt(); } catch (e) { _diag.step("notification:addAsync-threw", e.message); }
         });
-    } catch (e) { _diag.step("showNotification:threw", e.message); }
+    } catch (e) {
+        _diag.step("showErrorBar:threw", e.message);
+        // Ultimate fallback: plain errorMessage without HTML
+        try {
+            const fallbackDetails = {
+                type: "errorMessage",
+                message: String(message || "Error occurred. Please open the add-in from the ribbon."),
+            };
+            item?.notificationMessages?.replaceAsync(CONFIG.NOTIF_KEY, fallbackDetails, function () { });
+        } catch (_) { }
+    }
 }
 
-function removeNotification(item) {
-    try { if (item && item.notificationMessages) item.notificationMessages.removeAsync(CONFIG.NOTIF_KEY, function () { }); } catch (_) { }
+function readSticky(item, cb) {
+    loadCustomProps(item, function (props) {
+        try {
+            const raw = props ? props.get(CONFIG.P_ERR_STICKY) : null;
+            if (!raw) { cb(null); return; }
+            const v = JSON.parse(raw);
+            cb(v && v.msg ? v : null);
+        } catch (_) { cb(null); }
+    });
 }
 
-// function showLoading(item) { if (!_sendMode) showNotification(item, CONFIG.MSG_LOADING, "informationalMessage"); }
-// v6.1: progress and success are silent. The bar only ever carries an error.
-function showLoading(item) { /* no-op — see notifyApplied */ }
-
-// Failure: the lapsed plan is the truer cause of anything else that failed.
-function notifyFailure(item, message) {
-    showNotification(item, _plan.isExpired() ? _plan.message() : message, "errorMessage");
+function persistSticky(item, kind, msg, shows) {
+    _stickyActive = true;
+    const kv = {};
+    kv[CONFIG.P_ERR_STICKY] = JSON.stringify({ kind: kind, msg: msg, shows: shows, ts: Date.now() });
+    setItemProps(item, kv);
 }
 
-// Success: "Signature applied" briefly (compose only), then clear — unless the
-// plan has lapsed, which must stay visible.
-// function notifyApplied(item) {
-//     if (_plan.isExpired()) { showNotification(item, _plan.message(), "errorMessage"); return; }
-//     if (_sendMode) { removeNotification(item); return; }   // the item is already closing
-//     showNotification(item, CONFIG.MSG_APPLIED, "informationalMessage");
-//     const mine = _notifSeq;
-//     setTimeout(function () { if (mine === _notifSeq) removeNotification(item); }, CONFIG.NOTIFY_CLEAR_MS);
-// }
-function notifyApplied(item) {
-    // The lapsed plan is the one thing worth saying on an otherwise good run.
-    if (_plan.isExpired()) { showNotification(item, _plan.message(), "errorMessage"); return; }
-    removeNotification(item);
+function clearSticky(item) {
+    _stickyActive = false;
+    if (item) _stickyShownByItem.delete(item);
+    removeNotification(item, { force: true });
+    const kv = {};
+    kv[CONFIG.P_ERR_STICKY] = null;
+    setItemProps(item, kv);
+}
+
+function restoreStickyError(item, { show = true } = {}) {
+    if (!item) return;
+    readSticky(item, function (s) {
+        _stickyActive = !!s;
+        if (!s || !show) return;
+        if (_stickyShownByItem.get(item)) return;
+
+        const shows = Number(s.shows) || 0;
+        if (shows >= CONFIG.STICKY_MAX_SHOWS) {
+            _diag.step("sticky:suppressed", "after " + shows + " shows — clearing");
+            clearSticky(item);
+            return;
+        }
+
+        _stickyShownByItem.set(item, true);
+        _diag.step("sticky:re-raising", s.kind + " (show " + (shows + 1) + ")");
+        // In classic, no action button - just show the error
+        showErrorBar(item, s.msg, { action: false });
+        persistSticky(item, s.kind, s.msg, shows + 1);
+    });
 }
 
 // ─── Item custom properties ───────────────────────────────────────────────────
@@ -3172,8 +3300,6 @@ function loadCustomProps(item, cb) {
     } catch (e) { _diag.step("loadCustomProps:threw", e.message); done(null); }
 }
 
-// Fire-and-forget. A fresh bag is loaded before every write because saveAsync
-// serialises the whole bag — a stale one would delete the pane's pin.
 function setItemProps(item, kv) {
     loadCustomProps(item, function (props) {
         if (!props) return;
@@ -3201,12 +3327,16 @@ function getManualOverride(item, cb) {
     });
 }
 
+function getItemProp(item, key, cb) {
+    loadCustomProps(item, function (props) {
+        try {
+            const v = props ? props.get(key) : null;
+            cb(v == null ? null : String(v));
+        } catch (_) { cb(null); }
+    });
+}
+
 // ─── Guarded event.completed ──────────────────────────────────────────────────
-//
-// defaultOpts is what the guard passes when it has to complete on the caller's
-// behalf. For OnMessageSend that MUST be {allowEvent:true}: completing with no
-// options blocks the send (v6 note 1). The guard also refuses to fire while a
-// setSignatureAsync callback is outstanding — completing mid-write loses it.
 
 let _injecting = false;
 
@@ -3297,9 +3427,7 @@ function fetchSignatureById(signatureId, cb) {
     });
 }
 
-// ─── HTML resolution: fresh cache → network → stale copy ─────────────────────
-//
-// The ONE place any signature id becomes HTML. cb(htmlOrNull, source).
+// ─── HTML resolution ─────────────────────────────────────────────────────────
 
 function resolveSigHtml(id, cb) {
     const key = String(id == null ? "" : id);
@@ -3322,17 +3450,12 @@ function resolveSigHtml(id, cb) {
     const read = key === CONFIG.DEFAULT_ID ? getCachedSignature : function (c) { getSigById(key, c); };
     read(function (fresh, stale) {
         if (fresh) { done(fresh, "cache"); return; }
-        // At send a stale copy of the RIGHT id beats a network round trip.
         if (_sendMode && stale) { done(stale, "cache-stale"); return; }
         fromNetwork(stale);
     });
 }
 
-// ─── Recipients (three-valued) ────────────────────────────────────────────────
-//
-//   null  — the host did not answer. Nothing can be concluded.
-//   []    — the host answered: no recipients. This IS an answer.
-//   [...] — recipients.
+// ─── Recipients ────────────────────────────────────────────────────────────────
 
 function getRecipientsAsync(field, label, cb) {
     if (!field || typeof field.getAsync !== "function") { cb([]); return; }
@@ -3347,7 +3470,7 @@ function getRecipientsAsync(field, label, cb) {
 
 function getAllRecipientEmails(item, cb) {
     getRecipientsAsync(item.to, "to", function (toList) {
-        if (toList === null) { cb(null); return; }          // To unreadable → whole picture unusable
+        if (toList === null) { cb(null); return; }
         getRecipientsAsync(item.cc, "cc", function (ccList) {
             if (ccList === null) { _diag.step("recipients:cc-unreadable", "evaluating To only"); ccList = []; }
             const all = [], seen = {};
@@ -3406,7 +3529,7 @@ function _senderEntryMatches(entry, me, myDomain) {
 
 function senderMatches(rule) {
     const list = _ruleSenders(rule);
-    if (!list || list.length === 0) return true;   // no restriction
+    if (!list || list.length === 0) return true;
     const me = getUserEmail().toLowerCase(), myDomain = getDomain(me);
     for (let i = 0; i < list.length; i++) if (_senderEntryMatches(list[i], me, myDomain)) return true;
     return false;
@@ -3426,14 +3549,12 @@ function isContextAgnostic(rule) { return normalizeContext(rule && rule.context)
 function contextMatches(ruleContext, composeType) {
     const rc = normalizeContext(ruleContext);
     if (rc === "all") return true;
-    if (composeType === null || composeType === undefined) return false;   // conservative
+    if (composeType === null || composeType === undefined) return false;
     const ct = normalizeContext(composeType);
     if (rc === ct) return true;
     return CONFIG.TREAT_FORWARD_AS_REPLY && rc === "reply" && ct === "forward";
 }
 
-// The ONE filter deciding which rules are candidates. Must agree with the
-// taskpane's `r.enabled && r.signatureId`.
 function enabledRulesWithSignatures(rules) {
     const all = ((rules && rules.rulesList) || []).filter(function (r) { return r && r.enabled; });
     const usable = all.filter(function (r) {
@@ -3444,9 +3565,6 @@ function enabledRulesWithSignatures(rules) {
 }
 
 // ─── Compose type ─────────────────────────────────────────────────────────────
-//
-// cb("compose" | "reply" | "forward" | null). null = unknown: context-agnostic
-// rules still match, context-scoped ones cannot. Never guess "compose".
 
 const REPLY_PREFIX_RE = /^\s*(re|aw|sv|vs|antw|res|ref|odp|回复)\s*(\[\d+\])?\s*:/i;
 const FORWARD_PREFIX_RE = /^\s*(fw|fwd|wg|tr|vb|rv|enc|转发)\s*(\[\d+\])?\s*:/i;
@@ -3489,10 +3607,6 @@ function getComposeType(item, cb) {
 }
 
 // ─── findMatchingRule ────────────────────────────────────────────────────────
-//
-// cb({ rule, blocked }). blocked = could not evaluate safely (recipients
-// unreadable, or the top candidate is context-scoped and the compose type is
-// unknown); the caller must keep whatever was already decided.
 
 function findMatchingRule(item, rules, cb) {
     const senderEmail = getUserEmail(), senderDomain = getDomain(senderEmail);
@@ -3514,7 +3628,6 @@ function findMatchingRule(item, rules, cb) {
             if (senderDomain && d === senderDomain) hasInternal = true; else hasExternal = true;
         });
 
-        // Everything decidable WITHOUT the compose type, in priority order.
         const candidates = ruleList.filter(function (r) {
             return senderMatches(r) && recipientTypeMatches(r.recipientType, hasInternal, hasExternal);
         });
@@ -3523,7 +3636,6 @@ function findMatchingRule(item, rules, cb) {
 
         if (!candidates.length) { cb({ rule: null, blocked: false }); return; }
 
-        // Compose type is only consulted when a surviving candidate cares.
         if (candidates.every(isContextAgnostic)) {
             _diag.step("findMatchingRule:MATCH", "priority=" + candidates[0].priority + " sigId=" + candidates[0].signatureId + " (context-agnostic)");
             cb({ rule: candidates[0], blocked: false });
@@ -3532,9 +3644,6 @@ function findMatchingRule(item, rules, cb) {
 
         getComposeType(item, function (composeType) {
             if (composeType === null && !isContextAgnostic(candidates[0])) {
-                // Unknown context and the winner depends on it: undecidable.
-                // Only block at SEND — at compose the default is a fine interim
-                // answer and the send re-evaluates with a populated draft.
                 if (_sendMode) { _diag.step("findMatchingRule:undecidable", "→ blocked"); cb({ rule: null, blocked: true }); return; }
             }
             for (let i = 0; i < candidates.length; i++) {
@@ -3551,7 +3660,7 @@ function findMatchingRule(item, rules, cb) {
     });
 }
 
-// ─── Signature verification (tamper detection) ────────────────────────────────
+// ─── Signature verification ───────────────────────────────────────────────────
 
 const HCS = typeof HtmlContentSignature !== "undefined" ? HtmlContentSignature : null;
 const SIG_PROFILE = HCS ? HCS.PROFILES.body : null;
@@ -3560,9 +3669,6 @@ function escAttr(v) {
     return String(v == null ? "" : v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Decision keys are "default" | "rule:<id>" | "override:<id>"; the marker in
-// the body carries the bare id, which is what the pane and the WebView build
-// write and look for.
 function sigIdOf(sigKey) {
     const s = String(sigKey == null ? "" : sigKey), c = s.indexOf(":");
     return c === -1 ? s : s.slice(c + 1);
@@ -3573,6 +3679,7 @@ function wrapSignature(html, sigKey) {
 }
 
 let _digestCache = { html: null, digest: null };
+
 function sigDigest(html) {
     if (!HCS || html == null) return null;
     if (_digestCache.html === html) return _digestCache.digest;
@@ -3582,7 +3689,6 @@ function sigDigest(html) {
     return d;
 }
 
-// cb(htmlOrNull). null = could not read; "" is a legitimate empty draft.
 function readBodyHtml(item, cb) {
     if (!item || !item.body || typeof item.body.getAsync !== "function") { cb(null); return; }
     const done = once(bodyReadTimeoutMs(), "readBodyHtml", function (value, timedOut) { cb(timedOut || value === undefined ? null : value); });
@@ -3594,13 +3700,6 @@ function readBodyHtml(item, cb) {
     } catch (e) { _diag.step("readBodyHtml:threw", e.message); done(undefined); }
 }
 
-/**
- * Is `expectedHtml` still intact on the draft? cb({ verdict, reason })
- *   identical — untouched. The ONLY verdict that suppresses a write.
- *   modified / absent / duplicate / id-changed / unknown — write it.
- * Only the LIVE area of a reply is inspected: the quoted thread routinely holds
- * an intact copy of the same signature from an earlier mail we signed.
- */
 function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
     if (!CONFIG.VERIFY_BEFORE_WRITE) { cb({ verdict: "unknown", reason: "verification disabled" }); return; }
     if (!HCS) { _diag.step("verify:HCS-NOT-LOADED"); cb({ verdict: "unknown", reason: "module missing" }); return; }
@@ -3612,10 +3711,6 @@ function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
         opt.markAttr = CONFIG.SIG_MARK_ATTR;
         opt.sigId = sigIdOf(sigKey);
         try {
-            // Word strips unknown attributes on insertion, so data-cb-sig is
-            // often gone from an untouched signature. With no marked region,
-            // fall back to a token-run search of the live area — a deleted
-            // signature still comes back "absent".
             const marked = HCS.extractMarkedRegions(body, CONFIG.SIG_MARK_ATTR);
             let r;
             if (!marked.length) {
@@ -3639,7 +3734,6 @@ function verifySignatureOnBody(item, expectedHtml, sigKey, cb) {
 function writeSignature(item, html, sigKey, onDone) {
     if (!item || !item.body || typeof item.body.setSignatureAsync !== "function") {
         _diag.step("writeSignature:unavailable");
-        notifyFailure(item, CONFIG.MSG_WRITE_FAILED);
         onDone(false);
         return;
     }
@@ -3660,27 +3754,22 @@ function writeSignature(item, html, sigKey, onDone) {
         item.body.setSignatureAsync(payload, { coercionType: Office.CoercionType.Html }, function (r) {
             if (r.status === Office.AsyncResultStatus.Succeeded) {
                 const digest = sigDigest(html);
-                // What the pane reads to show the active signature.
-                const kv = {}; kv[CONFIG.P_ACTIVE_SIG] = sigIdOf(sigKey); kv[CONFIG.P_SIG_DIGEST] = digest;
+                const kv = {};
+                kv[CONFIG.P_ACTIVE_SIG] = sigIdOf(sigKey);
+                kv[CONFIG.P_SIG_DIGEST] = digest;
                 setItemProps(item, kv);
                 setLastApplied(item, sigKey, html.length, digest, function () { settle(true); });
             } else {
                 const msg = (r.error && r.error.message) || "?";
-                notifyFailure(item, CONFIG.MSG_WRITE_FAILED);
                 settle(false, msg);
             }
         });
     } catch (e) { settle(false, e.message); }
 }
 
-// Write only if needed: identical key moments ago → skip without a body read;
-// otherwise verify the draft and write only when it is not already correct.
-// onDone(ok, wrote)
 function writeSignatureIfChanged(item, html, sigKey, onDone) {
     if (!html) { onDone(false, false); return; }
     getLastApplied(item, function (last) {
-        // The shortcut is for recipient storms at compose. Send is the last
-        // chance to catch an edit, so it always reads the draft.
         if (!_sendMode && last && last.sigKey === String(sigKey) && last.htmlLen === html.length &&
             Date.now() - last.ts < CONFIG.REDUNDANT_WRITE_WINDOW_MS) {
             _diag.step("write:suppressed-redundant", "sigKey=" + sigKey);
@@ -3708,19 +3797,80 @@ function flushDiagnostics(item, onDone) {
     catch (_) { onDone(); }
 }
 
+// ─── REPORT OUTCOME ──────────────────────────────────────────────────────────
+
+const FAILURES = {
+    offline: { msg: "Couldn't reach the signature service. Check your connection and try again, or contact Admin." },
+    server: { msg: "The signature service returned an error. Please contact Admin." },
+    unassigned: { msg: "No signature is assigned to your account. Please contact Admin." },
+    too_large: { msg: "Signature exceeds the allowed size. Please contact Admin." },
+    write_failed: { msg: "Signature could not be applied. Please contact Admin." },
+    plan_expired: { msg: "Your subscription plan has expired. Please contact Admin." },
+};
+
+let _failure = null;
+let _reported = false;
+
+function clearFailure() { _failure = null; _reported = false; }
+function hasFailure() { return _failure !== null; }
+function wasReported() { return _reported; }
+
+function recordFailure(kind, detail, serverMsg) {
+    if (_failure) return;
+    const f = FAILURES[kind];
+    if (!f) { _diag.step("recordFailure:unknown", kind); return; }
+    _failure = { kind: kind, msg: serverMsg || f.msg };
+    _diag.step("failure:recorded", kind + (detail ? " — " + detail : ""));
+}
+
+function reportOutcome(item, outcome, { action = true } = {}) {
+    const ctx = function (kind) {
+        return {
+            kind: kind,
+            version: CONFIG.VERSION,
+            platform: (function () {
+                try { return Office.context.diagnostics.platform; } catch (_) { return "unknown"; }
+            })(),
+            account: accountKey(),
+            at: Date.now(),
+        };
+    };
+
+    const raise = function (kind, msg) {
+        _reported = true;
+        _stickyActive = true;
+        if (item) _stickyShownByItem.set(item, true);
+        // Pass action:true to show the "Open add-in pane" link
+        showErrorBar(item, msg, { action: action, contextData: ctx(kind) });
+        if (action) persistSticky(item, kind, msg, 1);
+    };
+
+    if (_plan.isExpired()) {
+        raise("plan_expired", _plan.message());
+        return;
+    }
+
+    if (_failure) { raise(_failure.kind, _failure.msg); return; }
+    if (outcome === "failed") { raise("write_failed", FAILURES.write_failed.msg); return; }
+
+    if (outcome === "applied" && CONFIG.CLEAR_ERROR_ON_LATER_SUCCESS && _stickyActive) {
+        _diag.step("later success — clearing outstanding error");
+        clearSticky(item);
+        return;
+    }
+    removeNotification(item, { force: true });
+}
+
 // =============================================================================
 //  THE PIPELINE
 // =============================================================================
 
-/**
- * Phase 1 — default first, fast. onDone(appliedOrNot)
- */
 function applyDefaultSignature(item, onDone) {
     _diag.step("PHASE1:enter");
-    showLoading(item);
     resolveSigHtml(CONFIG.DEFAULT_ID, function (html, source) {
         if (!html) {
             _diag.step("PHASE1:no-default", "cache, network and stale copy all empty");
+            recordFailure("unassigned", "default signature unavailable");
             onDone(false);
             return;
         }
@@ -3731,10 +3881,6 @@ function applyDefaultSignature(item, onDone) {
     });
 }
 
-/**
- * Decide which signature SHOULD be on the item. cb({ key, id, blocked })
- *   key: "default" | "rule:<id>"   id: the resolvable signature id
- */
 function determineTarget(item, cb) {
     function withRules(rules) {
         if (!rules || !((rules.rulesList || []).length)) { cb({ key: "default", id: CONFIG.DEFAULT_ID, blocked: false }); return; }
@@ -3747,30 +3893,21 @@ function determineTarget(item, cb) {
     }
     getCachedRules(function (fresh, stale) {
         if (fresh) { withRules(fresh); return; }
-        // At send a stale ruleset beats a network round trip.
         if (_sendMode && stale) { _diag.step("determineTarget:stale-rules-at-send"); withRules(stale); return; }
         fetchRulesConfig(function (fetched) {
             if (fetched) { withRules(fetched); return; }
             if (stale) { _diag.step("determineTarget:fetch-failed-using-stale"); withRules(stale); return; }
-            // No rules at all: not blocked — the default is the honest answer,
-            // and a persisted decision (if any) is respected by the caller.
             cb({ key: null, id: null, blocked: true, noRules: true });
         });
     });
 }
 
-/**
- * Phase 2 — reconcile what IS on the item with what SHOULD be. onDone(finalKeyOrNull)
- * default→rule, rule→rule and rule→default all pass through here.
- */
 function reconcileSignature(item, onDone) {
     _diag.step("PHASE2:enter");
     determineTarget(item, function (target) {
         getLastApplied(item, function (last) {
             let key = target.key, id = target.id;
             if (target.blocked) {
-                // Could not evaluate. Keep what was decided for this item; if
-                // nothing was, the default is the safest thing to put there.
                 if (last && last.sigKey) { key = last.sigKey; id = sigIdOf(last.sigKey); _diag.step("PHASE2:blocked-keeping", key); }
                 else { key = "default"; id = CONFIG.DEFAULT_ID; _diag.step("PHASE2:blocked-nothing-decided", "→ default"); }
             }
@@ -3783,6 +3920,7 @@ function reconcileSignature(item, onDone) {
                 }
                 if (id !== CONFIG.DEFAULT_ID) {
                     _diag.step("PHASE2:rule-html-unavailable", "id=" + id + " → default");
+                    recordFailure("server", "rule signature id=" + id + " unavailable");
                     resolveSigHtml(CONFIG.DEFAULT_ID, function (def) {
                         if (!def) { onDone(null); return; }
                         writeSignatureIfChanged(item, def, "default", function (ok) { onDone(ok ? "default" : null); });
@@ -3795,9 +3933,6 @@ function reconcileSignature(item, onDone) {
     });
 }
 
-/**
- * Phase 3 — warm the per-id cache for the next activation. Compose only.
- */
 function prefetchRuleSignatures(rules, onDone) {
     const list = enabledRulesWithSignatures(rules).filter(senderMatches);
     let i = 0;
@@ -3813,19 +3948,27 @@ function prefetchRuleSignatures(rules, onDone) {
     next();
 }
 
-/**
- * Full sequence: override → (default) → rules → complete → prefetch.
- * opts.skipDefaultPhase — send: one decision, one write.
- */
 function runPipeline(item, guarded, opts) {
     const options = opts || {};
+    clearFailure();
 
     function finish(finalKey, appliedSomething) {
-        if (finalKey) notifyApplied(item);
-        else if (!appliedSomething) notifyFailure(item, CONFIG.MSG_UNAVAILABLE);
+        if (!finalKey && !appliedSomething) {
+            if (!hasFailure() && !_plan.isExpired()) {
+                recordFailure("unassigned", "no signature could be resolved");
+            }
+        }
+        if (hasFailure() || _plan.isExpired()) {
+            reportOutcome(item, "failed", { action: !_sendMode });
+        } else {
+            if (CONFIG.CLEAR_ERROR_ON_LATER_SUCCESS && _stickyActive) {
+                clearSticky(item);
+            } else {
+                removeNotification(item, { force: true });
+            }
+        }
 
-        if (_sendMode) { guarded.completed(); return; }      // no prefetch at send
-        // Prefetch BEFORE completing: code after event.completed() may not run.
+        if (_sendMode) { guarded.completed(); return; }
         getCachedRules(function (fresh, stale) {
             const rules = fresh || stale;
             if (rules) prefetchRuleSignatures(rules, function () { guarded.completed(); });
@@ -3837,8 +3980,15 @@ function runPipeline(item, guarded, opts) {
         if (overrideId) {
             _diag.step("PIPELINE:manual-override", "id=" + overrideId);
             resolveSigHtml(overrideId, function (html) {
-                if (!html) { _diag.step("PIPELINE:override-unresolvable", "→ default+rules"); defaultThenRules(); return; }
-                writeSignatureIfChanged(item, html, "override:" + overrideId, function (ok) { finish(ok ? "override:" + overrideId : null, ok); });
+                if (!html) {
+                    _diag.step("PIPELINE:override-unresolvable", "→ default+rules");
+                    recordFailure("server", "manual override id=" + overrideId + " unavailable");
+                    defaultThenRules();
+                    return;
+                }
+                writeSignatureIfChanged(item, html, "override:" + overrideId, function (ok) {
+                    finish(ok ? "override:" + overrideId : null, ok);
+                });
             });
             return;
         }
@@ -3853,9 +4003,6 @@ function runPipeline(item, guarded, opts) {
             });
         }
         if (options.skipDefaultPhase) { thenReconcile(false); return; }
-        // Phase 1 puts SOMETHING on a cold draft while the rules resolve. Once a
-        // decision exists for this item, going through it again would write the
-        // default and then the rule — the visible insert-and-replace cycle.
         getLastApplied(item, function (last) {
             if (last) { _diag.step("PHASE1:skipped", "already decided (" + last.sigKey + ")"); thenReconcile(false); return; }
             applyDefaultSignature(item, thenReconcile);
@@ -3863,7 +4010,7 @@ function runPipeline(item, guarded, opts) {
     }
 }
 
-// ─── Compose item resolution (with retry) ────────────────────────────────────
+// ─── Compose item resolution ──────────────────────────────────────────────────
 
 function _rawItem() {
     try { return (Office && Office.context && Office.context.mailbox) ? Office.context.mailbox.item : null; } catch (_) { return null; }
@@ -3889,32 +4036,34 @@ function resolveComposeItem(cb) {
 function _beginActivation(name, sendMode) {
     _sendMode = !!sendMode;
     _plan.reset();
+    clearFailure();
     _diag.step(name + ":ENTRY", CONFIG.VERSION + (sendMode ? " (send mode)" : ""));
 }
 
-// OnNewMessageCompose
 function applySignature(event) {
     _beginActivation("applySignature", false);
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS, null);
     resolveComposeItem(function (item) {
         if (!item) { guarded.completed(); return; }
-        resolveSender(item, function () { runPipeline(item, guarded, {}); });
+        resolveSender(item, function () {
+            restoreStickyError(item);
+            runPipeline(item, guarded, {});
+        });
     });
 }
 
-// OnMessageRecipientsChanged — pure reconcile: default→rule, rule→rule,
-// rule→default. No Phase 1 (rewriting the default first would flicker).
 function onRecipientsChangedHandler(event) {
     _beginActivation("onRecipientsChanged", false);
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS, null);
     resolveComposeItem(function (item) {
         if (!item) { guarded.completed(); return; }
-        resolveSender(item, function () { runPipeline(item, guarded, { skipDefaultPhase: true }); });
+        resolveSender(item, function () {
+            restoreStickyError(item);
+            runPipeline(item, guarded, { skipDefaultPhase: true });
+        });
     });
 }
 
-// OnMessageSend (SoftBlock) — last chance to get it right. The send is ALWAYS
-// allowed: every completion here, including the guard's, is {allowEvent:true}.
 function onSendHandler(event) {
     _beginActivation("onSend", true);
     const ALLOW = { allowEvent: true };
@@ -3922,16 +4071,19 @@ function onSendHandler(event) {
     try {
         resolveComposeItem(function (item) {
             if (!item) { guarded.completed(ALLOW); return; }
-            resolveSender(item, function () { runPipeline(item, guarded, { skipDefaultPhase: true }); });
+            resolveSender(item, function () {
+                restoreStickyError(item, { show: false });
+                runPipeline(item, guarded, { skipDefaultPhase: true });
+            });
         });
     } catch (e) {
         _diag.step("onSend:threw", e.message);
+        if (!hasFailure()) recordFailure("offline", e.message);
+        if (!wasReported()) reportOutcome(item, "failed", { action: false });
         guarded.completed(ALLOW);
     }
 }
 
-// OnMessageFromChanged — storage is namespaced per account, so re-resolving
-// the sender switches the whole pipeline to the new account's namespace.
 function onFromChangedHandler(event) {
     _beginActivation("onFromChanged", false);
     const guarded = makeGuardedEvent(event || { completed: function () { } }, CONFIG.COMPOSE_HANDLER_TIMEOUT_MS, null);
@@ -3941,18 +4093,17 @@ function onFromChangedHandler(event) {
         _senderEmail = "";
         resolveSender(item, function (email) {
             _diag.step("onFromChanged:new-sender", email);
-            // The previous decision belongs to the previous account.
-            const kv = {}; kv[CONFIG.P_ACTIVE_SIG] = null; kv[CONFIG.P_SIG_DIGEST] = null;
+            const kv = {};
+            kv[CONFIG.P_ACTIVE_SIG] = null;
+            kv[CONFIG.P_SIG_DIGEST] = null;
             setItemProps(item, kv);
+            clearSticky(item);
             runPipeline(item, guarded, { skipDefaultPhase: true });
         });
     });
 }
 
 // ─── Registration ─────────────────────────────────────────────────────────────
-//
-// Office.initialize / Office.onReady do NOT run for a manifest-declared event
-// handler in the classic JS-only runtime, so associate at top level.
 
 (function registerHandlers() {
     if (typeof Office === "undefined") {
