@@ -967,12 +967,12 @@ const STATIC_SIG_ID = "static";
 
 const UPLOAD_SETTLE_MS = 25_000;            // documented lag is 10–20s
 const UPLOAD_POLL_MS = 1_000;
-const STATIC_FALLBACK_GRACE_MS = 3_000;     // 0 = swap immediately, no waiting at all
+const STATIC_FALLBACK_GRACE_MS = 2_000;     // 0 = swap immediately, no waiting at all
 const FALLBACK_POLL_MS = 500;
 // Host doesn't report isServiceAccessible → pending vs done is unknowable.
 // true  = treat a recently written image signature as at risk and swap it
 // false = leave it; the time-based wait handles it
-const FALLBACK_WHEN_READINESS_UNKNOWN = false;
+const FALLBACK_WHEN_READINESS_UNKNOWN = true;
 
 const isAsyncUploadHost = () => {
     try {
@@ -1017,7 +1017,26 @@ async function waitForInlineUploads(item, { maxWaitMs = UPLOAD_SETTLE_MS } = {})
     return state;
 }
 
-function buildStaticSignature(mailbox) {
+// The same signature the user already has (name, designation, phone, links),
+// with everything that needs an upload removed.
+function textOnlySignature(html) {
+    if (!html) return "";
+    const s = String(html)
+        .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "")                       // Outlook VML blocks
+        .replace(/<(svg|picture|video|audio|object)\b[\s\S]*?<\/\1>/gi, "")
+        .replace(/<(img|image|source|embed|iframe)\b[^>]*>/gi, "")
+        .replace(/<\/iframe>/gi, "")
+        .replace(/\sbackground\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")          // table background images
+        .replace(/url\(\s*(['"]?)[^)]*?\1\s*\)/gi, "none");                      // CSS background images
+    const visibleText = s.replace(/<[^>]+>/g, " ").replace(/&nbsp;|\s+/gi, " ").trim();
+    return visibleText ? s : "";
+}
+
+function buildStaticSignature(mailbox, sourceHtml = "") {
+    const textOnly = textOnlySignature(sourceHtml);
+    if (textOnly) return textOnly;
+
+    // Signature has no text without its images: fall back to name + email.
     const name = String(mailbox?.userProfile?.displayName || "").trim();
     const email = String(_senderEmail || mailbox?.userProfile?.emailAddress || "").trim();
     if (!name && !email) return null;
@@ -1077,13 +1096,14 @@ async function assessSignatureUploads(item) {
         state,
         hasSignature: !!block,
         isStatic: block?.value === STATIC_SIG_ID,
+        sigInner: block ? block.inner : "",
         atRisk: candidates.filter(owned),
         other: candidates.filter((a) => !owned(a)),
     };
 }
 
-async function applyStaticSignature(item, mailbox, attachments) {
-    const html = buildStaticSignature(mailbox);
+async function applyStaticSignature(item, mailbox, attachments, sourceHtml = "") {
+    const html = buildStaticSignature(mailbox, sourceHtml);
     if (!html || !hostCanSetSignature(item)) return false;
 
     // isSendTime:false on purpose, so a failed replace never falls through to
@@ -1120,13 +1140,19 @@ async function resolveInlineUploadsAtSend(item, mailbox) {
             a.atRisk.length > 0 ||
             (a.state === "unknown" && recentlyWritten() && FALLBACK_WHEN_READINESS_UNKNOWN)
         );
-        if (!sigAtRisk) return a.state === "pending" ? "other-pending" : "ready";
+        if (!sigAtRisk) {
+            if (a.state === "pending") return "other-pending";
+            // Upload status unreadable and no identifiable signature to swap:
+            // hand over to the time-based wait instead of sending blind.
+            if (a.state === "unknown" && recentlyWritten()) return "other-pending";
+            return "ready";
+        }
         if (Date.now() >= deadline) break;
         await sleep(FALLBACK_POLL_MS);
     }
 
     warn(`signature image not uploaded to Exchange (${a.state}) — switching to static signature`);
-    if (!(await applyStaticSignature(item, mailbox, a.atRisk))) return "fallback-failed";
+    if (!(await applyStaticSignature(item, mailbox, a.atRisk, a.sigInner))) return "fallback-failed";
 
     const after = await assessSignatureUploads(item);
     return after.state === "pending" ? "other-pending" : "fallback-applied";
@@ -2834,6 +2860,16 @@ async function onSendCore(item, mailbox) {
 
     const { id, reason, persist } = await decideSendId(item, userEmail);
     log(`onSend: target id=${id} (${reason})`);
+
+    // Classic Outlook runs this in a JavaScript-only runtime with no localStorage, so there
+    // is usually no cached copy here. Fetching it only to re-verify an unchanged decision is
+    // what triggers "taking longer than expected". Trust the compose-time write instead.
+    if (reason === "recipients unchanged since compose" && !sigCache.get(id)) {
+        log(`onSend: id=${id} unchanged since compose and not cached here — skipping fetch/verify`);
+        if (!hasFailure()) removeNotification(item);
+        timed("onSendCore (trusted, no fetch)", t0);
+        return;
+    }
 
     const r = await applyById(item, id, userEmail, seq, { isSendTime: true });
 
