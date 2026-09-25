@@ -16,7 +16,7 @@
 //   • This is a PURE INLINE — no semantic changes to the verification logic.
 // =============================================================================
 
-const CB_VERSION = "v7.9.2-inlined-tamper-check";
+const CB_VERSION = "v7.10.0-static-sig-fallback";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  HTML-CONTENT-SIGNATURE — INLINED (v2)
@@ -869,14 +869,16 @@ const R_RULES_MAX_BYTES = 20 * 1024;
 
 // FRESHNESS
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const SIG_TTL_MS = CACHE_TTL_MS;
+const SIG_TTL_MS = CACHE_TTL_MS;                 // rule signatures
+const DEFAULT_SIG_TTL_MS = 30 * 60 * 1000;       // default signature: refetched after 30 min
 const RULES_TTL_MS = CACHE_TTL_MS;
 const ACTIVE_SIG_MAX_AGE_MS = 1 * 60 * 1000;
 
-// EVICTION
+// EVICTION: each purge ceiling must stay ABOVE its TTL, so a stale copy
+// survives long enough to be used as the offline fallback.
 const PURGE_MS = 30 * 60 * 1000;
 const SIG_PURGE_MS = PURGE_MS;
-const DEFAULT_SIG_PURGE_MS = 5 * 60 * 1000;
+const DEFAULT_SIG_PURGE_MS = 60 * 60 * 1000;
 
 const MAX_SIG_BYTES = 100 * 1024;
 
@@ -948,6 +950,187 @@ const EMPTY_RECIP_SETTLE_MS = 400;
 const X_PLATFORM_MAP = { MAC: "MAC", MOBILE: "MAC", OWA: "WINDOWS" };
 const INTERNAL_REQUIRES_NO_EXTERNAL = false;
 const EMPTY_RECIPIENTS_MEANS_DEFAULT = true;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  INLINE-IMAGE UPLOAD HANDLING + STATIC SIGNATURE FALLBACK (v7.10)
+//  New Outlook / OWA upload inline images to Exchange in the background.
+//  Sending before that finishes fails with "attachments failed to upload".
+//  At send: if the signature's image isn't uploaded yet, swap in a text-only
+//  signature instead of waiting. Only the user's own pending images are waited on.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const P_SIG_WRITTEN_AT = "cardbyte_sig_written_at";
+const P_SIG_HAS_IMG = "cardbyte_sig_has_img";
+const P_UPLOAD_BLOCKED = "cardbyte_upload_blocked_once";
+const P_STATIC_FALLBACK = "cardbyte_static_fallback";
+const STATIC_SIG_ID = "static";
+
+const UPLOAD_SETTLE_MS = 25_000;            // documented lag is 10–20s
+const UPLOAD_POLL_MS = 1_000;
+const STATIC_FALLBACK_GRACE_MS = 3_000;     // 0 = swap immediately, no waiting at all
+const FALLBACK_POLL_MS = 500;
+// Host doesn't report isServiceAccessible → pending vs done is unknowable.
+// true  = treat a recently written image signature as at risk and swap it
+// false = leave it; the time-based wait handles it
+const FALLBACK_WHEN_READINESS_UNKNOWN = false;
+
+const isAsyncUploadHost = () => {
+    try {
+        const h = Office.context.mailbox.diagnostics.hostName;
+        return h === "newOutlookWindows" || h === "OutlookWebApp";
+    } catch (_) { return false; }
+};
+
+function inlineUploadState(item) {
+    return new Promise((resolve) => {
+        if (typeof item?.getAttachmentsAsync !== "function") return resolve("unknown");
+        try {
+            item.getAttachmentsAsync((res) => {
+                if (res?.status !== Office.AsyncResultStatus.Succeeded) return resolve("unknown");
+                const inline = (res.value || []).filter((a) => a.isInline);
+                if (!inline.length) return resolve("none");
+                if (inline.some((a) => typeof a.isServiceAccessible !== "boolean")) return resolve("unknown");
+                resolve(inline.every((a) => a.isServiceAccessible) ? "ready" : "pending");
+            });
+        } catch (_) { resolve("unknown"); }
+    });
+}
+
+async function waitForInlineUploads(item, { maxWaitMs = UPLOAD_SETTLE_MS } = {}) {
+    if (!isAsyncUploadHost()) return "skipped";
+
+    const writtenAt = Number(await getItemProp(item, P_SIG_WRITTEN_AT)) || 0;
+    const hasImg = (await getItemProp(item, P_SIG_HAS_IMG)) === "1";
+    const settledByTime = () => !writtenAt || Date.now() - writtenAt >= UPLOAD_SETTLE_MS;
+    const deadline = Date.now() + maxWaitMs;
+    const t0 = Date.now();
+    let state = "unknown";
+
+    while (Date.now() < deadline) {
+        state = await inlineUploadState(item);
+        if (state === "ready") break;
+        if (state === "none" && (!hasImg || settledByTime())) break;
+        if (state === "unknown" && settledByTime()) break;
+        await sleep(UPLOAD_POLL_MS);
+    }
+    log(`inline upload wait: ${state} after ${since(t0)}`);
+    return state;
+}
+
+function buildStaticSignature(mailbox) {
+    const name = String(mailbox?.userProfile?.displayName || "").trim();
+    const email = String(_senderEmail || mailbox?.userProfile?.emailAddress || "").trim();
+    if (!name && !email) return null;
+    const lines = [name && `<strong>${escAttr(name)}</strong>`, email && escAttr(email)]
+        .filter(Boolean).join("<br>");
+    return `<div style="font:13px Arial,Helvetica,sans-serif;color:#333333;">${lines}</div>`;
+}
+
+function getInlineAttachments(item) {
+    return new Promise((resolve) => {
+        if (typeof item?.getAttachmentsAsync !== "function") return resolve(null);
+        try {
+            item.getAttachmentsAsync((res) => {
+                if (res?.status !== Office.AsyncResultStatus.Succeeded) return resolve(null);
+                resolve((res.value || []).filter((a) => a.isInline));
+            });
+        } catch (_) { resolve(null); }
+    });
+}
+
+async function assessSignatureUploads(item) {
+    const [inline, body] = await Promise.all([getInlineAttachments(item), readBodyHtml(item)]);
+    if (inline === null || body === null) {
+        return { state: "unknown", hasSignature: false, isStatic: false, atRisk: [], other: [] };
+    }
+
+    // const hcs = getHcs();
+    // const block = hcs?.extractMarkedRegions(body, SIG_MARK_ATTR)?.[0] || null;
+    const hcs = getHcs();
+    const boundary = hcs ? hcs.splitDraftAtQuote(body).boundary : body.length;
+    // Only our own signature in the live (non-quoted) area. A CardByte block inside
+    // the quoted thread belongs to an earlier message and must never be touched.
+    const block = (hcs?.extractMarkedRegions(body, SIG_MARK_ATTR) || [])
+        .find((r) => r.start < boundary) || null;
+
+    const sigHtml = block ? body.slice(block.start, block.end) : "";
+    const sigImgCount = (sigHtml.match(/<img\b/gi) || []).length;
+    const rest = block ? body.slice(0, block.start) + body.slice(block.end) : body;
+    const otherImagesInLiveBody = /<img\b/i.test(hcs ? hcs.splitDraftAtQuote(rest).live : rest);
+
+    const pending = inline.filter((a) => a.isServiceAccessible === false);
+    const unknown = inline.filter((a) => typeof a.isServiceAccessible !== "boolean");
+    const state = pending.length ? "pending" : unknown.length ? "unknown" : "ready";
+    const candidates = pending.length ? pending : unknown;
+
+    // Owned by the signature if its contentId/id appears inside our block, or (pending only)
+    // there are no other images in the live body and no more pending attachments than
+    // the signature has images.
+    const heuristicOk = state === "pending" && !otherImagesInLiveBody && pending.length <= sigImgCount;
+    const owned = (a) => !!block && (
+        (a.contentId && sigHtml.includes(a.contentId)) ||
+        (a.id && sigHtml.includes(a.id)) ||
+        heuristicOk
+    );
+
+    return {
+        state,
+        hasSignature: !!block,
+        isStatic: block?.value === STATIC_SIG_ID,
+        atRisk: candidates.filter(owned),
+        other: candidates.filter((a) => !owned(a)),
+    };
+}
+
+async function applyStaticSignature(item, mailbox, attachments) {
+    const html = buildStaticSignature(mailbox);
+    if (!html || !hostCanSetSignature(item)) return false;
+
+    // isSendTime:false on purpose, so a failed replace never falls through to
+    // appendOnSendAsync (which would keep the image signature AND add a second one).
+    const ok = await writeSignature(item, html, { silent: true, sigId: STATIC_SIG_ID });
+    if (!ok) return false;
+
+    for (const att of attachments) {
+        const removed = await officeAsync(
+            (cb) => item.removeAttachmentAsync(att.id, cb),
+            { ms: 3_000, label: `removeAttachmentAsync ${att.name || att.id}` }
+        );
+        log(`signature attachment ${att.name || att.id}: ${removed ? "removed" : "not removed (may already be gone)"}`);
+    }
+    return true;
+}
+
+async function resolveInlineUploadsAtSend(item, mailbox) {
+    if (!isAsyncUploadHost()) return "skipped";
+
+    const writtenAt = Number(await getItemProp(item, P_SIG_WRITTEN_AT)) || 0;
+    const hasImg = (await getItemProp(item, P_SIG_HAS_IMG)) === "1";
+    const recentlyWritten = () => hasImg && writtenAt > 0 && Date.now() - writtenAt < UPLOAD_SETTLE_MS;
+    const deadline = Date.now() + STATIC_FALLBACK_GRACE_MS;
+
+    let a;
+    for (; ;) {
+        a = await assessSignatureUploads(item);
+        log("upload check:", a.state,
+            "sig:", a.atRisk.map((x) => `${x.name || x.id}(${x.isServiceAccessible})`),
+            "other:", a.other.length);
+
+        const sigAtRisk = a.hasSignature && !a.isStatic && (
+            a.atRisk.length > 0 ||
+            (a.state === "unknown" && recentlyWritten() && FALLBACK_WHEN_READINESS_UNKNOWN)
+        );
+        if (!sigAtRisk) return a.state === "pending" ? "other-pending" : "ready";
+        if (Date.now() >= deadline) break;
+        await sleep(FALLBACK_POLL_MS);
+    }
+
+    warn(`signature image not uploaded to Exchange (${a.state}) — switching to static signature`);
+    if (!(await applyStaticSignature(item, mailbox, a.atRisk))) return "fallback-failed";
+
+    const after = await assessSignatureUploads(item);
+    return after.state === "pending" ? "other-pending" : "fallback-applied";
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  NOTIFICATION CONFIG
@@ -1545,7 +1728,8 @@ const sigCache = {
     get(id, { skipTtl = false } = {}) {
         const entry = sigCache.read()[String(id)];
         if (!entry?.html) return null;
-        if (skipTtl || Date.now() - entry.ts <= SIG_TTL_MS) return entry.html;
+        const ttl = String(id) === DEFAULT_ID ? DEFAULT_SIG_TTL_MS : SIG_TTL_MS;
+        if (skipTtl || Date.now() - entry.ts <= ttl) return entry.html;
         return null;
     },
 
@@ -2419,13 +2603,21 @@ async function writeSignature(item, html, { isSendTime = false, silent = false, 
         fail("too_large", `${bytes}B > ${MAX_SIG_BYTES}B`);
         return false;
     }
-
     if (hostCanSetSignature(item)) {
         const res = await officeAsync(
             (cb) => item.body.setSignatureAsync(payload, { coercionType: Office.CoercionType.Html }, cb),
             { ms: budgetMs(), label: "setSignatureAsync" }
         );
-        if (res) { log(`signature written (${bytes}B)`); return true; }
+        if (res) {
+            log(`signature written (${bytes}B)`);
+            await setItemProps(item, {
+                [P_SIG_WRITTEN_AT]: Date.now(),
+                [P_SIG_HAS_IMG]: /<img\b/i.test(payload) ? "1" : "0",
+                [P_UPLOAD_BLOCKED]: null,
+                [P_STATIC_FALLBACK]: sigId === STATIC_SIG_ID ? "1" : null,
+            }).catch(() => { });
+            return true;
+        }
     } else if (!isSendTime) {
         log("setSignatureAsync unavailable at compose on this host — deferring the write to send");
         return false;
@@ -2665,12 +2857,12 @@ async function onSendCore(item, mailbox) {
 
 function makeCompleter(label, t0, event, args) {
     let done = false;
-    return () => {
+    return (override) => {
         if (done) return;
         done = true;
         flushSigCache();
         timed(label, t0);
-        try { event.completed(args); } catch (e) { err("event.completed threw:", e); }
+        try { event.completed(override ?? args); } catch (e) { err("event.completed threw:", e); }
     };
 }
 
@@ -2827,22 +3019,46 @@ const onSendHandler = async function (event = { completed: () => { } }) {
         if (!item) return complete();
         invalidateProps(item);
         invalidateCaches();
-        log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()}`);
-
-        // v7.9.2: Always reports success since the module is inlined.
+        await resolveSender(item, mailbox);
+        log(`onSendHandler start — ${CB_VERSION} on ${detectPlatform()} account=${accountKey()}`);
         logHcsStatus("onSendHandler", { always: true });
-
         await restoreStickyError(item, { show: false });
 
-        const budget = isColdRuntime() ? SEND_BUDGET_MS_COLD : SEND_BUDGET_MS;
-        await withTimeout(onSendCore(item, mailbox), budget, "onSendCore");
+        // Once the static fallback is on the item, don't let send-time verification
+        // put the image signature back (e.g. on a resend after a block).
+        if ((await getItemProp(item, P_STATIC_FALLBACK)) === "1") {
+            log("static signature already applied — skipping signature re-evaluation");
+        } else {
+            const budget = isColdRuntime() ? SEND_BUDGET_MS_COLD : SEND_BUDGET_MS;
+            await withTimeout(onSendCore(item, mailbox), budget, "onSendCore")
+                .catch((e) => { warn("onSendCore timeout/error:", e.message); _writeSeq++; });
+        }
+
+        // Signature image not uploaded yet → swap to the static signature (no waiting).
+        const sig = await resolveInlineUploadsAtSend(item, mailbox);
+        log(`send upload resolution: ${sig}`);
+        if (sig !== "other-pending" && sig !== "fallback-failed") return complete();
+
+        // Only the user's own images (or a failed swap) remain: wait, then block once.
+        const alreadyBlocked = (await getItemProp(item, P_UPLOAD_BLOCKED)) === "1";
+        const upload = await waitForInlineUploads(item, {
+            maxWaitMs: alreadyBlocked ? 8_000 : UPLOAD_SETTLE_MS,
+        });
+        if (upload === "pending" && !alreadyBlocked) {
+            await setItemProps(item, { [P_UPLOAD_BLOCKED]: "1" }).catch(() => { });
+            return complete({
+                allowEvent: false,
+                errorMessage: "An image in this message is still uploading. Please wait a few seconds and click Send again.",
+            });
+        }
+        if (upload === "pending") warn("upload still pending on the second attempt — allowing send");
+        return complete();
     } catch (e) {
-        warn("onSend timeout/error:", e.message);
-        _writeSeq++;
-        if (!hasFailure()) recordFailure("offline", `onSendCore: ${e.message}`);
+        warn("onSend error:", e.message);
+        if (!hasFailure()) recordFailure("offline", `onSend: ${e.message}`);
         if (!wasReported()) reportOutcome(item, "failed", { action: false });
     } finally {
-        complete();
+        complete();   // no-op if already completed; allows by default
     }
 };
 
